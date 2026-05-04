@@ -1,0 +1,50 @@
+# Margin / KI actions: user_template must include "{text}".
+# topic: discuss | change | evaluate (default change if omitted in older files).
+margin_actions:
+  - id: devil_advocate
+    label: Devil's advocate
+    topic: discuss
+    system_prompt: >-
+      Argue against the thesis and assumptions in the text. Be concise, specific, and constructive.
+      Reply with bullet points only—no preamble.
+    user_template: "Play devil's advocate on:\n\n{text}"
+  - id: clarify_intent
+    label: Clarify intent
+    topic: discuss
+    system_prompt: >-
+      Restate what the author is trying to achieve and name any ambiguities or missing stakes.
+      Reply in short paragraphs—no preamble.
+    user_template: "Clarify intent and gaps in:\n\n{text}"
+  - id: summarize
+    label: Summarize
+    topic: change
+    system_prompt: "Summarize in 2–4 short sentences. Reply with summary only—no preamble."
+    user_template: "Summarize:\n\n{text}"
+  - id: grammar
+    label: Fix Grammar
+    topic: change
+    system_prompt: >-
+      Fix grammar and spelling only. Preserve meaning and tone.
+      Reply with corrected text only—no preamble.
+    user_template: "Fix grammar:\n\n{text}"
+  - id: tone
+    label: Change Tone
+    topic: change
+    system_prompt: >-
+      Rewrite in clear, neutral-professional tone. Preserve facts and intent.
+      Reply with rewritten text only—no preamble.
+    user_template: "Change tone to neutral-professional:\n\n{text}"
+  - id: latex
+    label: Check LaTeX
+    topic: change
+    system_prompt: >-
+      Review for broken LaTeX: unclosed $ or $$, mismatched braces, and common mistakes.
+      Reply with a short list of issues and suggested fixes only.
+    user_template: "Check LaTeX in this excerpt:\n\n{text}"
+  - id: brainstorm
+    label: Brainstorm
+    topic: change
+    system_prompt: >-
+      Build on the text with concise bullet ideas. Do not repeat the text verbatim.
+      Reply with bullets only—no preamble.
+    user_template: "Brainstorm from:\n\n{text}"

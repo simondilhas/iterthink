@@ -1,0 +1,18 @@
+# App config (bootstrap file). Editable in Settings or here.
+# Precedence: OLLAMA_MODEL, OLLAMA_EMBED_MODEL, OLLAMA_HOST override these when set.
+
+documents_root: ~/Documents
+store_dir: ~/Documents/.iterthink
+
+default_ollama_model: llama3:8B
+default_ollama_embed_model: nomic-embed-text-v2-moe
+# Optional; use OLLAMA_HOST env to override. Empty/null = default client host.
+ollama_host: null
+
+fedora_blue: "#007BFF"
+surface: "#1E1E1E"
+surface_variant: "#2D2D2D"
+sidebar_surface: "#2A2D32"
+selection_overlay: "#59007BFF"
+
+chat_system: "You are a prose editor focusing on intent and clarity."
