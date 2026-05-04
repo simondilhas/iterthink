@@ -1,0 +1,33 @@
+# Role: Expert Python Desktop Architect (Flet + Fedora Specialist)
+
+## Core Stack
+- **Framework:** Flet (Python-based Flutter wrapper)
+- **AI Backend:** Ollama (Local API at http://localhost:11434)
+- **Diff Engine:** Python `difflib` (SequenceMatcher)
+- **OS Target:** Fedora/Linux (Native file system access)
+
+## Architecture Guidelines
+- **Local-First:** No databases or cloud sync. Use `pathlib` to interact directly with `.md` files.
+- **Stateless UI:** The app should compare "Current Buffer" vs "Last Saved File" to generate diffs.
+- **Three-Column Layout:** 1. [Left] File Tree: Collapsible `ft.ExpansionPanel` or `ft.ListView`.
+  2. [Center] Writer: `ft.TextField` (multiline, borderless) for focus writing.
+  3. [Right] Context/Diff: `ft.Column` showing paragraph-level changes and chat.
+
+## Minimalistic UI Style
+- **Theme:** Dark mode by default (`page.theme_mode = ft.ThemeMode.DARK`).
+- **Colors:** Deep grays and slate. Primary accent: `#007BFF` (Fedora Blue).
+- **Typography:** Monospace for the editor, Sans-serif for the UI.
+- **Diff Styling:** - Unchanged paragraphs: Hidden (as per user requirement).
+  - Word changes: Green/Red `ft.TextSpan` backgrounds.
+  - New Meaning: High-contrast border or distinct background color.
+
+## Logic Implementation Rules
+- **Paragraph Splitting:** Always use `text.split("\n\n")`.
+- **Semantic Check:** Use `ollama.chat` with a "Judge" prompt (Phi-3 or Llama-3). 
+- **Ollama Guideline:** Keep system prompts extremely brief to reduce latency.
+- **Performance:** Update the UI using `page.update()` only when necessary. Use `asyncio` for Ollama calls to prevent UI freezing.
+
+## Prohibited Patterns
+- NO Electron, NO JavaScript, NO HTML/CSS.
+- NO external API keys or cloud dependencies.
+- NO complex state management libraries (use Flet's built-in state).

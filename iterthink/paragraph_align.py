@@ -414,7 +414,7 @@ def compute_alignment(old_text: str, new_text: str, threshold: float = 0.55) -> 
         elif match.similarity >= 0.75 or has_word_changes:
             status = "minor"
         elif match.similarity >= 0.55:
-            status = "medium"
+            status = "major"
         else:
             status = "major"
         label = "unchanged" if match.old_idx == match.new_idx else "moved"

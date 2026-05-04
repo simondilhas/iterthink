@@ -12,6 +12,7 @@ from iterthink import config
 from iterthink.ollama_util import chat_response_text
 
 SemanticKind = Literal["STABLE", "NEW"]
+RewriteVsMajor = Literal["rewritten", "major"]
 
 # Low-opacity highlights (ARGB ~25%)
 _BG_NEW = "#402ECC71"
@@ -127,3 +128,33 @@ async def judge_semantic(ollama: Any, model: str, original: str, revised: str) -
     except BaseException:
         pass
     return "STABLE"
+
+
+async def judge_rewritten_vs_major(ollama: Any, model: str, original: str, revised: str) -> RewriteVsMajor:
+    """LLM tie-break: surface rewrite vs deeper semantic rewrite (rewritten)."""
+    messages = [
+        {
+            "role": "system",
+            "content": "Reply with exactly one word: rewritten or major. No punctuation.",
+        },
+        {
+            "role": "user",
+            "content": (
+                "Compare paragraph A vs B after a heavy text edit.\n"
+                "major = same core meaning and intent, mostly rephrase or reorder.\n"
+                "rewritten = main point, recommendation, facts, or stance materially changed.\n\n"
+                f"A:\n{_clip(original)}\n\nB:\n{_clip(revised)}"
+            ),
+        },
+    ]
+    try:
+        resp = await ollama.chat(model=model, messages=messages, stream=False)
+        raw = (chat_response_text(resp) or "").strip().lower()
+        for token in raw.replace(",", " ").split():
+            if "rewritten" in token:
+                return "rewritten"
+            if token == "major" or token.startswith("major"):
+                return "major"
+    except BaseException:
+        pass
+    return "major"

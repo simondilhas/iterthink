@@ -17,8 +17,8 @@
 #define MyAppPublisher "Iterthink"
 ; Path from this .iss file (packaging\windows\) to Flet output at repo root:
 #define MyFletBuildDir "..\..\build\windows"
-; Normalized from pyproject [project].name "iterthink-local" — change if Flet names the exe differently:
-#define MyAppExeName "iterthink_local.exe"
+; Align with Flet output under build\windows (from [project].name "iterthink"); adjust if the built .exe name differs:
+#define MyAppExeName "iterthink.exe"
 
 [Setup]
 AppId={{A8B9C0D1-E2F3-4567-8901-23456789ABCD}}

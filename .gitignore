@@ -1,5 +1,7 @@
 .venv/
 venv/
+.iterthink/
+**/snapshots/
 build/
 dist/
 __pycache__/

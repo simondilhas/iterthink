@@ -3,7 +3,7 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "iterthink-local"
+name = "iterthink"
 version = "0.1.0"
 description = "Iterthink local Markdown writer (Flet + Ollama)"
 requires-python = ">=3.11"
@@ -11,11 +11,22 @@ dependencies = [
     "flet>=0.80.0",
     "ollama>=0.4.0",
     "PyYAML>=6.0",
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.13.0",
+    "numpy>=1.26.0",
+    "scikit-learn>=1.4.0",
+    "rapidfuzz>=3.6.0",
 ]
+
+[project.scripts]
+iterthink = "iterthink.__main__:cli"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["iterthink*"]
+
+[tool.setuptools.package-data]
+iterthink = ["assets/*.png", "assets/*.svg", "help.md", "defaults/*.yaml"]
 
 [tool.flet]
 product = "Iterthink"
@@ -35,4 +46,5 @@ exclude = [
     "packaging",
     "docs",
     ".pytest_cache",
+    "alembic",
 ]

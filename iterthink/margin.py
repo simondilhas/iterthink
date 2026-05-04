@@ -113,6 +113,24 @@ def _consume_block(
     flush()
 
 
+def join_paragraphs(parts: list[str]) -> str:
+    """Inverse of ``split_paragraphs`` for round-tripping paragraph lists (``\\n\\n`` between slots)."""
+    if not parts:
+        return ""
+    return "\n\n".join(parts)
+
+
+def replace_paragraph_at_index(text: str, idx: int, new_paragraph: str) -> str:
+    """Return text with paragraph at ``idx`` replaced (same rules as ``split_paragraphs``)."""
+    parts = split_paragraphs(text)
+    if not parts:
+        parts = [""]
+    if idx < 0 or idx >= len(parts):
+        return text
+    parts[idx] = new_paragraph
+    return join_paragraphs(parts)
+
+
 def split_paragraphs(text: str) -> list[str]:
     """
     Split text into paragraphs aligned with common markdown block boundaries.
@@ -161,13 +179,32 @@ def paragraph_slot_weights(paragraphs: list[str], content_width: float) -> list[
     return [float(max(1, wrapped_line_count(p, content_width))) for p in paragraphs]
 
 
+def paragraph_compose_slot_weights(paragraphs: list[str], content_width: float) -> list[float]:
+    """
+    Weights for aligning a per-paragraph margin column with a multiline TextField.
+
+    ``join_paragraphs`` inserts ``\\n\\n`` between slots; the editor shows one blank line
+    between blocks. Count that as one extra wrapped line on each slot except the last
+    so cumulative slot heights track the first line of each paragraph.
+    """
+    base = paragraph_slot_weights(paragraphs, content_width)
+    n = len(base)
+    if n <= 1:
+        return base
+    out: list[float] = []
+    for i, w in enumerate(base):
+        extra = 1.0 if i < n - 1 else 0.0
+        out.append(float(w) + extra)
+    return out
+
+
 def estimate_total_editor_height(
     paragraphs: list[str],
     content_width: float,
     line_height: float = 22.5,
 ) -> float:
     """Fallback total height when TextField reports viewport instead of full content."""
-    wts = paragraph_slot_weights(paragraphs, content_width)
+    wts = paragraph_compose_slot_weights(paragraphs, content_width)
     return sum(max(28.0, w * line_height) for w in wts)
 
 

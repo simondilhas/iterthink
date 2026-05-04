@@ -10,7 +10,9 @@ from typing import Any
 
 import yaml
 
-_DEFAULTS_DIR = Path(__file__).resolve().parent / "defaults"
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_DEFAULTS_DIR = _PACKAGE_DIR / "defaults"
+APP_SYMBOL_PNG = _PACKAGE_DIR / "assets" / "fav.png"
 
 
 def app_config_dir() -> Path:
