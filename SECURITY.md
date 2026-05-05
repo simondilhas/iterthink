@@ -4,9 +4,7 @@
 
 Please report security issues **privately** so we can assess and fix them before public disclosure.
 
-**Preferred:** Use [GitHub Security Advisories](https://docs.github.com/code-security/security-advisories/about-github-security-advisories) for this repository (**Security** tab → **Report a vulnerability**) if that feature is enabled for the repo.
-
-**Otherwise:** Contact the maintainers through a non-public channel they publish for this project (for example a security email listed on the org or repo profile). Do not open a public issue for undisclosed vulnerabilities.
+simon.dilhas@abstract.build
 
 Include:
 

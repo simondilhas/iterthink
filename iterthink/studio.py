@@ -17,7 +17,8 @@ from ollama import AsyncClient
 
 from iterthink import checks as checks_mod
 from iterthink import checks_runner
-from iterthink import config, prompts, settings_ui, store_db, version_storage
+from iterthink import config, document_import, pdf_visual_diff, plan_compare_panel, plan_picture_viewer
+from iterthink import prompts, settings_ui, store_db, version_storage
 from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS, TOPIC_EVALUATE
 from iterthink.compare_layout import pair_paragraphs_for_compare
 from iterthink.diff_card import build_unified_spans
@@ -43,6 +44,8 @@ AUTOSAVE_IDLE_SEC = 6.0
 COLLAPSED_RAIL_WIDTH_PX = 36
 # Expanded sidebars stay fixed width (not a fraction of window) so fullscreen does not widen them.
 SIDEBAR_EXPANDED_WIDTH_PX = 280
+# Left explorer search row and KI topic tab strip share one toolbar height.
+SIDEBAR_TOOLBAR_ROW_H_PX = 36
 # KI TabBarView needs a minimum height; actual height grows with measured pill rows.
 KI_TAB_BODY_MIN_HEIGHT_PX = 96
 # Vertical padding inside each tab page (above/below the pill row).
@@ -51,6 +54,7 @@ KI_TAB_PAGE_PAD_V_PX = 8
 KI_TAB_BAR_TO_PILLS_GAP_PX = 12
 # Quick-action pills in the KI tab strip (text-only, compact).
 KI_PILL_TEXT_SIZE = 10
+KI_TAB_ICON_PX = 18
 READING_MAX_PX = 720
 # Compose reading column uses this fraction of the *laid-out* compose width, capped at READING_MAX_PX.
 COMPOSE_READING_WIDTH_FRAC = 0.92
@@ -58,7 +62,9 @@ _DIFF_SPAN_CHAR_CAP = 120_000
 
 _COMPARE_KEY_DRAFT = "__draft__"
 _COMPARE_KEY_AI = "__ai_preview__"
-CompareCandidateSource = Literal["draft", "ai_preview", "snapshot"]
+_COMPARE_KEY_PDF_ORIGINAL = "__pdf_original__"
+_COMPARE_KEY_DOCX_ORIGINAL = "__docx_original__"
+CompareCandidateSource = Literal["draft", "ai_preview", "snapshot", "pdf_original", "docx_original"]
 
 _COMPARE_COL_FONT_SIZE = 14
 _COMPARE_COL_LINE_HEIGHT = 1.6
@@ -174,6 +180,17 @@ class MarkdownStudio:
         self._compose_tab_inline_rename_active: bool = False
         self._compose_tab_rename_lock = asyncio.Lock()
 
+        self._compare_pdf_peer_snapshot_id: int | None = None
+        self._compare_pdf_scroll_guard: bool = False
+        self._compare_pdf_left_max_scroll: float = 1.0
+        self._compare_pdf_right_max_scroll: float = 1.0
+        self._plan_overlay_mode: bool = False
+        self._plan_overlay_gen: int = 0
+        self._fp_import = ft.FilePicker()
+        self._import_kind: str | None = None
+        self._import_flow: str | None = None
+        self._import_target_md: Path | None = None
+
         self._header_hide_gen: int = 0
         self._header_shell: ft.Container | None = None
         self._header_menu_open: int = 0
@@ -216,9 +233,15 @@ class MarkdownStudio:
         self._compose_sparkle_column = ft.Column(spacing=0, tight=True, width=_COMPOSE_MARGIN_COL_W)
         self._compose_sparkle_roots: list[ft.Container] = []
 
+        self._compose_plan_host = ft.Container(expand=True, visible=False)
+        self._compose_editor_shell_wrapped = ft.Container(content=self._editor_shell, expand=True)
         self._compose_reading_inner = ft.Row(
             [
-                self._editor_shell,
+                ft.Column(
+                    [self._compose_plan_host, self._compose_editor_shell_wrapped],
+                    expand=True,
+                    spacing=8,
+                ),
                 ft.Container(content=self._compose_sparkle_column, width=_COMPOSE_MARGIN_COL_W),
             ],
             expand=True,
@@ -291,7 +314,7 @@ class MarkdownStudio:
             [
                 ft.Row(
                     [
-                        ft.Text("Comparison: ", size=14, color=ft.Colors.GREY_400),
+                        ft.Text("Compare: ", size=14, color=ft.Colors.GREY_400),
                         self._compare_candidate_dropdown,
                     ],
                     tight=True,
@@ -322,6 +345,50 @@ class MarkdownStudio:
             spacing=0,
             padding=ft.padding.symmetric(horizontal=4, vertical=2),
         )
+        self._compare_paragraph_layer = ft.Container(content=self._compare_rows_listview, expand=True)
+        self._compare_pdf_left_lv = ft.ListView(
+            expand=True,
+            spacing=8,
+            padding=ft.padding.all(8),
+            on_scroll=self._on_compare_pdf_scroll_left,
+        )
+        self._compare_pdf_right_lv = ft.ListView(
+            expand=True,
+            spacing=6,
+            padding=ft.padding.all(8),
+            on_scroll=self._on_compare_pdf_scroll_right,
+        )
+        self._plan_compare = plan_compare_panel.build_plan_compare_panel(
+            on_baseline=lambda e: self.page.run_task(self._on_plan_pdf_baseline_async, e),
+            on_candidate=lambda e: self.page.run_task(self._on_plan_pdf_candidate_async, e),
+            on_overlay=self._on_plan_overlay_changed,
+        )
+        self._plan_compare.overlay_list.visible = False
+        self._plan_compare.overlay_list.on_scroll = self._on_compare_pdf_scroll_right
+        self._compare_pdf_right_column = ft.Column(
+            [self._compare_pdf_right_lv, self._plan_compare.overlay_list],
+            expand=True,
+            spacing=0,
+        )
+        self._compare_pdf_split_row = ft.Row(
+            [
+                ft.Container(
+                    content=self._compare_pdf_left_lv,
+                    expand=True,
+                    border=ft.border.all(1, ft.Colors.with_opacity(0.35, ft.Colors.GREY_600)),
+                    border_radius=8,
+                ),
+                ft.Container(
+                    content=self._compare_pdf_right_column,
+                    expand=True,
+                    border=ft.border.all(1, ft.Colors.with_opacity(0.35, ft.Colors.GREY_600)),
+                    border_radius=8,
+                ),
+            ],
+            expand=True,
+            spacing=8,
+        )
+        self._compare_pdf_layer = ft.Container(content=self._compare_pdf_split_row, expand=True, visible=False)
         self._compare_editor_holder = ft.Container(content=self._compare_editor, visible=False, height=0)
         # Floating card shown on hover over an Analyse symbol in a row's eval cell.
         # Sits inside the Stack overlaying the listview so it can be positioned per row.
@@ -345,13 +412,15 @@ class MarkdownStudio:
         )
         self._compare_body_stack = ft.Stack(
             controls=[
-                ft.Container(content=self._compare_rows_listview, expand=True),
+                self._compare_paragraph_layer,
+                self._compare_pdf_layer,
                 self._result_card_overlay,
             ],
             expand=True,
         )
         self._compare_tab_body = ft.Column(
             [
+                self._plan_compare.host,
                 ft.Row(
                     [self._compare_body_stack],
                     expand=True,
@@ -474,6 +543,17 @@ class MarkdownStudio:
         self._autosave_gen: int = 0
 
         self.tree_column = ft.Column(spacing=0, tight=True, scroll=ft.ScrollMode.AUTO, expand=True)
+        self._tree_import_btn = ft.IconButton(
+            ft.Icons.FILE_UPLOAD_OUTLINED,
+            icon_size=KI_TAB_ICON_PX,
+            icon_color=config.FEDORA_BLUE,
+            tooltip="Import…",
+            visual_density=ft.VisualDensity.COMPACT,
+            style=ft.ButtonStyle(padding=ft.padding.all(2)),
+            height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+            width=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+            on_click=lambda _e: self.page.run_task(self._tree_import_new_clicked),
+        )
 
         self.tree_search_field = ft.TextField(
             hint_text="Search files…",
@@ -482,19 +562,23 @@ class MarkdownStudio:
             bgcolor=config.SURFACE,
             border_radius=8,
             text_size=12,
+            height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+            text_vertical_align=ft.VerticalAlignment.CENTER,
             cursor_color=config.FEDORA_BLUE,
             border_color=ft.Colors.GREY_700,
             focused_border_color=config.FEDORA_BLUE,
-            content_padding=ft.padding.symmetric(horizontal=8, vertical=6),
+            content_padding=ft.padding.symmetric(horizontal=8, vertical=0),
             expand=True,
             on_change=self._on_tree_search_change,
         )
         self._tree_add_menu = ft.PopupMenuButton(
             icon=ft.Icons.ADD,
-            icon_size=22,
+            icon_size=KI_TAB_ICON_PX,
             icon_color=config.FEDORA_BLUE,
             tooltip="New…",
-            style=ft.ButtonStyle(padding=ft.padding.all(4)),
+            style=ft.ButtonStyle(padding=ft.padding.all(2)),
+            height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+            width=float(SIDEBAR_TOOLBAR_ROW_H_PX),
             menu_position=ft.PopupMenuPosition.UNDER,
             items=[
                 ft.PopupMenuItem(
@@ -556,14 +640,30 @@ class MarkdownStudio:
 
         self._ki_tab_bar = ft.TabBar(
             tabs=[
-                ft.Tab(label="Discuss"),
-                ft.Tab(label="Change"),
-                ft.Tab(label="Analyse"),
+                ft.Tab(
+                    icon=ft.Icon(ft.Icons.CHAT_BUBBLE, size=KI_TAB_ICON_PX),
+                    tooltip="Discuss",
+                    height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+                ),
+                ft.Tab(
+                    icon=ft.Icon(ft.Icons.MODE_EDIT, size=KI_TAB_ICON_PX),
+                    tooltip="Change",
+                    height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+                ),
+                ft.Tab(
+                    icon=ft.Icon(ft.Icons.INSIGHTS, size=KI_TAB_ICON_PX),
+                    tooltip="Analyse",
+                    height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+                ),
             ],
             scrollable=False,
+            secondary=True,
             tab_alignment=ft.TabAlignment.FILL,
             indicator_color=config.FEDORA_BLUE,
             divider_color=ft.Colors.with_opacity(0.2, ft.Colors.GREY_700),
+            label_padding=ft.padding.symmetric(horizontal=6, vertical=0),
+            indicator_thickness=1.5,
+            height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
         )
         self._ki_tab_bar_view = ft.TabBarView(
             controls=[
@@ -593,7 +693,7 @@ class MarkdownStudio:
         )
         self._ki_sticky_tab_header = ft.Container(
             bgcolor=ft.Colors.TRANSPARENT,
-            padding=ft.padding.only(bottom=2),
+            padding=ft.padding.all(0),
             content=self._ki_tab_bar,
         )
         self._ki_tabs_inner_column = ft.Column(
@@ -1486,6 +1586,40 @@ class MarkdownStudio:
             return self._compare_editor.value or ""
         return self.editor.value or ""
 
+    def _compare_should_offer_pdf_original(self) -> bool:
+        if not self.current_path:
+            return False
+        with session_scope() as s:
+            rp = self.current_path.resolve()
+            if self._compare_candidate_source == "pdf_original":
+                if self._compare_pdf_peer_snapshot_id is not None:
+                    return bool(
+                        version_storage.get_version_pdf_relpath(s, self._compare_pdf_peer_snapshot_id)
+                    )
+                return version_storage.document_has_any_pdf(s, rp)
+            if self._compare_candidate_source == "snapshot" and self._compare_snapshot_version_id is not None:
+                return bool(
+                    version_storage.get_version_pdf_relpath(s, self._compare_snapshot_version_id)
+                )
+            return version_storage.document_has_any_pdf(s, rp)
+
+    def _compare_should_offer_docx_original(self) -> bool:
+        if not self.current_path:
+            return False
+        with session_scope() as s:
+            rp = self.current_path.resolve()
+            if self._compare_candidate_source == "docx_original":
+                if self._compare_pdf_peer_snapshot_id is not None:
+                    return bool(
+                        version_storage.get_version_docx_relpath(s, self._compare_pdf_peer_snapshot_id)
+                    )
+                return version_storage.document_has_any_docx(s, rp)
+            if self._compare_candidate_source == "snapshot" and self._compare_snapshot_version_id is not None:
+                return bool(
+                    version_storage.get_version_docx_relpath(s, self._compare_snapshot_version_id)
+                )
+            return version_storage.document_has_any_docx(s, rp)
+
     def _refresh_compare_tab_candidate_ui(self) -> None:
         opts: list[ft.dropdown.Option] = [ft.dropdown.Option(key=_COMPARE_KEY_DRAFT, text="Draft")]
         if self._compare_candidate_source == "ai_preview" and self._pending_ai_accept_action_id:
@@ -1502,6 +1636,10 @@ class MarkdownStudio:
                         text=version_storage.snapshot_display_text(sn),
                     )
                 )
+        if self._compare_should_offer_pdf_original():
+            opts.append(ft.dropdown.Option(key=_COMPARE_KEY_PDF_ORIGINAL, text="Original PDF"))
+        if self._compare_should_offer_docx_original():
+            opts.append(ft.dropdown.Option(key=_COMPARE_KEY_DOCX_ORIGINAL, text="Original Word"))
         self._compare_candidate_dropdown.options = opts
         keys_ok = {o.key for o in opts}
         if self._compare_candidate_source == "draft":
@@ -1513,10 +1651,33 @@ class MarkdownStudio:
         elif self._compare_candidate_source == "snapshot" and self._compare_snapshot_version_id is not None:
             sk = str(self._compare_snapshot_version_id)
             self._compare_candidate_dropdown.value = sk if sk in keys_ok else _COMPARE_KEY_DRAFT
+        elif self._compare_candidate_source == "pdf_original":
+            self._compare_candidate_dropdown.value = (
+                _COMPARE_KEY_PDF_ORIGINAL if _COMPARE_KEY_PDF_ORIGINAL in keys_ok else _COMPARE_KEY_DRAFT
+            )
+        elif self._compare_candidate_source == "docx_original":
+            self._compare_candidate_dropdown.value = (
+                _COMPARE_KEY_DOCX_ORIGINAL if _COMPARE_KEY_DOCX_ORIGINAL in keys_ok else _COMPARE_KEY_DRAFT
+            )
         else:
             self._compare_candidate_dropdown.value = _COMPARE_KEY_DRAFT
+        if self._compare_candidate_source == "pdf_original" and _COMPARE_KEY_PDF_ORIGINAL not in keys_ok:
+            self._compare_candidate_source = "draft"
+            self._compare_pdf_peer_snapshot_id = None
+            self._compare_candidate_dropdown.value = _COMPARE_KEY_DRAFT
+            self._sync_compare_pdf_layers_visibility()
+            if self._main_tab_index == 1:
+                self._rebuild_compare_paragraph_ui()
+        if self._compare_candidate_source == "docx_original" and _COMPARE_KEY_DOCX_ORIGINAL not in keys_ok:
+            self._compare_candidate_source = "draft"
+            self._compare_pdf_peer_snapshot_id = None
+            self._compare_candidate_dropdown.value = _COMPARE_KEY_DRAFT
+            self._sync_compare_pdf_layers_visibility()
+            if self._main_tab_index == 1:
+                self._rebuild_compare_paragraph_ui()
         if _ctrl_on_page(self._compare_candidate_dropdown):
             self._compare_candidate_dropdown.update()
+        self._refresh_plan_compare_bar()
 
     def _sync_version_toolbar_state(self) -> None:
         has_doc = self.current_path is not None
@@ -1537,9 +1698,11 @@ class MarkdownStudio:
         return merged != (self.editor.value or "")
 
     def _refresh_compare_bulk_buttons(self) -> None:
+        n = len(self._compare_right_fields)
         pending_apply = self._compare_has_pending_bulk_apply()
-        self._compare_approve_all_btn.visible = pending_apply
-        self._compare_decline_all_btn.visible = pending_apply
+        hide_bulk = self._compare_candidate_source in ("pdf_original", "docx_original")
+        self._compare_approve_all_btn.visible = pending_apply and not hide_bulk
+        self._compare_decline_all_btn.disabled = n == 0 or hide_bulk
         if _ctrl_on_page(self._compare_approve_all_btn):
             self._compare_approve_all_btn.update()
         if _ctrl_on_page(self._compare_decline_all_btn):
@@ -1553,12 +1716,29 @@ class MarkdownStudio:
             self._compare_candidate_source = "draft"
             self._compare_snapshot_version_id = None
             self._pending_ai_accept_action_id = None
+            self._compare_pdf_peer_snapshot_id = None
             self._compare_editor.value = self.editor.value or ""
             self._capture_compare_baseline_snapshot()
             if _ctrl_on_page(self._compare_editor):
                 self._compare_editor.update()
+            self._sync_compare_pdf_layers_visibility()
+            self._rebuild_compare_paragraph_ui()
         elif v == _COMPARE_KEY_AI:
             return
+        elif v == _COMPARE_KEY_PDF_ORIGINAL:
+            peer = self._compare_snapshot_version_id if self._compare_candidate_source == "snapshot" else None
+            self._compare_pdf_peer_snapshot_id = peer
+            self._compare_candidate_source = "pdf_original"
+            self._pending_ai_accept_action_id = None
+            self._rebuild_compare_pdf_panes()
+            self._sync_compare_pdf_layers_visibility()
+        elif v == _COMPARE_KEY_DOCX_ORIGINAL:
+            peer = self._compare_snapshot_version_id if self._compare_candidate_source == "snapshot" else None
+            self._compare_pdf_peer_snapshot_id = peer
+            self._compare_candidate_source = "docx_original"
+            self._pending_ai_accept_action_id = None
+            self._rebuild_compare_docx_panes()
+            self._sync_compare_pdf_layers_visibility()
         else:
             try:
                 vid = int(v)
@@ -1566,6 +1746,7 @@ class MarkdownStudio:
                 return
             self._compare_candidate_source = "snapshot"
             self._compare_snapshot_version_id = vid
+            self._compare_pdf_peer_snapshot_id = None
             self._pending_ai_accept_action_id = None
             try:
                 with session_scope() as s:
@@ -1576,7 +1757,16 @@ class MarkdownStudio:
             except BaseException:
                 self._snack("Could not load that version.")
                 return
+            self._sync_compare_pdf_layers_visibility()
+            self._rebuild_compare_paragraph_ui()
+        # Dropdown sits on the Compare tab label; user may pick a candidate without clicking the tab first.
+        if self._main_tab_index != 1:
+            self._main_tabs.selected_index = 1
+            if _ctrl_on_page(self._main_tabs):
+                self._main_tabs.update()
+            await self._sync_tab_switch_async(1)
         self._refresh_compare_diff_immediate()
+        self._refresh_compare_bulk_buttons()
         self._refresh_title_bar()
 
     def _on_main_tabs_change(self, e: ft.ControlEvent) -> None:
@@ -1594,7 +1784,14 @@ class MarkdownStudio:
             if self._compare_candidate_source == "draft":
                 self._compare_editor.value = self.editor.value or ""
                 self._capture_compare_baseline_snapshot()
-            self._rebuild_compare_paragraph_ui()
+            if self._compare_candidate_source == "pdf_original":
+                self._rebuild_compare_pdf_panes()
+                self._sync_compare_pdf_layers_visibility()
+            elif self._compare_candidate_source == "docx_original":
+                self._rebuild_compare_docx_panes()
+                self._sync_compare_pdf_layers_visibility()
+            else:
+                self._rebuild_compare_paragraph_ui()
         elif prev == 1 and new_ix == 0:
             if self._compare_candidate_source == "draft":
                 self._sync_compare_buffer_from_fields()
@@ -1605,6 +1802,8 @@ class MarkdownStudio:
         if new_ix == 0:
             self._margin_gen += 1
             await self._debounced_compose_rebuild(self._margin_gen)
+        elif new_ix == 1:
+            self._refresh_plan_compare_bar()
         self._refresh_title_bar()
 
     def _compare_para_text_style(self) -> ft.TextStyle:
@@ -1941,11 +2140,21 @@ class MarkdownStudio:
         self.page.run_task(self._debounced_refine_compare_slots, self._compare_refine_gen)
 
     def _refresh_compare_diff_immediate(self) -> None:
+        if self._compare_candidate_source == "pdf_original":
+            self._rebuild_compare_pdf_panes()
+            self._sync_compare_pdf_layers_visibility()
+            return
+        if self._compare_candidate_source == "docx_original":
+            self._rebuild_compare_docx_panes()
+            self._sync_compare_pdf_layers_visibility()
+            return
         self._rebuild_compare_paragraph_ui()
 
     async def _debounced_compare_diff(self, gen: int) -> None:
         await asyncio.sleep(0.12)
         if gen != self._compare_diff_gen:
+            return
+        if self._compare_candidate_source in ("pdf_original", "docx_original"):
             return
         cand = self._compare_editor.value or ""
         n_para = len(split_paragraphs(cand))
@@ -2369,6 +2578,7 @@ class MarkdownStudio:
             return
         self._rebuild_compose_sparkle_slots()
         self._apply_compose_sparkle_heights()
+        self._refresh_compose_plan_surface()
 
     async def _autosave_after_idle(self, gen: int) -> None:
         await asyncio.sleep(AUTOSAVE_IDLE_SEC)
@@ -2423,7 +2633,354 @@ class MarkdownStudio:
         if self._fp_documents not in self.page.services:
             self.page.services.append(self._fp_documents)
             self.page.services.append(self._fp_store)
+            self.page.services.append(self._fp_import)
             self.page.update()
+
+    def _on_compare_pdf_scroll_left(self, e: ft.OnScrollEvent) -> None:
+        if self._compare_pdf_scroll_guard or self._compare_candidate_source not in ("pdf_original", "docx_original"):
+            return
+        if e.event_type != ft.ScrollType.UPDATE:
+            return
+        self._compare_pdf_left_max_scroll = max(e.max_scroll_extent, 1e-6)
+        ratio = max(0.0, min(1.0, e.pixels / self._compare_pdf_left_max_scroll))
+        target = ratio * max(self._compare_pdf_right_max_scroll, 1e-6)
+        self._compare_pdf_scroll_guard = True
+        self.page.run_task(self._compare_pdf_sync_scroll_right_async, target)
+
+    async def _compare_pdf_sync_scroll_right_async(self, target: float) -> None:
+        try:
+            if self._plan_compare.overlay_list.visible:
+                await self._plan_compare.overlay_list.scroll_to(offset=target, duration=0)
+            else:
+                await self._compare_pdf_right_lv.scroll_to(offset=target, duration=0)
+        finally:
+            self._compare_pdf_scroll_guard = False
+
+    def _on_compare_pdf_scroll_right(self, e: ft.OnScrollEvent) -> None:
+        if self._compare_pdf_scroll_guard or self._compare_candidate_source not in ("pdf_original", "docx_original"):
+            return
+        if e.event_type != ft.ScrollType.UPDATE:
+            return
+        self._compare_pdf_right_max_scroll = max(e.max_scroll_extent, 1e-6)
+        ratio = max(0.0, min(1.0, e.pixels / self._compare_pdf_right_max_scroll))
+        target = ratio * max(self._compare_pdf_left_max_scroll, 1e-6)
+        self._compare_pdf_scroll_guard = True
+        self.page.run_task(self._compare_pdf_sync_scroll_left_async, target)
+
+    async def _compare_pdf_sync_scroll_left_async(self, target: float) -> None:
+        try:
+            await self._compare_pdf_left_lv.scroll_to(offset=target, duration=0)
+        finally:
+            self._compare_pdf_scroll_guard = False
+
+    def _sync_compare_pdf_layers_visibility(self) -> None:
+        show_side_by_side = self._compare_candidate_source in ("pdf_original", "docx_original")
+        self._compare_paragraph_layer.visible = not show_side_by_side
+        self._compare_pdf_layer.visible = show_side_by_side
+        if _ctrl_on_page(self._compare_paragraph_layer):
+            self._compare_paragraph_layer.update()
+        if _ctrl_on_page(self._compare_pdf_layer):
+            self._compare_pdf_layer.update()
+
+    def _refresh_compose_plan_surface(self) -> None:
+        """Show zoom/pan PDF strip on Compose when latest stored PDF is profile ``plan``."""
+        if not self.current_path:
+            self._compose_plan_host.visible = False
+            self._compose_editor_shell_wrapped.expand = True
+            self._compose_editor_shell_wrapped.height = None
+            return
+        with session_scope() as s:
+            det = version_storage.latest_pdf_version_detail(s, self.current_path.resolve())
+        if det is None:
+            self._compose_plan_host.visible = False
+            self._compose_editor_shell_wrapped.expand = True
+            self._compose_editor_shell_wrapped.height = None
+            return
+        _vid, rel, profile = det
+        if profile != "plan":
+            self._compose_plan_host.visible = False
+            self._compose_editor_shell_wrapped.expand = True
+            self._compose_editor_shell_wrapped.height = None
+            return
+        try:
+            pdf_abs = version_storage.pdf_asset_abs_path(rel)
+        except (ValueError, OSError):
+            self._compose_plan_host.visible = False
+            return
+        if not pdf_abs.is_file():
+            self._compose_plan_host.visible = False
+            return
+        try:
+            pages = document_import.render_pdf_to_png_pages(pdf_abs)
+            col = plan_picture_viewer.plan_picture_column(pages)
+            self._compose_plan_host.content = col
+            self._compose_plan_host.visible = True
+            self._compose_editor_shell_wrapped.expand = False
+            self._compose_editor_shell_wrapped.height = 260
+        except BaseException:
+            self._compose_plan_host.visible = False
+            self._compose_editor_shell_wrapped.expand = True
+            self._compose_editor_shell_wrapped.height = None
+        if _ctrl_on_page(self._compose_plan_host):
+            self._compose_plan_host.update()
+        if _ctrl_on_page(self._compose_editor_shell_wrapped):
+            self._compose_editor_shell_wrapped.update()
+
+    def _refresh_plan_compare_bar(self) -> None:
+        if not self.current_path:
+            self._plan_compare.set_bar_visible(False)
+            return
+        with session_scope() as s:
+            pairs = version_storage.list_pdf_version_options(s, self.current_path.resolve())
+        opts = [(str(vid), lbl) for vid, lbl in pairs]
+        plan_compare_panel.fill_pdf_dropdowns(self._plan_compare.baseline_dd, self._plan_compare.candidate_dd, opts)
+        has_pdf = len(opts) > 0
+        self._plan_compare.baseline_dd.disabled = not has_pdf
+        self._plan_compare.candidate_dd.disabled = not has_pdf
+        self._plan_compare.overlay_switch.disabled = len(opts) < 2
+        self._plan_compare.set_bar_visible(has_pdf)
+        if _ctrl_on_page(self._plan_compare.baseline_dd):
+            self._plan_compare.baseline_dd.update()
+        if _ctrl_on_page(self._plan_compare.candidate_dd):
+            self._plan_compare.candidate_dd.update()
+        if _ctrl_on_page(self._plan_compare.overlay_switch):
+            self._plan_compare.overlay_switch.update()
+
+    def _sync_plan_overlay_pane_visibility(self) -> None:
+        show_ov = bool(self._plan_compare.overlay_switch.value)
+        self._plan_overlay_mode = show_ov
+        self._compare_pdf_right_lv.visible = not show_ov
+        self._plan_compare.overlay_list.visible = show_ov
+
+    def _on_plan_overlay_changed(self, e: ft.ControlEvent | None = None) -> None:
+        self._sync_plan_overlay_pane_visibility()
+        self._rebuild_compare_pdf_panes()
+        self.page.run_task(self._refresh_plan_overlay_async)
+
+    async def _on_plan_pdf_baseline_async(self, _e: ft.ControlEvent | None = None) -> None:
+        if self._plan_overlay_mode:
+            await self._refresh_plan_overlay_async()
+        else:
+            self._rebuild_compare_pdf_panes()
+
+    async def _on_plan_pdf_candidate_async(self, _e: ft.ControlEvent | None = None) -> None:
+        if self._plan_overlay_mode:
+            await self._refresh_plan_overlay_async()
+        else:
+            self._rebuild_compare_pdf_panes()
+
+    async def _refresh_plan_overlay_async(self) -> None:
+        if not self.current_path or not self._plan_overlay_mode:
+            return
+        bid_s = self._plan_compare.baseline_dd.value
+        cid_s = self._plan_compare.candidate_dd.value
+        if not bid_s or not cid_s:
+            return
+        try:
+            bid = int(bid_s)
+            cid = int(cid_s)
+        except (TypeError, ValueError):
+            return
+        if bid == cid:
+            self._snack("Pick two different PDF versions for overlay.")
+            return
+        with session_scope() as s:
+            ra = version_storage.get_version_pdf_relpath(s, bid)
+            rb = version_storage.get_version_pdf_relpath(s, cid)
+        if not ra or not rb:
+            return
+        pa = version_storage.pdf_asset_abs_path(ra)
+        pb = version_storage.pdf_asset_abs_path(rb)
+        gen = self._plan_overlay_gen + 1
+        self._plan_overlay_gen = gen
+
+        def _run() -> tuple[list[Path], str | None]:
+            return pdf_visual_diff.diff_pdfs_to_overlay_paths(pa, pb)
+
+        paths, warn = await asyncio.to_thread(_run)
+        if gen != self._plan_overlay_gen:
+            return
+        plan_compare_panel.populate_overlay_list(self._plan_compare.overlay_list, paths)
+        if warn:
+            self._snack(warn)
+        if _ctrl_on_page(self._plan_compare.overlay_list):
+            self._plan_compare.overlay_list.update()
+
+    def _compare_resolve_pdf_asset(self) -> tuple[int, str] | None:
+        """PDF version id and store relpath for the current Compare context."""
+        if not self.current_path:
+            return None
+        rp = self.current_path.resolve()
+        with session_scope() as s:
+            if self._compare_pdf_peer_snapshot_id is not None:
+                rel = version_storage.get_version_pdf_relpath(s, self._compare_pdf_peer_snapshot_id)
+                if rel:
+                    return (self._compare_pdf_peer_snapshot_id, rel)
+                return None
+            return version_storage.latest_pdf_version_for_document(s, rp)
+
+    def _compare_resolve_pdf_asset_right(self) -> tuple[int, str] | None:
+        """Prefer explicit PDF version from Compare bar when set."""
+        if self.current_path and self._plan_compare.candidate_dd.value:
+            try:
+                vid = int(self._plan_compare.candidate_dd.value)
+            except (TypeError, ValueError):
+                return self._compare_resolve_pdf_asset()
+            with session_scope() as s:
+                rel = version_storage.get_version_pdf_relpath(s, vid)
+                if rel:
+                    return (vid, rel)
+        return self._compare_resolve_pdf_asset()
+
+    def _rebuild_compare_pdf_panes(self) -> None:
+        if self._compare_candidate_source == "docx_original":
+            self._rebuild_compare_docx_panes()
+            return
+        self._sync_plan_overlay_pane_visibility()
+        self._compare_pdf_left_lv.controls.clear()
+        self._compare_pdf_right_lv.controls.clear()
+        body = self._compare_editor.value or ""
+        self._compare_pdf_left_lv.controls.append(
+            ft.Container(
+                padding=ft.padding.all(4),
+                content=ft.Text(
+                    body,
+                    selectable=True,
+                    font_family="monospace",
+                    size=_COMPARE_COL_FONT_SIZE,
+                ),
+            )
+        )
+        if self._plan_overlay_mode:
+            if _ctrl_on_page(self._compare_pdf_left_lv):
+                self._compare_pdf_left_lv.update()
+            if _ctrl_on_page(self._compare_pdf_right_lv):
+                self._compare_pdf_right_lv.update()
+            self.page.run_task(self._refresh_plan_overlay_async)
+            return
+
+        resolved = self._compare_resolve_pdf_asset_right()
+        if resolved is None:
+            self._compare_pdf_right_lv.controls.append(
+                ft.Container(
+                    padding=ft.padding.all(12),
+                    content=ft.Text(
+                        "No PDF asset for this comparison.",
+                        color=ft.Colors.ORANGE_200,
+                        size=13,
+                    ),
+                )
+            )
+        else:
+            _, rel = resolved
+            try:
+                pdf_abs = version_storage.pdf_asset_abs_path(rel)
+            except (ValueError, OSError):
+                pdf_abs = None
+            if pdf_abs is None or not pdf_abs.is_file():
+                self._compare_pdf_right_lv.controls.append(
+                    ft.Container(
+                        padding=ft.padding.all(12),
+                        content=ft.Text("PDF file missing on disk.", color=ft.Colors.RED_200, size=13),
+                    )
+                )
+            else:
+                try:
+                    pages = document_import.render_pdf_to_png_pages(pdf_abs)
+                    pic_col = plan_picture_viewer.plan_picture_column(pages, inner_scroll=False)
+                    self._compare_pdf_right_lv.controls.append(
+                        ft.Container(content=pic_col, expand=True)
+                    )
+                except BaseException as ex:
+                    self._compare_pdf_right_lv.controls.append(
+                        ft.Container(
+                            padding=ft.padding.all(12),
+                            content=ft.Text(f"Could not render PDF: {ex}", color=ft.Colors.RED_200, size=12),
+                        )
+                    )
+        if _ctrl_on_page(self._compare_pdf_left_lv):
+            self._compare_pdf_left_lv.update()
+        if _ctrl_on_page(self._compare_pdf_right_lv):
+            self._compare_pdf_right_lv.update()
+
+    def _compare_resolve_docx_asset(self) -> tuple[int, str] | None:
+        if not self.current_path:
+            return None
+        rp = self.current_path.resolve()
+        with session_scope() as s:
+            if self._compare_pdf_peer_snapshot_id is not None:
+                rel = version_storage.get_version_docx_relpath(s, self._compare_pdf_peer_snapshot_id)
+                if rel:
+                    return (self._compare_pdf_peer_snapshot_id, rel)
+                return None
+            return version_storage.latest_docx_version_for_document(s, rp)
+
+    def _rebuild_compare_docx_panes(self) -> None:
+        self._compare_pdf_left_lv.controls.clear()
+        self._compare_pdf_right_lv.controls.clear()
+        body = self._compare_editor.value or ""
+        self._compare_pdf_left_lv.controls.append(
+            ft.Container(
+                padding=ft.padding.all(4),
+                content=ft.Text(
+                    body,
+                    selectable=True,
+                    font_family="monospace",
+                    size=_COMPARE_COL_FONT_SIZE,
+                ),
+            )
+        )
+        resolved = self._compare_resolve_docx_asset()
+        if resolved is None:
+            self._compare_pdf_right_lv.controls.append(
+                ft.Container(
+                    padding=ft.padding.all(12),
+                    content=ft.Text(
+                        "No Word file stored for this comparison.",
+                        color=ft.Colors.ORANGE_200,
+                        size=13,
+                    ),
+                )
+            )
+        else:
+            _, rel = resolved
+            try:
+                docx_abs = version_storage.docx_asset_abs_path(rel)
+            except (ValueError, OSError):
+                docx_abs = None
+            if docx_abs is None or not docx_abs.is_file():
+                self._compare_pdf_right_lv.controls.append(
+                    ft.Container(
+                        padding=ft.padding.all(12),
+                        content=ft.Text(".docx file missing on disk.", color=ft.Colors.RED_200, size=13),
+                    )
+                )
+            else:
+                try:
+                    preview = document_import.plain_text_preview_from_docx(docx_abs)
+                    self._compare_pdf_right_lv.controls.append(
+                        ft.Container(
+                            padding=ft.padding.all(8),
+                            content=ft.Text(
+                                preview,
+                                selectable=True,
+                                font_family="monospace",
+                                size=_COMPARE_COL_FONT_SIZE,
+                                color=ft.Colors.GREY_200,
+                            ),
+                        )
+                    )
+                except BaseException as ex:
+                    self._compare_pdf_right_lv.controls.append(
+                        ft.Container(
+                            padding=ft.padding.all(12),
+                            content=ft.Text(f"Could not read Word file: {ex}", color=ft.Colors.RED_200, size=12),
+                        )
+                    )
+        if _ctrl_on_page(self._compare_pdf_left_lv):
+            self._compare_pdf_left_lv.update()
+        if _ctrl_on_page(self._compare_pdf_right_lv):
+            self._compare_pdf_right_lv.update()
 
     def refresh_ollama_client(self) -> None:
         self.ollama = AsyncClient(host=config.OLLAMA_HOST) if config.OLLAMA_HOST else AsyncClient()
@@ -2919,6 +3476,167 @@ class MarkdownStudio:
             )
         )
 
+    async def _tree_import_new_clicked(self, _e: ft.ControlEvent | None = None) -> None:
+        await self._run_import_pick(new_document=True, target_md=None)
+
+    async def _tree_import_version_clicked(self, fp: Path) -> None:
+        await self._run_import_pick(new_document=False, target_md=fp)
+
+    async def _run_import_pick(self, *, new_document: bool, target_md: Path | None) -> None:
+        if not new_document and target_md is None:
+            self._snack("No target file.")
+            return
+        self.ensure_file_pickers()
+        try:
+            files = await self._fp_import.pick_files(
+                dialog_title="Import Word or PDF",
+                initial_directory=str(config.DOCUMENTS) if config.DOCUMENTS.is_dir() else None,
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["docx", "pdf"],
+            )
+        except BaseException as ex:
+            self._snack(f"Picker failed: {ex}")
+            return
+        if not files or not getattr(files[0], "path", None):
+            return
+        src = Path(files[0].path)
+        if document_import.validate_extension(src) is None:
+            self._snack("Unsupported file. Choose a .docx or .pdf file.")
+            return
+        if new_document:
+            await self._import_finish_new_document_dialog(src)
+        else:
+            await self._write_import_result(src, target_md.resolve())
+
+    async def _import_finish_new_document_dialog(self, src: Path) -> None:
+        stem = src.stem
+        name_tf = ft.TextField(label="Save as (name without .md)", value=stem, dense=True, autofocus=True)
+        ext = document_import.validate_extension(src)
+        plan_cb = ft.Checkbox(
+            label="Picture-first plan / drawing",
+            value=False,
+        )
+        dialog_body: ft.Control = (
+            ft.Column([name_tf, plan_cb], tight=True, spacing=8)
+            if ext == "pdf"
+            else name_tf
+        )
+
+        async def apply(_e: ft.ControlEvent | None = None) -> None:
+            name = (name_tf.value or "").strip()
+            if not name:
+                self._snack("Enter a file name.")
+                return
+            safe = "".join(c for c in name if c.isalnum() or c in " ._-")[:200].strip()
+            if not safe:
+                self._snack("Invalid file name.")
+                return
+            dest = config.DOCUMENTS / f"{safe}.md"
+            if dest.exists():
+                self._snack("A file with that name already exists.")
+                return
+            self.page.pop_dialog()
+            pf = plan_cb.value if ext == "pdf" else None
+            await self._write_import_result(src, dest, pdf_plan_first=pf)
+
+        name_tf.on_submit = lambda _e: self.page.run_task(apply)
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Save imported markdown"),
+                content=dialog_body,
+                actions=[
+                    ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
+                    ft.TextButton("Import", on_click=lambda _e: self.page.run_task(apply)),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        )
+
+    async def _write_import_result(self, src: Path, dest: Path, *, pdf_plan_first: bool | None = None) -> None:
+        try:
+            md = document_import.import_file_to_markdown(src, dest)
+        except BaseException as ex:
+            self._snack(f"Import failed: {ex}")
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            dest.write_text(md, encoding="utf-8")
+        except OSError as ex:
+            self._snack(f"Could not write file: {ex}")
+            return
+        ext = document_import.validate_extension(src)
+        pdf_src = src if ext == "pdf" else None
+        docx_src = src if ext == "docx" else None
+        pdf_prof: version_storage.PdfProfile | None = None
+        if pdf_src is not None:
+            pdf_prof = "plan" if pdf_plan_first else document_import.classify_pdf_profile(src)
+        try:
+            with session_scope() as s:
+                version_storage.persist_version_snapshot(
+                    s,
+                    dest.resolve(),
+                    md,
+                    "manual",
+                    skip_if_unchanged_sha=False,
+                    pdf_source_path=pdf_src,
+                    docx_source_path=docx_src,
+                    pdf_profile=pdf_prof,
+                )
+        except BaseException as ex:
+            self._snack(f"Could not record version: {ex}")
+            return
+        self._rebuild_tree_ui()
+        if _ctrl_on_page(self.tree_column):
+            self.tree_column.update()
+        imp = ext if ext in ("pdf", "docx") else None
+        await self.open_file(dest, after_import=imp)
+        self._snack("Imported.")
+
+    def _on_tree_file_row_hover(self, e: ft.ControlEvent, menu_wrap: ft.Container) -> None:
+        menu_wrap.opacity = 1.0 if e.data else 0.0
+        if _ctrl_on_page(menu_wrap):
+            menu_wrap.update()
+
+    def _make_tree_file_row(self, fname: str, fpath: Path) -> ft.Control:
+        fp = fpath
+        menu_btn = ft.PopupMenuButton(
+            icon=ft.Icons.MORE_VERT,
+            icon_size=18,
+            icon_color=ft.Colors.GREY_500,
+            tooltip="File actions",
+            items=[
+                ft.PopupMenuItem(
+                    content=ft.Text("Import new version…", size=13),
+                    on_click=lambda _e, p=fp: self.page.run_task(self._tree_import_version_clicked, p),
+                ),
+            ],
+        )
+        menu_wrap = ft.Container(content=menu_btn, opacity=0.0, animate_opacity=150)
+        name_hit = ft.Container(
+            expand=True,
+            content=ft.GestureDetector(
+                mouse_cursor=ft.MouseCursor.CLICK,
+                on_tap=lambda _e, p=fp: self.page.run_task(self.open_file, p),
+                on_double_tap=lambda _e, p=fp: self._show_rename_path_dialog(p, is_dir=False),
+                content=ft.Container(
+                    content=ft.Text(fname, size=12, font_family="monospace"),
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+                ),
+            ),
+        )
+        row_inner = ft.Row(
+            [name_hit, menu_wrap],
+            spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            expand=True,
+        )
+        return ft.Container(
+            content=row_inner,
+            padding=ft.padding.only(right=2),
+            on_hover=lambda e: self._on_tree_file_row_hover(e, menu_wrap),
+        )
+
     def _rebuild_tree_ui(self) -> None:
         self.tree_column.controls.clear()
         root = config.DOCUMENTS
@@ -2966,22 +3684,17 @@ class MarkdownStudio:
                     )
                 )
             for fname, fpath in sorted(node.get("_files", []), key=lambda x: x[0].lower()):
-                ctrls.append(
-                    ft.GestureDetector(
-                        mouse_cursor=ft.MouseCursor.CLICK,
-                        on_tap=lambda _e, fp=fpath: self.page.run_task(self.open_file, fp),
-                        on_double_tap=lambda _e, fp=fpath: self._show_rename_path_dialog(fp, is_dir=False),
-                        content=ft.Container(
-                            content=ft.Text(fname, size=12, font_family="monospace"),
-                            padding=ft.Padding.symmetric(horizontal=12, vertical=2),
-                        ),
-                    )
-                )
+                ctrls.append(self._make_tree_file_row(fname, fpath))
             return ctrls
 
         self.tree_column.controls.extend(render_level(tree, root))
 
-    async def open_file(self, path: Path) -> None:
+    async def open_file(
+        self,
+        path: Path,
+        *,
+        after_import: Literal["pdf", "docx"] | None = None,
+    ) -> None:
         if self.current_path and path != self.current_path and self._is_dirty():
             await self.save_file(silent=True, snapshot_reason="pre_switch")
         try:
@@ -2992,23 +3705,54 @@ class MarkdownStudio:
         self._compare_candidate_source = "draft"
         self._compare_snapshot_version_id = None
         self._pending_ai_accept_action_id = None
+        self._compare_pdf_peer_snapshot_id = None
         self.current_path = path
         self.last_saved_text = text
         self.editor.value = text
         self._compare_editor.value = text
         self._compare_baseline_snapshot = text
-        self._main_tabs.selected_index = 0
-        self._main_tab_index = 0
         self._refresh_compare_tab_candidate_ui()
         self._sync_version_toolbar_state()
         if _ctrl_on_page(self.editor):
             self.editor.update()
         if _ctrl_on_page(self._compare_editor):
             self._compare_editor.update()
-        self._margin_gen += 1
-        await self._debounced_compose_rebuild(self._margin_gen)
-        self._refresh_compare_diff_immediate()
+
+        if after_import == "pdf":
+            self._main_tabs.selected_index = 1
+            self._main_tab_index = 1
+            self._compare_candidate_source = "pdf_original"
+            self._compare_pdf_peer_snapshot_id = None
+            self._refresh_compare_tab_candidate_ui()
+            self._compare_candidate_dropdown.value = _COMPARE_KEY_PDF_ORIGINAL
+            if _ctrl_on_page(self._compare_candidate_dropdown):
+                self._compare_candidate_dropdown.update()
+            if _ctrl_on_page(self._main_tabs):
+                self._main_tabs.update()
+            self._refresh_compare_diff_immediate()
+        elif after_import == "docx":
+            self._main_tabs.selected_index = 1
+            self._main_tab_index = 1
+            self._compare_candidate_source = "docx_original"
+            self._compare_pdf_peer_snapshot_id = None
+            self._refresh_compare_tab_candidate_ui()
+            self._compare_candidate_dropdown.value = _COMPARE_KEY_DOCX_ORIGINAL
+            if _ctrl_on_page(self._compare_candidate_dropdown):
+                self._compare_candidate_dropdown.update()
+            if _ctrl_on_page(self._main_tabs):
+                self._main_tabs.update()
+            self._refresh_compare_diff_immediate()
+        else:
+            self._main_tabs.selected_index = 0
+            self._main_tab_index = 0
+            if _ctrl_on_page(self._main_tabs):
+                self._main_tabs.update()
+            self._margin_gen += 1
+            await self._debounced_compose_rebuild(self._margin_gen)
+            self._refresh_compare_diff_immediate()
+        self._refresh_compare_bulk_buttons()
         self._refresh_title_bar()
+        self._refresh_compose_plan_surface()
 
     def _next_dated_note_path(self) -> Path:
         root = config.DOCUMENTS
@@ -3360,14 +4104,31 @@ class MarkdownStudio:
             )
         return ft.Column(
             [
-                ft.Row(
-                    [
-                        self.tree_search_field,
-                        self._tree_add_menu,
-                    ],
-                    alignment=ft.MainAxisAlignment.START,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    spacing=4,
+                ft.Container(
+                    height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+                    content=ft.Row(
+                        [
+                            ft.Container(
+                                expand=True,
+                                height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+                                alignment=ft.Alignment.CENTER_LEFT,
+                                content=self.tree_search_field,
+                            ),
+                            ft.Row(
+                                [
+                                    self._tree_import_btn,
+                                    self._tree_add_menu,
+                                ],
+                                spacing=0,
+                                tight=True,
+                                height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.START,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=8,
+                    ),
                 ),
                 ft.Container(
                     content=ft.Row(

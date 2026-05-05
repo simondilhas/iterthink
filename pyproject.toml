@@ -24,12 +24,16 @@ classifiers = [
 dependencies = [
     "flet>=0.80.0",
     "ollama>=0.4.0",
+    "pymupdf4llm>=1.27.2.3",
+    "pillow>=10.0.0",
+    "python-docx>=1.1.0",
     "PyYAML>=6.0",
     "sqlalchemy>=2.0.0",
     "alembic>=1.13.0",
     "numpy>=1.26.0",
     "scikit-learn>=1.4.0",
     "rapidfuzz>=3.6.0",
+    "opencv-python-headless>=4.9.0",
 ]
 
 [project.urls]

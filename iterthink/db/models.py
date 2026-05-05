@@ -42,6 +42,10 @@ class DocumentVersion(Base):
         nullable=True,
     )
     display_label: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    pdf_asset_relpath: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    docx_asset_relpath: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # When a PDF was imported: "text" (markdown-first) or "plan" (picture-first). None = legacy row.
+    pdf_profile: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     document: Mapped["Document"] = relationship("Document", back_populates="versions")
 

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+
+PdfProfile = Literal["text", "plan"]
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -43,11 +46,38 @@ def write_snapshot_file(resolved_doc: Path, body: str) -> tuple[str, str]:
     return snap_id, rel
 
 
+def resolve_store_path(relpath: str) -> Path:
+    """Resolve a path relative to ``STORE_DIR`` (must stay under store)."""
+    p = (config.STORE_DIR / relpath).resolve()
+    base = config.STORE_DIR.resolve()
+    try:
+        p.relative_to(base)
+    except ValueError as e:
+        raise ValueError("Invalid store-relative path") from e
+    return p
+
+
 def read_snapshot_body_by_relpath(relpath: str) -> str:
     p = (config.STORE_DIR / relpath).resolve()
     if not p.is_file() or "snapshots" not in p.parts:
         raise FileNotFoundError(relpath)
     return p.read_text(encoding="utf-8")
+
+
+def pdf_asset_abs_path(relpath: str) -> Path:
+    """Absolute path to a stored PDF asset (``pdf_assets/...``)."""
+    p = resolve_store_path(relpath)
+    if "pdf_assets" not in p.parts:
+        raise ValueError("Not a pdf_assets path")
+    return p
+
+
+def docx_asset_abs_path(relpath: str) -> Path:
+    """Absolute path to a stored DOCX asset (``docx_assets/...``)."""
+    p = resolve_store_path(relpath)
+    if "docx_assets" not in p.parts:
+        raise ValueError("Not a docx_assets path")
+    return p
 
 
 def content_sha256(body: str) -> str:
@@ -62,6 +92,9 @@ class SnapshotInfo:
     reason: str
     content_sha256: str
     display_label: str | None = None
+    pdf_asset_relpath: str | None = None
+    docx_asset_relpath: str | None = None
+    pdf_profile: str | None = None
 
 
 def snapshot_display_text(sn: SnapshotInfo) -> str:
@@ -141,6 +174,20 @@ def get_or_create_document(session: Session, resolved_doc: Path) -> Document:
     return doc
 
 
+def _pdf_assets_dir_for_doc(resolved_doc: Path) -> Path:
+    pk = path_key_for(resolved_doc)
+    d = config.STORE_DIR / "pdf_assets" / pk
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _docx_assets_dir_for_doc(resolved_doc: Path) -> Path:
+    pk = path_key_for(resolved_doc)
+    d = config.STORE_DIR / "docx_assets" / pk
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def persist_version_snapshot(
     session: Session,
     resolved_doc: Path,
@@ -149,10 +196,15 @@ def persist_version_snapshot(
     *,
     skip_if_unchanged_sha: bool = True,
     display_label: str | None = None,
+    pdf_source_path: Path | None = None,
+    docx_source_path: Path | None = None,
+    pdf_profile: PdfProfile | None = None,
 ) -> int | None:
     """
     Write snapshot file and insert ``DocumentVersion``.
     If ``skip_if_unchanged_sha`` and the latest version for this document has the same sha, return None.
+    If ``pdf_source_path`` is set, copies the file into ``pdf_assets/<path_key>/<version_id>.pdf``.
+    If ``docx_source_path`` is set, copies into ``docx_assets/<path_key>/<version_id>.docx``.
     Returns new version id or None.
     """
     sha = content_sha256(body)
@@ -180,10 +232,25 @@ def persist_version_snapshot(
         reason=reason,
         parent_version_id=parent_id,
         display_label=display_label.strip() if display_label and display_label.strip() else None,
+        pdf_asset_relpath=None,
+        docx_asset_relpath=None,
+        pdf_profile=None,
     )
     session.add(ver)
     session.flush()
-    # snapshot_id from filename
+    pk = path_key_for(resolved_doc)
+    if pdf_source_path is not None and pdf_source_path.is_file():
+        dest_dir = _pdf_assets_dir_for_doc(resolved_doc)
+        dest = dest_dir / f"{ver.id}.pdf"
+        shutil.copy2(pdf_source_path, dest)
+        ver.pdf_asset_relpath = f"pdf_assets/{pk}/{ver.id}.pdf"
+        if pdf_profile is not None:
+            ver.pdf_profile = pdf_profile
+    if docx_source_path is not None and docx_source_path.is_file():
+        dest_dir = _docx_assets_dir_for_doc(resolved_doc)
+        dest = dest_dir / f"{ver.id}.docx"
+        shutil.copy2(docx_source_path, dest)
+        ver.docx_asset_relpath = f"docx_assets/{pk}/{ver.id}.docx"
     return ver.id
 
 
@@ -207,9 +274,94 @@ def list_snapshots(session: Session, resolved_doc: Path) -> list[SnapshotInfo]:
                 reason=v.reason,
                 content_sha256=v.content_sha256,
                 display_label=v.display_label,
+                pdf_asset_relpath=v.pdf_asset_relpath,
+                docx_asset_relpath=v.docx_asset_relpath,
+                pdf_profile=v.pdf_profile,
             )
         )
     return out
+
+
+def get_version_pdf_relpath(session: Session, version_id: int) -> str | None:
+    row = session.get(DocumentVersion, version_id)
+    if row is None:
+        return None
+    return row.pdf_asset_relpath
+
+
+def list_pdf_version_options(session: Session, resolved_doc: Path) -> list[tuple[int, str]]:
+    """
+    Versions that store a PDF asset, newest first.
+    Each label is suitable for a dropdown (includes PDF marker and optional profile).
+    """
+    key = path_key_for(resolved_doc)
+    doc = session.execute(select(Document).where(Document.path_key == key)).scalar_one_or_none()
+    if doc is None:
+        return []
+    rows = session.execute(
+        select(DocumentVersion)
+        .where(DocumentVersion.document_id == doc.id)
+        .where(DocumentVersion.pdf_asset_relpath.isnot(None))
+        .order_by(DocumentVersion.created_at.desc(), DocumentVersion.id.desc())
+    ).scalars().all()
+    out: list[tuple[int, str]] = []
+    for v in rows:
+        ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(v.created_at))
+        prof = (v.pdf_profile or "").strip()
+        prof_bit = f" · {prof}" if prof else ""
+        label = f"#{v.id}  {ts}  ({v.reason})  PDF{prof_bit}"
+        out.append((v.id, label))
+    return out
+
+
+def latest_pdf_version_for_document(session: Session, resolved_doc: Path) -> tuple[int, str] | None:
+    """Most recent version that has a stored PDF asset, or None."""
+    key = path_key_for(resolved_doc)
+    doc = session.execute(select(Document).where(Document.path_key == key)).scalar_one_or_none()
+    if doc is None:
+        return None
+    row = session.execute(
+        select(DocumentVersion)
+        .where(DocumentVersion.document_id == doc.id)
+        .where(DocumentVersion.pdf_asset_relpath.isnot(None))
+        .order_by(DocumentVersion.created_at.desc(), DocumentVersion.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if row is None or not row.pdf_asset_relpath:
+        return None
+    return (row.id, row.pdf_asset_relpath)
+
+
+def document_has_any_pdf(session: Session, resolved_doc: Path) -> bool:
+    return latest_pdf_version_for_document(session, resolved_doc) is not None
+
+
+def get_version_docx_relpath(session: Session, version_id: int) -> str | None:
+    row = session.get(DocumentVersion, version_id)
+    if row is None:
+        return None
+    return row.docx_asset_relpath
+
+
+def latest_docx_version_for_document(session: Session, resolved_doc: Path) -> tuple[int, str] | None:
+    key = path_key_for(resolved_doc)
+    doc = session.execute(select(Document).where(Document.path_key == key)).scalar_one_or_none()
+    if doc is None:
+        return None
+    row = session.execute(
+        select(DocumentVersion)
+        .where(DocumentVersion.document_id == doc.id)
+        .where(DocumentVersion.docx_asset_relpath.isnot(None))
+        .order_by(DocumentVersion.created_at.desc(), DocumentVersion.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if row is None or not row.docx_asset_relpath:
+        return None
+    return (row.id, row.docx_asset_relpath)
+
+
+def document_has_any_docx(session: Session, resolved_doc: Path) -> bool:
+    return latest_docx_version_for_document(session, resolved_doc) is not None
 
 
 def load_version_body(session: Session, version_id: int) -> str:
@@ -221,3 +373,17 @@ def load_version_body(session: Session, version_id: int) -> str:
 
 def get_version_row(session: Session, version_id: int) -> DocumentVersion | None:
     return session.get(DocumentVersion, version_id)
+
+
+def latest_pdf_version_detail(session: Session, resolved_doc: Path) -> tuple[int, str, str | None] | None:
+    """
+    Most recent version with a PDF asset: (version_id, pdf_asset_relpath, pdf_profile).
+    """
+    hit = latest_pdf_version_for_document(session, resolved_doc)
+    if hit is None:
+        return None
+    vid, rel = hit
+    row = session.get(DocumentVersion, vid)
+    if row is None:
+        return None
+    return (vid, rel, row.pdf_profile)
