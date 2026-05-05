@@ -1894,15 +1894,20 @@ class MarkdownStudio:
             pass
 
     def _compare_paragraph_diff_spans(self, left_para: str, right_para: str) -> list[ft.TextSpan]:
-        """Inline diff for left column: strikethrough removals, green additions vs right."""
+        """Word-level inline diff for the left (Compose) column.
+
+        ``left_para`` / ``right_para`` match ``pair_paragraphs_for_compare``: compose baseline
+        vs compare-column snapshot. ``build_unified_spans`` expects (old, new), so we pass
+        ``(right_para, left_para)`` — snapshot as old, Compose as new.
+        """
         cap = 80_000
         lp, rp = left_para, right_para
         if len(lp) + len(rp) > cap:
             lp = lp[: cap // 2] + "\n…"
             rp = rp[: cap // 2] + "\n…"
         return build_unified_spans(
-            lp,
             rp,
+            lp,
             base_size=_COMPARE_COL_FONT_SIZE,
             base_color=ft.Colors.GREY_100,
             font_family="monospace",
