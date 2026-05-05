@@ -15,11 +15,14 @@ import flet as ft
 from flet.controls.types import PagePlatform
 from ollama import AsyncClient
 
+from iterthink import checks as checks_mod
+from iterthink import checks_runner
 from iterthink import config, prompts, settings_ui, store_db, version_storage
 from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS, TOPIC_EVALUATE
 from iterthink.compare_layout import pair_paragraphs_for_compare
 from iterthink.diff_card import build_unified_spans
 from iterthink.db.session import session_scope
+from iterthink.paragraph_align import compute_hash
 from iterthink import paragraph_compare
 from iterthink.margin import (
     distribute_heights,
@@ -64,6 +67,10 @@ _COMPOSE_MARGIN_COL_W = 104
 # Compare row chrome (evaluate placeholder · status pill · actions); text columns still expand=1.
 _COMPARE_EVAL_COL_W = 56
 _COMPARE_PILL_COL_W = 72
+# Result card (floating overlay shown on hover over an Analyse symbol in the eval cell).
+_RESULT_CARD_W = 380
+_RESULT_CARD_MAX_H = 360
+_RESULT_CARD_HIDE_DELAY_SEC = 0.18
 # Compare action card: 2×2 grid; inner width = two equal columns; pad wraps the grid.
 _COMPARE_ACTION_GRID_CELL = 40  # row height / half of inner width
 _COMPARE_ACTION_INNER_W = _COMPARE_ACTION_GRID_CELL * 2
@@ -258,10 +265,41 @@ class MarkdownStudio:
             tooltip="Draft, snapshot, or AI preview for the right column (left = latest Compose).",
             on_select=lambda e: self.page.run_task(self._on_compare_candidate_change_async, e),
         )
+        _compare_bulk_icon_style = ft.ButtonStyle(
+            padding=ft.padding.symmetric(horizontal=4, vertical=2),
+            visual_density=ft.VisualDensity.COMPACT,
+        )
+        self._compare_approve_all_btn = ft.IconButton(
+            ft.Icons.DONE_ALL,
+            icon_size=18,
+            icon_color=config.FEDORA_BLUE,
+            tooltip="Apply all paragraphs to the document",
+            style=_compare_bulk_icon_style,
+            disabled=True,
+            on_click=lambda _e: self.page.run_task(self._compare_approve_all_async),
+        )
+        self._compare_decline_all_btn = ft.IconButton(
+            ft.Icons.CLOSE_ROUNDED,
+            icon_size=18,
+            icon_color=ft.Colors.GREY_400,
+            tooltip="Reset all paragraphs to match latest (left)",
+            style=_compare_bulk_icon_style,
+            disabled=True,
+            on_click=lambda _e: self.page.run_task(self._compare_decline_all_async),
+        )
         self._compare_tab_label_row = ft.Row(
             [
                 ft.Text("Comparison: ", size=14, color=ft.Colors.GREY_400),
                 self._compare_candidate_dropdown,
+                ft.Container(
+                    content=ft.Row(
+                        [self._compare_approve_all_btn, self._compare_decline_all_btn],
+                        tight=True,
+                        spacing=0,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=ft.padding.only(left=6),
+                ),
             ],
             tight=True,
             spacing=0,
@@ -273,12 +311,37 @@ class MarkdownStudio:
             padding=ft.padding.symmetric(horizontal=4, vertical=2),
         )
         self._compare_editor_holder = ft.Container(content=self._compare_editor, visible=False, height=0)
+        # Floating card shown on hover over an Analyse symbol in a row's eval cell.
+        # Sits inside the Stack overlaying the listview so it can be positioned per row.
+        self._result_card_overlay = ft.Container(
+            visible=False,
+            width=_RESULT_CARD_W,
+            bgcolor=ft.Colors.with_opacity(0.96, "#1A1D22"),
+            border=ft.border.all(1, ft.Colors.with_opacity(0.55, ft.Colors.GREY_700)),
+            border_radius=10,
+            padding=ft.padding.all(12),
+            shadow=ft.BoxShadow(
+                blur_radius=18,
+                spread_radius=0,
+                color=ft.Colors.with_opacity(0.45, ft.Colors.BLACK),
+                offset=ft.Offset(0, 6),
+            ),
+            top=0,
+            left=_COMPARE_EVAL_COL_W + 2,
+            on_hover=self._on_result_card_hover,
+            content=ft.Column([], tight=True, spacing=6),
+        )
+        self._compare_body_stack = ft.Stack(
+            controls=[
+                ft.Container(content=self._compare_rows_listview, expand=True),
+                self._result_card_overlay,
+            ],
+            expand=True,
+        )
         self._compare_tab_body = ft.Column(
             [
                 ft.Row(
-                    [
-                        ft.Container(content=self._compare_rows_listview, expand=True),
-                    ],
+                    [self._compare_body_stack],
                     expand=True,
                 ),
                 self._compare_editor_holder,
@@ -449,9 +512,32 @@ class MarkdownStudio:
         self._ki_topic_index: int = 0
         self._chat_api_messages: list[dict[str, str]] = []
 
+        # ----- Per-paragraph Analyse checks (KI Analyse tab) -----
+        # Active check id whose symbols populate the Compare row eval cells.
+        self._active_check_id: str | None = None
+        # Per-check results aligned with current candidate paragraph indices.
+        self._check_results: dict[str, list[dict | None]] = {}
+        # Per-check running flag; True while a paragraph-by-paragraph run is in progress.
+        self._check_running: dict[str, bool] = {}
+        # Monotonic generation per check; cancels stale background runs.
+        self._check_run_gen: dict[str, int] = {}
+        # Current candidate-paragraph hashes (used to invalidate results on edit).
+        self._check_para_hashes: list[str] = []
+        # Eval-cell host containers, parallel to _compare_right_fields, for O(1) refresh.
+        self._compare_eval_hosts: list[ft.Container] = []
+        # Floating result-card overlay state.
+        self._result_card_visible_for: tuple[str, int] | None = None
+        self._result_card_hide_gen: int = 0
+
         self._pill_row_discuss = ft.Row(spacing=4, wrap=True, run_spacing=4)
         self._pill_row_change = ft.Row(spacing=4, wrap=True, run_spacing=4)
+        self._pill_row_analyse = ft.Row(spacing=4, wrap=True, run_spacing=4)
+        # Analyse buttons keyed by check_id; updated by _refresh_analyse_button_state.
+        self._analyse_buttons: dict[str, ft.FilledButton] = {}
+        self._analyse_button_progress: dict[str, ft.ProgressRing] = {}
+        self._analyse_button_count: dict[str, ft.Text] = {}
         self._ki_tab_body_heights: list[float] = [
+            float(KI_TAB_BODY_MIN_HEIGHT_PX),
             float(KI_TAB_BODY_MIN_HEIGHT_PX),
             float(KI_TAB_BODY_MIN_HEIGHT_PX),
         ]
@@ -460,6 +546,7 @@ class MarkdownStudio:
             tabs=[
                 ft.Tab(label="Discuss"),
                 ft.Tab(label="Change"),
+                ft.Tab(label="Analyse"),
             ],
             scrollable=False,
             tab_alignment=ft.TabAlignment.FILL,
@@ -482,6 +569,13 @@ class MarkdownStudio:
                     ),
                     content=self._pill_row_change,
                 ),
+                ft.Container(
+                    padding=ft.padding.symmetric(
+                        horizontal=4,
+                        vertical=KI_TAB_PAGE_PAD_V_PX,
+                    ),
+                    content=self._pill_row_analyse,
+                ),
             ],
             height=float(KI_TAB_BODY_MIN_HEIGHT_PX + 2 * KI_TAB_PAGE_PAD_V_PX),
         )
@@ -496,7 +590,7 @@ class MarkdownStudio:
         )
         self._ki_topic_tabs = ft.Tabs(
             content=self._ki_tabs_inner_column,
-            length=2,
+            length=3,
             selected_index=0,
             on_change=self._on_ki_tabs_change,
         )
@@ -587,6 +681,7 @@ class MarkdownStudio:
 
         self._pill_row_discuss.on_size_change = self._on_ki_pill_row_size_discuss
         self._pill_row_change.on_size_change = self._on_ki_pill_row_size_change
+        self._pill_row_analyse.on_size_change = self._on_ki_pill_row_size_analyse
 
         self.right_panel = ft.Container(
             width=SIDEBAR_EXPANDED_WIDTH_PX,
@@ -607,7 +702,7 @@ class MarkdownStudio:
             self._ki_topic_index = int(self._ki_topic_tabs.selected_index)
 
     def _set_ki_topic(self, index: int) -> None:
-        ix = max(0, min(1, int(index)))
+        ix = max(0, min(2, int(index)))
         self._ki_topic_index = ix
         if self._ki_topic_tabs.selected_index != ix:
             self._ki_topic_tabs.selected_index = ix
@@ -622,10 +717,15 @@ class MarkdownStudio:
         self._ki_tab_body_heights[1] = max(float(e.height), 28.0)
         self._apply_ki_tab_bar_view_height()
 
+    def _on_ki_pill_row_size_analyse(self, e: ft.LayoutSizeChangeEvent) -> None:
+        self._ki_tab_body_heights[2] = max(float(e.height), 28.0)
+        self._apply_ki_tab_bar_view_height()
+
     def _apply_ki_tab_bar_view_height(self) -> None:
         inner = max(
             self._ki_tab_body_heights[0],
             self._ki_tab_body_heights[1],
+            self._ki_tab_body_heights[2],
             float(KI_TAB_BODY_MIN_HEIGHT_PX),
         )
         h = inner + 2 * float(KI_TAB_PAGE_PAD_V_PX)
@@ -703,12 +803,468 @@ class MarkdownStudio:
 
         fill_row(self._pill_row_discuss, TOPIC_DISCUSS)
         fill_row(self._pill_row_change, TOPIC_CHANGE)
+        self._rebuild_analyse_pills()
 
-        for row in (self._pill_row_discuss, self._pill_row_change):
+        for row in (self._pill_row_discuss, self._pill_row_change, self._pill_row_analyse):
             if _ctrl_on_page(row):
                 row.update()
 
         self.page.run_task(self._defer_sync_ki_tab_height)
+
+    # ------------------------------------------------------------------
+    # Analyse tab (per-paragraph LLM checks)
+    # ------------------------------------------------------------------
+
+    def _rebuild_analyse_pills(self) -> None:
+        """Build a button per check; click runs/loads results, hover shows nothing (use card)."""
+        self._pill_row_analyse.controls.clear()
+        self._analyse_buttons.clear()
+        self._analyse_button_progress.clear()
+        self._analyse_button_count.clear()
+        for c in checks_mod.CHECKS:
+            spinner = ft.ProgressRing(
+                width=10, height=10, stroke_width=2, color=c.accent, visible=False
+            )
+            counter = ft.Text("", size=KI_PILL_TEXT_SIZE, color=ft.Colors.GREY_300, visible=False)
+            label_row = ft.Row(
+                [
+                    spinner,
+                    ft.Text(c.label, size=KI_PILL_TEXT_SIZE),
+                    counter,
+                ],
+                tight=True,
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+            btn = ft.FilledButton(
+                content=label_row,
+                elevation=0,
+                style=ft.ButtonStyle(
+                    text_style=ft.TextStyle(size=KI_PILL_TEXT_SIZE),
+                    visual_density=ft.VisualDensity.COMPACT,
+                    padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                    bgcolor={
+                        ft.ControlState.DEFAULT: ft.Colors.with_opacity(0.18, c.accent),
+                        ft.ControlState.HOVERED: ft.Colors.with_opacity(0.32, c.accent),
+                    },
+                    color={
+                        ft.ControlState.DEFAULT: ft.Colors.GREY_100,
+                    },
+                ),
+                tooltip=f"Run {c.label} on every paragraph (cached results reused).",
+                on_click=lambda _e, cid=c.id: self.page.run_task(self._run_check_async, cid),
+            )
+            self._analyse_buttons[c.id] = btn
+            self._analyse_button_progress[c.id] = spinner
+            self._analyse_button_count[c.id] = counter
+            self._pill_row_analyse.controls.append(btn)
+        self._refresh_analyse_button_state()
+
+    def _refresh_analyse_button_state(self) -> None:
+        """Highlight the active check's button; show spinner+counter while running."""
+        for cid, btn in self._analyse_buttons.items():
+            check = checks_mod.get_check(cid)
+            if check is None:
+                continue
+            is_active = cid == self._active_check_id
+            running = bool(self._check_running.get(cid))
+            spinner = self._analyse_button_progress.get(cid)
+            counter = self._analyse_button_count.get(cid)
+            if spinner is not None:
+                spinner.visible = running
+            if counter is not None:
+                results = self._check_results.get(cid) or []
+                done = sum(1 for r in results if r is not None)
+                total = max(len(results), len(self._check_para_hashes))
+                counter.value = f"{done}/{total}" if running else ""
+                counter.visible = running and total > 0
+            # Active check: stronger background.
+            base_color = check.accent
+            btn.style = ft.ButtonStyle(
+                text_style=ft.TextStyle(size=KI_PILL_TEXT_SIZE),
+                visual_density=ft.VisualDensity.COMPACT,
+                padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                bgcolor={
+                    ft.ControlState.DEFAULT: ft.Colors.with_opacity(
+                        0.42 if is_active else 0.18, base_color
+                    ),
+                    ft.ControlState.HOVERED: ft.Colors.with_opacity(
+                        0.55 if is_active else 0.32, base_color
+                    ),
+                },
+                color={ft.ControlState.DEFAULT: ft.Colors.GREY_100},
+            )
+            if _ctrl_on_page(btn):
+                btn.update()
+
+    async def _run_check_async(self, check_id: str) -> None:
+        """Activate a check; load cached results, run remaining paragraphs in background."""
+        check = checks_mod.get_check(check_id)
+        if check is None:
+            self._snack(f"Check '{check_id}' is not configured.")
+            return
+        # Make sure Compare tab is selected so user sees results.
+        if self._main_tab_index != 1:
+            self._main_tabs.selected_index = 1
+            if _ctrl_on_page(self._main_tabs):
+                self._main_tabs.update()
+            self._main_tab_index = 1
+        # Need a candidate to analyse against the baseline.
+        if not self._compare_right_fields:
+            self._rebuild_compare_paragraph_ui()
+        baseline = self._compare_latest_baseline_text()
+        candidate = self._compare_editor.value or self.editor.value or ""
+        if not candidate.strip():
+            self._snack("Open a note first to analyse it.")
+            return
+        pairs = pair_paragraphs_for_compare(baseline, candidate)
+        n = len(pairs)
+        # Refresh hashes; reset results sized to the current document.
+        self._check_para_hashes = [compute_hash(new) for _, new in pairs]
+        if (cid_results := self._check_results.get(check_id)) is None or len(cid_results) != n:
+            self._check_results[check_id] = [None] * n
+        self._active_check_id = check_id
+        # Bump generation so any prior in-flight run for this check gets cancelled.
+        self._check_run_gen[check_id] = self._check_run_gen.get(check_id, 0) + 1
+        my_gen = self._check_run_gen[check_id]
+        self._check_running[check_id] = True
+        self._refresh_analyse_button_state()
+        self._refresh_all_eval_cells()
+
+        async def on_progress(idx: int, payload: dict | None, err: str | None) -> None:
+            if my_gen != self._check_run_gen.get(check_id):
+                return
+            if 0 <= idx < len(self._check_results.get(check_id, [])):
+                self._check_results[check_id][idx] = payload
+            self._refresh_eval_cell(idx)
+            self._refresh_analyse_button_state()
+
+        try:
+            await checks_runner.run_check_for_document(
+                self.ollama,
+                model=self.ollama_model,
+                check=check,
+                pairs=pairs,
+                on_progress=on_progress,
+                use_cache=True,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            self._snack(f"Analyse failed: {ollama_error_message(exc)}")
+        finally:
+            if my_gen == self._check_run_gen.get(check_id):
+                self._check_running[check_id] = False
+                self._refresh_analyse_button_state()
+                self._refresh_all_eval_cells()
+
+    # ------------------------------------------------------------------
+    # Eval cell (leftmost cell in compare rows)
+    # ------------------------------------------------------------------
+
+    def _build_eval_cell(self, idx: int) -> ft.Container:
+        cid = self._active_check_id
+        host = ft.Container(
+            width=_COMPARE_EVAL_COL_W,
+            alignment=ft.Alignment.TOP_CENTER,
+            padding=ft.padding.only(top=4, right=2),
+            content=self._build_eval_cell_inner(idx, cid),
+        )
+        return host
+
+    def _build_eval_cell_inner(self, idx: int, check_id: str | None) -> ft.Control:
+        if check_id is None:
+            return ft.Container(width=18, height=18)
+        check = checks_mod.get_check(check_id)
+        results = self._check_results.get(check_id) or []
+        payload = results[idx] if 0 <= idx < len(results) else None
+        running = bool(self._check_running.get(check_id))
+        if payload is None:
+            if running:
+                return ft.Container(
+                    content=ft.ProgressRing(
+                        width=14, height=14, stroke_width=2,
+                        color=(check.accent if check else config.FEDORA_BLUE),
+                    ),
+                    alignment=ft.Alignment.TOP_CENTER,
+                )
+            return ft.Container(
+                content=ft.Text("·", size=14, color=ft.Colors.GREY_700),
+                alignment=ft.Alignment.TOP_CENTER,
+            )
+        symbol = checks_mod.extract_symbol(check, payload) if check else "?"
+        color = check.color_for_symbol(symbol) if check else ft.Colors.GREY_400
+        return ft.Container(
+            content=ft.Text(
+                symbol,
+                size=18,
+                weight=ft.FontWeight.W_700,
+                color=color,
+                no_wrap=True,
+            ),
+            alignment=ft.Alignment.TOP_CENTER,
+            padding=ft.padding.symmetric(horizontal=4, vertical=2),
+            border_radius=6,
+            bgcolor=ft.Colors.with_opacity(0.10, color),
+            on_hover=lambda e, i=idx: self._on_eval_symbol_hover(e, i),
+            tooltip=None,
+        )
+
+    def _refresh_eval_cell(self, idx: int) -> None:
+        if not (0 <= idx < len(self._compare_eval_hosts)):
+            return
+        host = self._compare_eval_hosts[idx]
+        host.content = self._build_eval_cell_inner(idx, self._active_check_id)
+        if _ctrl_on_page(host):
+            host.update()
+
+    def _refresh_all_eval_cells(self) -> None:
+        for i in range(len(self._compare_eval_hosts)):
+            self._refresh_eval_cell(i)
+
+    # ------------------------------------------------------------------
+    # Floating result card
+    # ------------------------------------------------------------------
+
+    def _on_eval_symbol_hover(self, e: ft.ControlEvent, idx: int) -> None:
+        if str(e.data).lower() == "true":
+            self._show_result_card(idx)
+        else:
+            self._schedule_hide_result_card()
+
+    def _on_result_card_hover(self, e: ft.ControlEvent) -> None:
+        if str(e.data).lower() == "true":
+            self._result_card_hide_gen += 1  # cancel pending hide
+        else:
+            self._schedule_hide_result_card()
+
+    def _show_result_card(self, idx: int) -> None:
+        cid = self._active_check_id
+        if cid is None:
+            return
+        check = checks_mod.get_check(cid)
+        if check is None:
+            return
+        results = self._check_results.get(cid) or []
+        if not (0 <= idx < len(results)):
+            return
+        payload = results[idx]
+        if payload is None:
+            return
+        self._result_card_hide_gen += 1  # cancel pending hide
+        # Position vertically: estimate row position by index * row pitch.
+        row_pitch = 88.0  # pragmatic estimate; ListView spacing=0 + padding=2.
+        top = max(4.0, idx * row_pitch + 4.0)
+        # If there are many rows, keep card visible.
+        self._result_card_overlay.top = top
+        self._result_card_overlay.content = self._build_result_card(check, payload, idx)
+        self._result_card_overlay.visible = True
+        self._result_card_visible_for = (cid, idx)
+        if _ctrl_on_page(self._result_card_overlay):
+            self._result_card_overlay.update()
+
+    def _schedule_hide_result_card(self) -> None:
+        self._result_card_hide_gen += 1
+        gen = self._result_card_hide_gen
+        self.page.run_task(self._hide_result_card_after_delay, gen)
+
+    async def _hide_result_card_after_delay(self, gen: int) -> None:
+        await asyncio.sleep(_RESULT_CARD_HIDE_DELAY_SEC)
+        if gen != self._result_card_hide_gen:
+            return
+        self._result_card_overlay.visible = False
+        self._result_card_visible_for = None
+        if _ctrl_on_page(self._result_card_overlay):
+            self._result_card_overlay.update()
+
+    def _metric_chip(self, label: str, value: Any, value_set: tuple[str, ...]) -> ft.Container:
+        """Coloured chip for a project/sustainability metric (None/Low/Medium/High) or numeric score."""
+        text_val: str
+        chip_color: str
+        if isinstance(value, (int, float)):
+            text_val = f"{value:.0f}" if isinstance(value, float) and not value.is_integer() else str(int(value)) if isinstance(value, float) else str(value)
+            # Numeric scale assumed 0-100 for readability/virality scores.
+            v = float(value)
+            if v >= 70:
+                chip_color = "#3FBE6B"
+            elif v >= 50:
+                chip_color = "#7ED9A0"
+            elif v >= 30:
+                chip_color = "#F0A455"
+            else:
+                chip_color = "#E5484D"
+        else:
+            text_val = str(value or "—")
+            mapping = {
+                "none": "#5A6068",
+                "low": "#5AB0FF",
+                "medium": "#F0A455",
+                "high": "#E5484D",
+            }
+            chip_color = mapping.get(text_val.lower(), "#5A6068")
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Text(label, size=10, color=ft.Colors.GREY_400, no_wrap=True),
+                    ft.Text(text_val, size=12, weight=ft.FontWeight.W_700, color=ft.Colors.GREY_100, no_wrap=True),
+                ],
+                spacing=0,
+                tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.padding.symmetric(horizontal=6, vertical=3),
+            border_radius=6,
+            bgcolor=ft.Colors.with_opacity(0.18, chip_color),
+            border=ft.border.all(1, ft.Colors.with_opacity(0.55, chip_color)),
+        )
+
+    def _build_result_card(self, check: checks_mod.Check, payload: dict, idx: int) -> ft.Control:
+        symbol = checks_mod.extract_symbol(check, payload)
+        color = check.color_for_symbol(symbol)
+        summary = checks_mod.extract_summary(check, payload)
+        metrics = checks_mod.extract_metrics(check, payload)
+        recs = checks_mod.extract_recommendations(payload, limit=3)
+        confidence = checks_mod.extract_confidence(payload)
+        label = checks_mod.extract_label(payload)
+
+        header = ft.Row(
+            [
+                ft.Container(
+                    content=ft.Text(symbol, size=22, weight=ft.FontWeight.W_700, color=color),
+                    width=34, height=34,
+                    alignment=ft.Alignment.CENTER,
+                    border_radius=8,
+                    bgcolor=ft.Colors.with_opacity(0.18, color),
+                ),
+                ft.Column(
+                    [
+                        ft.Text(check.label, size=13, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_100),
+                        ft.Text(
+                            f"Paragraph {idx + 1}" + (f" · {label}" if label else ""),
+                            size=10,
+                            color=ft.Colors.GREY_400,
+                        ),
+                    ],
+                    spacing=0,
+                    tight=True,
+                    expand=True,
+                ),
+                ft.Container(
+                    content=ft.Text(
+                        f"{int(round(confidence * 100))}%" if confidence is not None else "",
+                        size=10,
+                        color=ft.Colors.GREY_400,
+                    ),
+                    tooltip="Model confidence" if confidence is not None else None,
+                ),
+            ],
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        rows: list[ft.Control] = [header]
+
+        if summary:
+            rows.append(
+                ft.Container(
+                    content=ft.Text(
+                        summary,
+                        size=12,
+                        color=ft.Colors.GREY_200,
+                        selectable=True,
+                    ),
+                    padding=ft.padding.only(top=4),
+                )
+            )
+
+        if metrics:
+            chips: list[ft.Control] = []
+            for _key, m_label, m_val in metrics:
+                if m_val in (None, "", "none", "None") and not isinstance(m_val, (int, float)):
+                    continue
+                chips.append(self._metric_chip(m_label, m_val, check.metric_value_set))
+            if chips:
+                rows.append(
+                    ft.Container(
+                        content=ft.Row(chips, spacing=4, wrap=True, run_spacing=4),
+                        padding=ft.padding.only(top=6),
+                    )
+                )
+
+        if recs:
+            rec_controls: list[ft.Control] = [
+                ft.Text("Recommendations", size=10, color=ft.Colors.GREY_400)
+            ]
+            for r in recs:
+                action = str(r.get("action") or r.get("recommendation") or "").strip()
+                if not action:
+                    continue
+                priority = str(r.get("priority") or r.get("uncertainty") or "").strip().lower()
+                pcolor = {
+                    "high": "#E5484D",
+                    "medium": "#F0A455",
+                    "low": "#7ED9A0",
+                }.get(priority, ft.Colors.GREY_500)
+                rec_controls.append(
+                    ft.Row(
+                        [
+                            ft.Container(
+                                width=6, height=6, border_radius=3, bgcolor=pcolor,
+                                margin=ft.margin.only(top=6),
+                            ),
+                            ft.Text(action, size=12, color=ft.Colors.GREY_100, expand=True, selectable=True),
+                        ],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    )
+                )
+            rows.append(
+                ft.Container(
+                    content=ft.Column(rec_controls, spacing=2, tight=True),
+                    padding=ft.padding.only(top=6),
+                )
+            )
+
+        return ft.Column(
+            rows,
+            spacing=2,
+            tight=True,
+            scroll=ft.ScrollMode.AUTO,
+        )
+
+    # ------------------------------------------------------------------
+    # Invalidation: drop per-paragraph cache when candidate text changes.
+    # ------------------------------------------------------------------
+
+    def _invalidate_check_results_for_changes(self) -> None:
+        """Detect changed candidate paragraphs and drop their cached results from memory.
+
+        Called after candidate edits. Disk cache (paragraph_analysis) is keyed by
+        content hashes so re-runs reuse it.
+        """
+        if not self._check_results:
+            self._check_para_hashes = []
+            return
+        baseline = self._compare_latest_baseline_text()
+        candidate = self._compare_editor.value or ""
+        pairs = pair_paragraphs_for_compare(baseline, candidate)
+        new_hashes = [compute_hash(new) for _, new in pairs]
+        prev_hashes = self._check_para_hashes
+        n = len(new_hashes)
+        # If row count changed, blow away results (rebuild will repopulate).
+        if len(prev_hashes) != n:
+            for cid in list(self._check_results.keys()):
+                self._check_results[cid] = [None] * n
+            self._check_para_hashes = new_hashes
+            return
+        # Same count: invalidate only changed indices.
+        changed = [i for i, (a, b) in enumerate(zip(prev_hashes, new_hashes, strict=True)) if a != b]
+        if changed:
+            for cid, results in self._check_results.items():
+                if len(results) != n:
+                    self._check_results[cid] = [None] * n
+                    continue
+                for i in changed:
+                    results[i] = None
+        self._check_para_hashes = new_hashes
 
     def _invalidate_header_hide(self) -> None:
         self._header_hide_gen += 1
@@ -960,6 +1516,17 @@ class MarkdownStudio:
         )
         if _ctrl_on_page(self._compare_candidate_dropdown):
             self._compare_candidate_dropdown.update()
+        self._refresh_compare_bulk_buttons()
+
+    def _refresh_compare_bulk_buttons(self) -> None:
+        n = len(self._compare_right_fields)
+        has_doc = self.current_path is not None
+        self._compare_approve_all_btn.disabled = not has_doc or n == 0
+        self._compare_decline_all_btn.disabled = n == 0
+        if _ctrl_on_page(self._compare_approve_all_btn):
+            self._compare_approve_all_btn.update()
+        if _ctrl_on_page(self._compare_decline_all_btn):
+            self._compare_decline_all_btn.update()
 
     async def _on_compare_candidate_change_async(self, e: ft.ControlEvent) -> None:
         if self._compare_candidate_dropdown.disabled or not self.current_path:
@@ -1082,13 +1649,14 @@ class MarkdownStudio:
         *,
         para_index: int,
         action_id: str,
+        bulk: bool = False,
     ) -> None:
         """Two DB snapshots for AI Compare accept: document before merge, then after (parent chain)."""
         if not self.current_path:
             return
         act = prompts.get_margin_action(action_id)
         apply_label = act.label if act else action_id
-        before_label = f"Before accept · paragraph {para_index + 1}"
+        before_label = "Before accept · all paragraphs" if bulk else f"Before accept · paragraph {para_index + 1}"
         try:
             with session_scope() as s:
                 rp = self.current_path.resolve()
@@ -1160,6 +1728,18 @@ class MarkdownStudio:
         self._compare_right_fields.clear()
         self._compare_row_pill_hosts.clear()
         self._compare_left_diff_texts.clear()
+        self._compare_eval_hosts.clear()
+        # Hide any active result-card overlay; row layout is being rebuilt.
+        self._result_card_overlay.visible = False
+        self._result_card_visible_for = None
+        if _ctrl_on_page(self._result_card_overlay):
+            self._result_card_overlay.update()
+        # Refresh paragraph hash list against the new candidate; resize results buffers.
+        self._check_para_hashes = [compute_hash(new) for _, new in pairs]
+        for cid in list(self._check_results.keys()):
+            results = self._check_results.get(cid) or []
+            if len(results) != len(pairs):
+                self._check_results[cid] = (results + [None] * len(pairs))[: len(pairs)]
 
         para_style = self._compare_para_text_style()
         shared_tf_kwargs: dict[str, Any] = {
@@ -1190,12 +1770,8 @@ class MarkdownStudio:
                 alignment=ft.Alignment.TOP_CENTER,
                 padding=ft.padding.only(top=4),
             )
-            eval_cell = ft.Container(
-                width=_COMPARE_EVAL_COL_W,
-                alignment=ft.Alignment.TOP_CENTER,
-                padding=ft.padding.only(top=4, right=2),
-                content=ft.Container(),
-            )
+            eval_cell = self._build_eval_cell(i)
+            self._compare_eval_hosts.append(eval_cell)
 
             left_diff = ft.Text(
                 spans=self._compare_paragraph_diff_spans(left_txt, right_txt),
@@ -1343,6 +1919,7 @@ class MarkdownStudio:
         if _ctrl_on_page(self._compare_rows_listview):
             self._compare_rows_listview.update()
 
+        self._refresh_compare_bulk_buttons()
         self._compare_refine_gen += 1
         self.page.run_task(self._debounced_refine_compare_slots, self._compare_refine_gen)
 
@@ -1359,6 +1936,10 @@ class MarkdownStudio:
             self._rebuild_compare_paragraph_ui()
             return
         self._refresh_compare_left_diff_spans()
+        # Drop in-memory analysis results for paragraphs whose new-text hash changed.
+        self._invalidate_check_results_for_changes()
+        if self._active_check_id is not None:
+            self._refresh_all_eval_cells()
         self._compare_pill_gen += 1
         pg = self._compare_pill_gen
         self.page.run_task(self._debounced_compare_pill_refresh, pg)
@@ -1482,6 +2063,64 @@ class MarkdownStudio:
         self._sync_compare_buffer_from_fields()
         self._rebuild_compare_paragraph_ui()
         self._refresh_title_bar()
+
+    async def _compare_approve_all_async(self) -> None:
+        if not self.current_path:
+            self._snack("Open a note first.")
+            return
+        if not self._compare_right_fields:
+            return
+        parts = [tf.value or "" for tf in self._compare_right_fields]
+        new_buf = "\n\n".join(parts)
+        pre_buf = self.editor.value or ""
+        ai_flow = (
+            self._compare_candidate_source == "ai_preview"
+            and self._pending_ai_accept_action_id
+        )
+        if ai_flow:
+            self._persist_ai_accept_snapshots(
+                pre_buf,
+                new_buf,
+                para_index=0,
+                action_id=self._pending_ai_accept_action_id,
+                bulk=True,
+            )
+            try:
+                self.current_path.write_text(new_buf, encoding="utf-8")
+            except OSError as ex:
+                self._snack(f"Save failed: {ex}")
+                return
+            self.last_saved_text = new_buf
+            self._refresh_compare_tab_candidate_ui()
+            if _ctrl_on_page(self._compare_candidate_dropdown):
+                self._compare_candidate_dropdown.update()
+        self.editor.value = new_buf
+        self._capture_compare_baseline_snapshot()
+        if _ctrl_on_page(self.editor):
+            self.editor.update()
+        self._margin_gen += 1
+        await self._debounced_compose_rebuild(self._margin_gen)
+        self._rebuild_compare_paragraph_ui()
+        self._refresh_title_bar()
+        self._snack("All paragraphs applied to the document.")
+
+    async def _compare_decline_all_async(self) -> None:
+        if not self._compare_right_fields:
+            return
+        baseline = self._compare_latest_baseline_text()
+        paras = split_paragraphs(baseline or "")
+        for i, tf in enumerate(self._compare_right_fields):
+            if i < len(self._compare_row_stable_texts):
+                revert = self._compare_row_stable_texts[i]
+            else:
+                revert = paras[i] if i < len(paras) else ""
+            tf.value = revert
+            if _ctrl_on_page(tf):
+                tf.update()
+        self._sync_compare_buffer_from_fields()
+        self._rebuild_compare_paragraph_ui()
+        self._refresh_title_bar()
+        self._snack("All paragraphs reset to match latest.")
 
     def _hide_prompt_footer(self, footer: ft.Row) -> None:
         footer.controls.clear()

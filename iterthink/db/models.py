@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from iterthink.db.base import Base
@@ -44,3 +44,24 @@ class DocumentVersion(Base):
     display_label: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
     document: Mapped["Document"] = relationship("Document", back_populates="versions")
+
+
+class ParagraphAnalysis(Base):
+    """Cache of LLM check results keyed by content hashes (shared across documents)."""
+
+    __tablename__ = "paragraph_analysis"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    check_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    old_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    new_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    result_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "check_id", "old_sha256", "new_sha256", "model",
+            name="uq_paragraph_analysis_key",
+        ),
+    )

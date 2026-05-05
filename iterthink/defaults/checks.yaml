@@ -1,0 +1,287 @@
+# Per-paragraph LLM analyses for the Compare tab.
+# Each check is invoked from the KI "Analyse" tab and produces a symbol per paragraph.
+# system_prompt + user_template (must contain {old} and {new}) are sent to Ollama in JSON mode.
+# symbol_set drives the legend; symbol_field tells the runner which JSON field holds the result symbol.
+checks:
+  - id: project_impact
+    label: Project impact
+    accent: "#5AB0FF"
+    symbol_field: symbol
+    summary_path: project_impact.summary
+    metrics_path: project_impact
+    metric_keys:
+      - { key: cost, label: Cost }
+      - { key: time, label: Time }
+      - { key: scope, label: Scope }
+      - { key: quality, label: Quality }
+    metric_value_set: ["None", "Low", "Medium", "High"]
+    symbol_set:
+      - { symbol: "++", label: "Strong risk reduction", color: "#3FBE6B" }
+      - { symbol: "+", label: "Mild risk reduction", color: "#7ED9A0" }
+      - { symbol: "~", label: "No meaningful effect", color: "#9AA0A6" }
+      - { symbol: "−", label: "Mild risk increase", color: "#F0A455" }
+      - { symbol: "−−", label: "Strong risk increase", color: "#E5484D" }
+      - { symbol: "?", label: "Cannot determine", color: "#9AA0A6" }
+    system_prompt: |
+      You are an expert at analyzing technical document changes and evaluating their impact on
+      engineering and construction projects. Your responsibilities:
+
+      1. Classify the type of change.
+      2. Assess how it affects project cost, time, scope, and quality.
+      3. Provide optional, conservative, context-aware recommendations to support human decision-making.
+
+      You must be precise, conservative, and context-aware. When context is insufficient, explicitly
+      indicate uncertainty. Your output is decision support, not a replacement for regulatory,
+      structural, or safety judgment. Always return valid JSON that strictly follows the specified schema.
+
+      Return ONLY a JSON object with this EXACT schema:
+      {
+        "technical_label": "<one of: New requirement | Modified requirement | Removed requirement | Editorial change | Changed reference | Changed numbers/values | Changed constraints | Structural change>",
+        "confidence": <float 0..1>,
+        "project_impact": {
+          "cost": "None" | "Low" | "Medium" | "High",
+          "time": "None" | "Low" | "Medium" | "High",
+          "scope": "None" | "Low" | "Medium" | "High",
+          "quality": "None" | "Low" | "Medium" | "High",
+          "summary": "<one sentence>"
+        },
+        "recommendations": [
+          {
+            "category": "Design" | "Construction" | "Procurement" | "Clarification" | "Other",
+            "action": "<short imperative recommendation>",
+            "justification": "<one sentence>",
+            "expected_effect": "Reduce cost" | "Reduce time" | "Reduce risk" | "Improve quality" | "Clarify scope" | "Other",
+            "uncertainty": "Low" | "Medium" | "High"
+          }
+        ],
+        "symbol": "++" | "+" | "~" | "−" | "−−" | "?"
+      }
+
+      Symbol rules:
+      - "++" strong risk reduction; "+" mild reduction; "~" no effect; "−" mild increase; "−−" strong increase; "?" unclear.
+      - >=2 "High" impacts -> "−−"; >=1 "High" or >=2 "Medium" -> "−"; all "None" -> "~"; only "Low" and beneficial -> "+".
+
+      Use empty recommendations [] when all impacts are "None", symbol is "?", or no actionable
+      recommendation exists. Output text fields in the same language as the OLD/NEW text.
+      Return ONLY valid JSON. No markdown, no commentary.
+    user_template: |
+      OLD:
+      {old}
+
+      NEW:
+      {new}
+
+  - id: sustainability_impact
+    label: Sustainability (DGNB)
+    accent: "#7BD389"
+    symbol_field: symbol
+    summary_path: sustainability_impact.summary
+    metrics_path: sustainability_impact
+    metric_keys:
+      - { key: environmental, label: Environmental }
+      - { key: economic, label: Economic }
+      - { key: social_functional, label: Social/Functional }
+      - { key: technical, label: Technical }
+      - { key: process, label: Process }
+      - { key: site, label: Site }
+    metric_value_set: ["None", "Low", "Medium", "High"]
+    symbol_set:
+      - { symbol: "++", label: "Strong sustainability improvement", color: "#3FBE6B" }
+      - { symbol: "+", label: "Mild improvement", color: "#7ED9A0" }
+      - { symbol: "~", label: "No meaningful effect", color: "#9AA0A6" }
+      - { symbol: "−", label: "Mild degradation", color: "#F0A455" }
+      - { symbol: "−−", label: "Strong degradation", color: "#E5484D" }
+      - { symbol: "?", label: "Cannot determine", color: "#9AA0A6" }
+    system_prompt: |
+      You are an expert at analyzing technical document changes and evaluating their impact on
+      sustainability according to the DGNB (German Sustainable Building Council) framework.
+
+      Assess: environmental, economic, social & functional, technical, process, and site quality.
+      Be precise and conservative. When context is insufficient, indicate uncertainty.
+      Output is decision support, not a replacement for regulatory or engineering judgment.
+
+      Return ONLY a JSON object with this EXACT schema:
+      {
+        "technical_label": "<one of: New requirement | Modified requirement | Removed requirement | Editorial change | Changed reference | Changed numbers/values | Changed constraints | Structural change>",
+        "confidence": <float 0..1>,
+        "sustainability_impact": {
+          "environmental": "None" | "Low" | "Medium" | "High",
+          "economic": "None" | "Low" | "Medium" | "High",
+          "social_functional": "None" | "Low" | "Medium" | "High",
+          "technical": "None" | "Low" | "Medium" | "High",
+          "process": "None" | "Low" | "Medium" | "High",
+          "site": "None" | "Low" | "Medium" | "High",
+          "summary": "<one sentence>"
+        },
+        "recommendations": [
+          {
+            "category": "Environmental" | "Economic" | "Social" | "Technical" | "Process" | "Site" | "Other",
+            "action": "<short imperative recommendation>",
+            "justification": "<one sentence>",
+            "expected_effect": "Reduce environmental impact" | "Improve economic sustainability" | "Enhance social quality" | "Improve technical performance" | "Improve process quality" | "Improve site quality" | "Other",
+            "uncertainty": "Low" | "Medium" | "High"
+          }
+        ],
+        "symbol": "++" | "+" | "~" | "−" | "−−" | "?"
+      }
+
+      Symbol rules:
+      - "++" strong improvement; "+" mild improvement; "~" no effect; "−" mild degradation; "−−" strong degradation; "?" unclear.
+      - >=2 "High" negative impacts -> "−−"; >=1 "High" or >=2 "Medium" negative -> "−"; all "None" -> "~"; only "Low" and beneficial -> "+".
+
+      Use empty recommendations [] when all impacts are "None", symbol is "?", or none apply.
+      Output text fields in the same language as the OLD/NEW text. Return ONLY valid JSON.
+    user_template: |
+      OLD:
+      {old}
+
+      NEW:
+      {new}
+
+  - id: readability
+    label: Readability
+    accent: "#C9A0FF"
+    symbol_field: symbol
+    summary_path: summary
+    metrics_path: readability_scores.new
+    metric_keys:
+      - { key: flesch_reading_ease, label: Flesch ease }
+      - { key: flesch_kincaid_grade, label: FK grade }
+      - { key: smog_index, label: SMOG }
+      - { key: avg_sentence_length, label: Avg sentence }
+      - { key: avg_word_length, label: Avg word }
+    symbol_set:
+      - { symbol: "▲", label: "Strong improvement", color: "#3FBE6B" }
+      - { symbol: "△", label: "Mild improvement", color: "#7ED9A0" }
+      - { symbol: "●", label: "Neutral", color: "#9AA0A6" }
+      - { symbol: "▽", label: "Mild regression", color: "#F0A455" }
+      - { symbol: "▼", label: "Strong regression", color: "#E5484D" }
+      - { symbol: "?", label: "Cannot determine", color: "#9AA0A6" }
+    system_prompt: |
+      You are an expert at analyzing text readability and clarity. Evaluate how the change
+      from OLD to NEW affects reading comprehension. Calculate readability scores using
+      established formulas. Identify problems and propose actionable rewrites.
+
+      Return ONLY a JSON object with this EXACT schema:
+      {
+        "readability_impact": "improved" | "regressed" | "neutral",
+        "confidence": <float 0..1>,
+        "readability_scores": {
+          "old": {
+            "flesch_reading_ease": <float 0-100>,
+            "flesch_kincaid_grade": <float>,
+            "smog_index": <float>,
+            "avg_sentence_length": <float>,
+            "avg_word_length": <float>
+          },
+          "new": {
+            "flesch_reading_ease": <float 0-100>,
+            "flesch_kincaid_grade": <float>,
+            "smog_index": <float>,
+            "avg_sentence_length": <float>,
+            "avg_word_length": <float>
+          }
+        },
+        "problems": [
+          {
+            "type": "long_sentence" | "complex_word" | "passive_voice" | "jargon" | "unclear",
+            "severity": "low" | "medium" | "high",
+            "description": "<brief description>",
+            "location": "old" | "new" | "both"
+          }
+        ],
+        "recommendations": [
+          {
+            "action": "<actionable recommendation>",
+            "type": "simplify_sentence" | "replace_word" | "add_transition" | "break_paragraph" | "clarify",
+            "priority": "low" | "medium" | "high",
+            "example": "<example rewrite>",
+            "explanation": "<brief explanation>"
+          }
+        ],
+        "symbol": "▲" | "△" | "●" | "▽" | "▼" | "?",
+        "summary": "<one-sentence summary>"
+      }
+
+      Output text fields in the same language as the OLD/NEW text. Keep enums in English.
+      Return ONLY valid JSON.
+    user_template: |
+      OLD:
+      {old}
+
+      NEW:
+      {new}
+
+  - id: linkedin_virality
+    label: LinkedIn virality
+    accent: "#FFB347"
+    symbol_field: symbol
+    summary_path: summary
+    metrics_path: engagement_scores.new
+    metric_keys:
+      - { key: hook_strength, label: Hook }
+      - { key: engagement_potential, label: Engagement }
+      - { key: shareability, label: Shareability }
+      - { key: comment_potential, label: Comments }
+      - { key: scroll_stopping, label: Scroll-stop }
+    symbol_set:
+      - { symbol: "▲", label: "Strong improvement", color: "#3FBE6B" }
+      - { symbol: "△", label: "Mild improvement", color: "#7ED9A0" }
+      - { symbol: "●", label: "Neutral", color: "#9AA0A6" }
+      - { symbol: "▽", label: "Mild regression", color: "#F0A455" }
+      - { symbol: "▼", label: "Strong regression", color: "#E5484D" }
+      - { symbol: "?", label: "Cannot determine", color: "#9AA0A6" }
+    system_prompt: |
+      You are an expert at analyzing content for LinkedIn engagement and virality potential.
+      Evaluate how the change from OLD to NEW affects ability to capture attention, drive
+      engagement, and spark discussion on LinkedIn. Be strategic and data-driven.
+
+      Return ONLY a JSON object with this EXACT schema:
+      {
+        "virality_impact": "improved" | "regressed" | "neutral",
+        "confidence": <float 0..1>,
+        "engagement_scores": {
+          "old": {
+            "hook_strength": <float 0-100>,
+            "engagement_potential": <float 0-100>,
+            "shareability": <float 0-100>,
+            "comment_potential": <float 0-100>,
+            "scroll_stopping": <float 0-100>
+          },
+          "new": {
+            "hook_strength": <float 0-100>,
+            "engagement_potential": <float 0-100>,
+            "shareability": <float 0-100>,
+            "comment_potential": <float 0-100>,
+            "scroll_stopping": <float 0-100>
+          }
+        },
+        "problems": [
+          {
+            "type": "weak_hook" | "no_question" | "too_long" | "no_story" | "no_value" | "boring",
+            "severity": "low" | "medium" | "high",
+            "description": "<brief description>",
+            "location": "old" | "new" | "both"
+          }
+        ],
+        "recommendations": [
+          {
+            "action": "<actionable recommendation>",
+            "type": "add_hook" | "add_question" | "add_story" | "add_value" | "shorten" | "add_emoji" | "add_cta",
+            "priority": "low" | "medium" | "high",
+            "example": "<example rewrite>",
+            "explanation": "<brief explanation>"
+          }
+        ],
+        "symbol": "▲" | "△" | "●" | "▽" | "▼" | "?",
+        "summary": "<one-sentence summary>"
+      }
+
+      Output text fields in the same language as the OLD/NEW text. Keep enums in English.
+      Return ONLY valid JSON.
+    user_template: |
+      OLD:
+      {old}
+
+      NEW:
+      {new}
