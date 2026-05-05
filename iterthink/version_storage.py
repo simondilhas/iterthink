@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from iterthink import config
 from iterthink.db.models import Document, DocumentVersion
 
-SnapshotReason = Literal["manual", "autosave", "pre_switch", "ai_apply"]
+SnapshotReason = Literal["manual", "autosave", "pre_switch", "ai_apply", "ai_staged", "before_apply"]
 
 
 def path_key_for(resolved: Path) -> str:

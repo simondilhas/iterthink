@@ -1075,6 +1075,40 @@ class MarkdownStudio:
             return self._compare_baseline_snapshot
         return self.editor.value or ""
 
+    def _persist_ai_accept_snapshots(
+        self,
+        pre_buf: str,
+        post_buf: str,
+        *,
+        para_index: int,
+        action_id: str,
+    ) -> None:
+        """Two DB snapshots for AI Compare accept: document before merge, then after (parent chain)."""
+        if not self.current_path:
+            return
+        act = prompts.get_margin_action(action_id)
+        apply_label = act.label if act else action_id
+        before_label = f"Before accept · paragraph {para_index + 1}"
+        try:
+            with session_scope() as s:
+                rp = self.current_path.resolve()
+                version_storage.persist_version_snapshot(
+                    s,
+                    rp,
+                    pre_buf,
+                    "before_apply",
+                    display_label=before_label,
+                )
+                version_storage.persist_version_snapshot(
+                    s,
+                    rp,
+                    post_buf,
+                    "ai_apply",
+                    display_label=apply_label,
+                )
+        except BaseException:
+            pass
+
     def _compare_paragraph_diff_spans(self, left_para: str, right_para: str) -> list[ft.TextSpan]:
         """Inline diff for left column: strikethrough removals, green additions vs right."""
         cap = 80_000
@@ -1402,14 +1436,36 @@ class MarkdownStudio:
         if index < 0 or index >= len(self._compare_right_fields):
             return
         cand_para = self._compare_right_fields[index].value or ""
-        buf = self.editor.value or ""
-        self.editor.value = replace_paragraph_at_index(buf, index, cand_para)
+        pre_buf = self.editor.value or ""
+        new_buf = replace_paragraph_at_index(pre_buf, index, cand_para)
+        ai_flow = (
+            self._compare_candidate_source == "ai_preview"
+            and self._pending_ai_accept_action_id
+        )
+        if ai_flow:
+            self._persist_ai_accept_snapshots(
+                pre_buf,
+                new_buf,
+                para_index=index,
+                action_id=self._pending_ai_accept_action_id,
+            )
+            try:
+                self.current_path.write_text(new_buf, encoding="utf-8")
+            except OSError as ex:
+                self._snack(f"Save failed: {ex}")
+                return
+            self.last_saved_text = new_buf
+            self._refresh_compare_tab_candidate_ui()
+            if _ctrl_on_page(self._compare_candidate_dropdown):
+                self._compare_candidate_dropdown.update()
+        self.editor.value = new_buf
         self._capture_compare_baseline_snapshot()
         if _ctrl_on_page(self.editor):
             self.editor.update()
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)
         self._rebuild_compare_paragraph_ui()
+        self._refresh_title_bar()
         self._snack(f"Paragraph {index + 1} applied to the document.")
 
     async def _compare_decline_paragraph_async(self, index: int) -> None:
@@ -1438,6 +1494,19 @@ class MarkdownStudio:
         if not text:
             self._snack("Reply is empty.")
             return
+        act = prompts.get_margin_action(action_id)
+        if self.current_path:
+            try:
+                with session_scope() as s:
+                    version_storage.persist_version_snapshot(
+                        s,
+                        self.current_path.resolve(),
+                        self.editor.value or "",
+                        "ai_staged",
+                        display_label=f"{act.label} · preview" if act else "AI · preview",
+                    )
+            except BaseException:
+                pass
         base = self.editor.value or ""
         self._compare_editor.value = replace_paragraph_at_index(base, idx, text)
         self._compare_candidate_source = "ai_preview"

@@ -58,6 +58,19 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -U pip iterthi
 
 **From a clone (developers):** `pip install -e .` (or `pip install -r requirements.txt`), then `iterthink` or `python -m iterthink`.
 
+### Prompts (margin / KI actions)
+
+There is no separate “skills” layer in iterthink—per-paragraph AI actions are **margin actions** defined in `prompts.yaml`.
+
+| | |
+|---|---|
+| **Runtime file** | `<store_dir>/prompts.yaml` — default store is under `Documents/.iterthink` (see **File → Settings → Paths** for your actual `store_dir`). |
+| **First install** | That file is created by copying the package default; changing files under `iterthink/defaults/` in a git clone does **not** update an existing store copy. Delete `prompts.yaml` in the store folder to re-seed from defaults, or edit the store file directly. |
+| **In the app** | **File → Settings** → **Prompts** (margin / KI actions) — add rows, edit **system prompt** and **user template** (`{text}` is replaced with the paragraph). **Save prompts** writes `prompts.yaml`. |
+| **By hand** | Valid YAML with a top-level `margin_actions:` list. Each entry needs `id`, `label`, `topic` (`discuss`, `change`, or `evaluate`), `system_prompt`, and `user_template` (must contain `{text}`). |
+
+The chat sidebar uses the **Chat system prompt** on the **App** tab in Settings, separate from margin actions.
+
 ---
 
 ## Why local
