@@ -1,4 +1,7 @@
-"""Margin prompt actions (per-paragraph), loaded from prompts.yaml in store_dir."""
+"""Margin prompt actions (per-paragraph).
+
+Runtime loads ``config.STORE_DIR / "prompts.yaml"`` only; ``iterthink/defaults/prompts.yaml`` seeds that file when missing.
+"""
 
 from __future__ import annotations
 

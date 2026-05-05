@@ -61,6 +61,15 @@ class SnapshotInfo:
     created_at: float
     reason: str
     content_sha256: str
+    display_label: str | None = None
+
+
+def snapshot_display_text(sn: SnapshotInfo) -> str:
+    """Label for UI selectors (tab Comparison, menus)."""
+    if sn.display_label and sn.display_label.strip():
+        return sn.display_label.strip()
+    ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(sn.created_at))
+    return f"{ts}  ({sn.reason})"
 
 
 def update_document_path_after_rename(
@@ -139,6 +148,7 @@ def persist_version_snapshot(
     reason: SnapshotReason,
     *,
     skip_if_unchanged_sha: bool = True,
+    display_label: str | None = None,
 ) -> int | None:
     """
     Write snapshot file and insert ``DocumentVersion``.
@@ -169,6 +179,7 @@ def persist_version_snapshot(
         created_at=now,
         reason=reason,
         parent_version_id=parent_id,
+        display_label=display_label.strip() if display_label and display_label.strip() else None,
     )
     session.add(ver)
     session.flush()
@@ -195,6 +206,7 @@ def list_snapshots(session: Session, resolved_doc: Path) -> list[SnapshotInfo]:
                 created_at=v.created_at,
                 reason=v.reason,
                 content_sha256=v.content_sha256,
+                display_label=v.display_label,
             )
         )
     return out

@@ -1,22 +1,23 @@
 # iterthink
 
-You write. AI suggests. You decide.
+See every change. Understand the impact. Act on what matters.
 
-Most AI writing tools rewrite everything at once. You get back something fluent and clean — but you can't see what changed. You can't tell if it's still yours.
+iterthink is a local review layer for documents and models. Most tools rewrite everything at once — you get back something clean, but you can't see what changed or whether the meaning held. iterthink shows you exactly what the AI touched, word by word, and tells you whether the intent shifted. When a change matters, you can trigger a workflow directly in [{yourcompany}os](https://yourcompanyos.io).
 
-iterthink shows you exactly what the AI touched, word by word. Then it tells you whether the meaning held or shifted.
+Nothing leaves your machine.
 
 ---
 
 ## What it does
 
-- Write in plain markdown
+- Write or import documents in plain markdown
 - Send any paragraph to a local AI (via Ollama — private, no API key)
 - See word-level diff: what was added, what was removed
-- Get a signal: `STABLE` (same intent) or `NEW` (meaning shifted)
+- Get a semantic signal: `STABLE` (intent held) or `NEW` (meaning shifted)
 - Accept, reject, or edit — you stay in control
 - Every AI action auto-saves a version snapshot
 - Compare any two versions side by side
+- Trigger workflows in {yourcompany}os when a change needs action
 
 ---
 
@@ -61,7 +62,7 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -U pip iterthi
 
 ## Why local
 
-No cloud. No account. No API key. Your files stay on your machine.
+No cloud. No account. No API key. Your files stay on your machine. The AI runs locally via Ollama — private by default, not by policy.
 
 ---
 
@@ -75,26 +76,49 @@ Compare any two versions — your edit vs. the AI's, Tuesday's draft vs. today's
 
 ## Who it's for
 
-- Non-native writers working in a second language
-- Journalists, essayists, researchers with a point of view worth protecting
+- Project teams in AEC and construction tracking changes across specifications and plans
+- Non-native writers working in a second language who need to stay in control of their voice
+- Journalists, essayists, and researchers with a point of view worth protecting
 - Anyone who has opened `final_final_v7.docx` and wondered what happened
 
 ---
 
 ## Roadmap
 
-- Pro version: sync and version history across devices
-- Team features for collaborative writing
-- Workflow integration via [yourcompanyos.io](http://yourcompanyos.io)
+- IFC model comparison — see what changed between two BIM models
+- Sync and version history across devices
+- Team review features for collaborative workflows
+- Deeper {yourcompany}os integration — from change detection to closed decisions
+
+---
+
+## Part of the Abstract AG platform
+
+iterthink is the review layer. It sits between your documents and your decisions.
+
+| | |
+|---|---|
+| [Abstract BIM](https://abstractbim.com) | Normalize raw IFC data |
+| [Pragmatic BIM](https://pragmaticbim.com) | Define BIM requirements |
+| **iterthink** | Detect change, evaluate impact |
+| [{yourcompany}os](https://yourcompanyos.io) | Act on change |
+
+Raw data means nothing until it's clean, defined, reviewed, and acted on.
+
+---
+
+## License
+
+Licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
 
 ---
 
 ## Contributing
 
-iterthink is fully open source. Read the code, trust it, improve it.
+iterthink is fully open source. Read the code, trust it, improve it. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and pull request guidelines.
 
 [GitHub Issues →](https://github.com/iterthink/iterthink/issues)
 
 ---
 
-*iterthink — write with AI, stay yourself.*
+*iterthink — the review layer for documents and models.*

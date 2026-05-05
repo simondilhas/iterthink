@@ -9,7 +9,7 @@ from datetime import date
 import re
 from pathlib import Path
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import flet as ft
 from flet.controls.types import PagePlatform
@@ -17,8 +17,10 @@ from ollama import AsyncClient
 
 from iterthink import config, prompts, settings_ui, store_db, version_storage
 from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS, TOPIC_EVALUATE
+from iterthink.compare_layout import pair_paragraphs_for_compare
 from iterthink.diff_card import build_unified_spans
 from iterthink.db.session import session_scope
+from iterthink import paragraph_compare
 from iterthink.margin import (
     distribute_heights,
     estimate_total_editor_height,
@@ -31,42 +33,54 @@ from iterthink.ollama_models import classify_installed_models
 from iterthink.ollama_util import chat_response_text, chat_stream_delta, ollama_error_message
 from iterthink.tree import build_md_tree, filter_md_tree
 
-# Typing idle before autosave. Margin diff is vs baseline (saved file or selected snapshot);
-# a longer delay keeps paragraph change highlights visible while you pause.
+# Typing idle before autosave. Compare: left = latest Compose; right = draft / snapshot / AI. ✓/✗ refresh rows.
 AUTOSAVE_IDLE_SEC = 6.0
 
 # Collapsed side rails: wide enough to tap; square (no card rounding), transparent fill.
 COLLAPSED_RAIL_WIDTH_PX = 36
+# Expanded sidebars stay fixed width (not a fraction of window) so fullscreen does not widen them.
+SIDEBAR_EXPANDED_WIDTH_PX = 280
+# KI TabBarView needs a minimum height; actual height grows with measured pill rows.
+KI_TAB_BODY_MIN_HEIGHT_PX = 96
+# Vertical padding inside each tab page (above/below the pill row).
+KI_TAB_PAGE_PAD_V_PX = 8
+# Space between the tab labels strip and the pill area (inside the grey card).
+KI_TAB_BAR_TO_PILLS_GAP_PX = 12
+# Quick-action pills in the KI tab strip (text-only, compact).
+KI_PILL_TEXT_SIZE = 10
 READING_MAX_PX = 720
 # Compose reading column uses this fraction of the *laid-out* compose width, capped at READING_MAX_PX.
 COMPOSE_READING_WIDTH_FRAC = 0.92
-COMPOSE_SPARKLE_W = 40
 _DIFF_SPAN_CHAR_CAP = 120_000
+
+_COMPARE_KEY_DRAFT = "__draft__"
+_COMPARE_KEY_AI = "__ai_preview__"
+CompareCandidateSource = Literal["draft", "ai_preview", "snapshot"]
+
+_COMPARE_COL_FONT_SIZE = 14
+_COMPARE_COL_LINE_HEIGHT = 1.6
+# Compose: sparkle strip — keeps paragraph column width unchanged vs prior layout.
+_COMPOSE_MARGIN_COL_W = 104
+# Compare row chrome (evaluate placeholder · status pill · actions); text columns still expand=1.
+_COMPARE_EVAL_COL_W = 56
+_COMPARE_PILL_COL_W = 72
+# Compare action card: 2×2 grid; inner width = two equal columns; pad wraps the grid.
+_COMPARE_ACTION_GRID_CELL = 40  # row height / half of inner width
+_COMPARE_ACTION_INNER_W = _COMPARE_ACTION_GRID_CELL * 2
+_COMPARE_ACTION_H_PAD = 5
+_COMPARE_ACTION_V_PAD = 2
+_COMPARE_ACTION_COL_W = _COMPARE_ACTION_INNER_W + 2 * _COMPARE_ACTION_H_PAD
+# Compare row action card — row 2: play opens workflow site in the browser.
+_PROJECT_PAGE_URL = "https://www.yourcompanyos.io"
+_PROJECT_PAGE_TOOLTIP = "Start workflow on {yourcompany}os."
 
 _HELP_MD_PATH = Path(__file__).resolve().parent / "help.md"
 
-
-_QUICK_PILL_LABEL_DE: dict[str, str] = {
-    "devil_advocate": "Devil's advocate",
-    "clarify_intent": "Clarify",
-    "grammar": "Verbessern",
-    "summarize": "Kürzen",
-    "tone": "Ton",
-    "latex": "LaTeX",
-    "brainstorm": "Brainstorm",
+_TOPIC_MENU_LABEL: dict[str, str] = {
+    TOPIC_DISCUSS: "Discuss",
+    TOPIC_CHANGE: "Change",
+    TOPIC_EVALUATE: "Evaluate",
 }
-
-
-def _quick_pill_icon(action_id: str):
-    return {
-        "devil_advocate": ft.Icons.GAVEL,
-        "clarify_intent": ft.Icons.HELP_OUTLINE,
-        "grammar": ft.Icons.EDIT_DOCUMENT,
-        "summarize": ft.Icons.CONTENT_CUT,
-        "tone": ft.Icons.TUNE,
-        "latex": ft.Icons.FUNCTIONS,
-        "brainstorm": ft.Icons.LIGHTBULB_OUTLINE,
-    }.get(action_id, ft.Icons.AUTO_AWESOME)
 
 
 # LLMs often ignore "no preamble"; strip common lead-ins before display / insert.
@@ -97,43 +111,22 @@ def _ctrl_on_page(ctrl: ft.Control) -> bool:
         return False
 
 
-def _rename_title_field_value(path: Path, *, is_dir: bool) -> str:
-    """Value for rename text field: stem-only for ``.md`` files so users do not drop the extension."""
-    if is_dir:
-        return path.name
-    if path.suffix.lower() == ".md":
-        return path.stem
-    return path.name
-
-
-def _rename_commit_basename(path: Path, *, is_dir: bool, field_value: str) -> str | None:
-    """
-    Build the new filename from the field. Returns ``None`` if invalid.
-    For ``.md`` files (when ``is_dir`` is false), always commits as ``<title>.md``.
-    """
-    raw = (field_value or "").strip()
-    if not raw or raw in (".", ".."):
-        return None
-    if "/" in raw or "\\" in raw or "\x00" in raw:
-        return None
-    if is_dir:
-        return raw
-    if path.suffix.lower() == ".md":
-        title = raw[:-3] if len(raw) >= 3 and raw.lower().endswith(".md") else raw
-        title = title.strip()
-        if not title or title in (".", ".."):
-            return None
-        return f"{title}.md"
-    return raw
+def _compare_grid_slot(content: ft.Control, *, row_h: float, expand: bool) -> ft.Container:
+    """One quadrant: equal flex width when expand=True; icon centered (fixes right-edge skew)."""
+    return ft.Container(
+        expand=expand,
+        height=row_h,
+        alignment=ft.Alignment.CENTER,
+        content=content,
+    )
 
 
 def _ki_topic_index_for_prompt_topic(topic: str) -> int:
-    """Map prompts.yaml margin action topic to KI tab strip index."""
+    """Map prompts.yaml margin action topic to KI tab strip index (Discuss / Change only)."""
     t = (topic or "").strip()
-    if t == TOPIC_EVALUATE:
-        return 2
     if t == TOPIC_CHANGE:
         return 1
+    # Discuss + evaluate topics use Discuss tab (Evaluate tab removed from sidebar).
     return 0
 
 
@@ -160,7 +153,17 @@ class MarkdownStudio:
         self._margin_gen: int = 0
         self._compare_diff_gen: int = 0
         self._main_tab_index: int = 0
-        self._baseline_version_id: int | None = None
+        self._compare_candidate_source: CompareCandidateSource = "draft"
+        self._compare_snapshot_version_id: int | None = None
+        self._pending_ai_accept_action_id: str | None = None
+        self._compare_right_fields: list[ft.TextField] = []
+        self._compare_left_diff_texts: list[ft.Text] = []
+        self._compare_row_pill_hosts: list[ft.Container] = []
+        self._compare_row_stable_texts: list[str] = []
+        self._compare_pill_gen: int = 0
+        self._compare_refine_gen: int = 0
+        # Compose text frozen when opening Compare (draft); left column diffs vs this, not live editor drift.
+        self._compare_baseline_snapshot: str = ""
         self._compose_tab_inline_rename_active: bool = False
         self._compose_tab_rename_lock = asyncio.Lock()
 
@@ -188,15 +191,14 @@ class MarkdownStudio:
             multiline=True,
             max_lines=None,
             min_lines=1,
+            visible=False,
+            height=0,
+            width=0,
             border=ft.InputBorder.NONE,
             filled=False,
-            hint_text="Write…",
             text_style=ft.TextStyle(font_family="monospace", size=14, height=1.6, color=ft.Colors.GREY_100),
             cursor_color=config.FEDORA_BLUE,
             selection_color=config.SELECTION_OVERLAY,
-            enable_interactive_selection=True,
-            on_change=self._on_compare_editor_change,
-            on_size_change=self._on_compare_editor_size_change,
         )
 
         self._editor_shell = ft.Container(
@@ -204,13 +206,13 @@ class MarkdownStudio:
             expand=True,
         )
 
-        self._compose_sparkle_column = ft.Column(spacing=0, tight=True, width=COMPOSE_SPARKLE_W)
+        self._compose_sparkle_column = ft.Column(spacing=0, tight=True, width=_COMPOSE_MARGIN_COL_W)
         self._compose_sparkle_roots: list[ft.Container] = []
 
         self._compose_reading_inner = ft.Row(
             [
                 self._editor_shell,
-                ft.Container(content=self._compose_sparkle_column, width=COMPOSE_SPARKLE_W),
+                ft.Container(content=self._compose_sparkle_column, width=_COMPOSE_MARGIN_COL_W),
             ],
             expand=True,
             vertical_alignment=ft.CrossAxisAlignment.START,
@@ -240,48 +242,49 @@ class MarkdownStudio:
             ),
         )
 
-        self._version_dropdown = ft.Dropdown(
-            label="Compare to",
-            width=340,
+        self._compare_candidate_dropdown = ft.Dropdown(
+            width=260,
             dense=True,
-            text_size=12,
-            options=[ft.dropdown.Option(key="__disk__", text="Saved file (on disk)")],
-            value="__disk__",
-            visible=True,
+            text_size=14,
+            color=ft.Colors.GREY_200,
+            bgcolor=ft.Colors.TRANSPARENT,
+            filled=False,
+            border=ft.InputBorder.NONE,
+            border_width=0,
+            content_padding=ft.padding.only(left=2, right=8, top=0, bottom=0),
+            options=[ft.dropdown.Option(key=_COMPARE_KEY_DRAFT, text="Draft")],
+            value=_COMPARE_KEY_DRAFT,
             disabled=True,
-            tooltip="Open a markdown file from the tree to list snapshots.",
-            on_select=lambda e: self.page.run_task(self._on_version_dropdown_change_async, e),
+            tooltip="Draft, snapshot, or AI preview for the right column (left = latest Compose).",
+            on_select=lambda e: self.page.run_task(self._on_compare_candidate_change_async, e),
         )
-        self._compare_old_text = ft.Text(
-            spans=[ft.TextSpan(" ", style=ft.TextStyle(size=13, color=ft.Colors.GREY_400))],
-            selectable=True,
-        )
-        self._compare_left_scroll = ft.Column(
+        self._compare_tab_label_row = ft.Row(
             [
-                self._version_dropdown,
-                ft.Container(
-                    content=self._compare_old_text,
+                ft.Text("Comparison: ", size=14, color=ft.Colors.GREY_400),
+                self._compare_candidate_dropdown,
+            ],
+            tight=True,
+            spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._compare_rows_listview = ft.ListView(
+            expand=True,
+            spacing=0,
+            padding=ft.padding.symmetric(horizontal=4, vertical=2),
+        )
+        self._compare_editor_holder = ft.Container(content=self._compare_editor, visible=False, height=0)
+        self._compare_tab_body = ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Container(content=self._compare_rows_listview, expand=True),
+                    ],
                     expand=True,
-                    padding=ft.padding.all(6),
                 ),
+                self._compare_editor_holder,
             ],
             expand=True,
-            scroll=ft.ScrollMode.AUTO,
-            spacing=8,
-        )
-        self._compare_right_shell = ft.Container(
-            content=self._compare_editor,
-            expand=True,
-            padding=ft.padding.only(left=6),
-        )
-        self._compare_tab_body = ft.Row(
-            [
-                ft.Container(content=self._compare_left_scroll, expand=1),
-                ft.Container(width=1, bgcolor=ft.Colors.with_opacity(0.35, ft.Colors.GREY_700)),
-                self._compare_right_shell,
-            ],
-            expand=True,
-            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+            spacing=0,
         )
 
         self._compose_tab_filename_text = ft.Text(
@@ -314,18 +317,8 @@ class MarkdownStudio:
             on_submit=self._on_compose_tab_rename_field_submit,
             on_blur=self._on_compose_tab_rename_field_blur,
         )
-        self._compose_tab_filename_md_suffix = ft.Text(
-            ".md",
-            size=14,
-            color=ft.Colors.GREY_500,
-            visible=False,
-        )
         self._compose_tab_filename_row = ft.Row(
-            [
-                self._compose_tab_filename_hit,
-                self._compose_tab_filename_field,
-                self._compose_tab_filename_md_suffix,
-            ],
+            [self._compose_tab_filename_hit, self._compose_tab_filename_field],
             tight=True,
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -340,7 +333,7 @@ class MarkdownStudio:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         self._main_tab_bar = ft.TabBar(
-            tabs=[ft.Tab(label=self._compose_tab_label_row), ft.Tab(label="Compare")],
+            tabs=[ft.Tab(label=self._compose_tab_label_row), ft.Tab(label=self._compare_tab_label_row)],
             scrollable=False,
             tab_alignment=ft.TabAlignment.FILL,
             indicator_color=config.FEDORA_BLUE,
@@ -441,7 +434,7 @@ class MarkdownStudio:
         )
 
         self.left_panel = ft.Container(
-            width=260,
+            width=SIDEBAR_EXPANDED_WIDTH_PX,
             margin=12,
             padding=8,
             bgcolor=config.SIDEBAR_SURFACE,
@@ -456,41 +449,63 @@ class MarkdownStudio:
         self._ki_topic_index: int = 0
         self._chat_api_messages: list[dict[str, str]] = []
 
-        self._pill_row_discuss = ft.Row(spacing=8, wrap=True, run_spacing=6)
-        self._pill_row_change = ft.Row(spacing=8, wrap=True, run_spacing=6)
-        self._pill_row_evaluate = ft.Row(spacing=8, wrap=True, run_spacing=6)
+        self._pill_row_discuss = ft.Row(spacing=4, wrap=True, run_spacing=4)
+        self._pill_row_change = ft.Row(spacing=4, wrap=True, run_spacing=4)
+        self._ki_tab_body_heights: list[float] = [
+            float(KI_TAB_BODY_MIN_HEIGHT_PX),
+            float(KI_TAB_BODY_MIN_HEIGHT_PX),
+        ]
 
-        self._evaluate_placeholder = ft.Text(
-            "Evaluate — coming later.",
-            size=13,
-            color=ft.Colors.GREY_500,
-            italic=True,
+        self._ki_tab_bar = ft.TabBar(
+            tabs=[
+                ft.Tab(label="Discuss"),
+                ft.Tab(label="Change"),
+            ],
+            scrollable=False,
+            tab_alignment=ft.TabAlignment.FILL,
+            indicator_color=config.FEDORA_BLUE,
+            divider_color=ft.Colors.with_opacity(0.2, ft.Colors.GREY_700),
         )
-        self._evaluate_body = ft.Column(
-            [self._evaluate_placeholder, self._pill_row_evaluate],
-            tight=True,
-            spacing=8,
+        self._ki_tab_bar_view = ft.TabBarView(
+            controls=[
+                ft.Container(
+                    padding=ft.padding.symmetric(
+                        horizontal=4,
+                        vertical=KI_TAB_PAGE_PAD_V_PX,
+                    ),
+                    content=self._pill_row_discuss,
+                ),
+                ft.Container(
+                    padding=ft.padding.symmetric(
+                        horizontal=4,
+                        vertical=KI_TAB_PAGE_PAD_V_PX,
+                    ),
+                    content=self._pill_row_change,
+                ),
+            ],
+            height=float(KI_TAB_BODY_MIN_HEIGHT_PX + 2 * KI_TAB_PAGE_PAD_V_PX),
         )
-
-        self._pill_area_discuss = ft.Container(visible=True, content=self._pill_row_discuss)
-        self._pill_area_change = ft.Container(visible=False, content=self._pill_row_change)
-        self._pill_area_evaluate = ft.Container(visible=False, content=self._evaluate_body)
-
-        self._btn_topic_discuss = ft.TextButton(
-            "Discuss",
-            on_click=lambda e: self._set_ki_topic(0),
+        self._ki_sticky_tab_header = ft.Container(
+            bgcolor=ft.Colors.TRANSPARENT,
+            padding=ft.padding.only(bottom=2),
+            content=self._ki_tab_bar,
         )
-        self._btn_topic_change = ft.TextButton(
-            "Change",
-            on_click=lambda e: self._set_ki_topic(1),
+        self._ki_tabs_inner_column = ft.Column(
+            [self._ki_sticky_tab_header, self._ki_tab_bar_view],
+            spacing=KI_TAB_BAR_TO_PILLS_GAP_PX,
         )
-        self._btn_topic_evaluate = ft.TextButton(
-            "Evaluate",
-            on_click=lambda e: self._set_ki_topic(2),
+        self._ki_topic_tabs = ft.Tabs(
+            content=self._ki_tabs_inner_column,
+            length=2,
+            selected_index=0,
+            on_change=self._on_ki_tabs_change,
         )
-        self._topic_strip = ft.Row(
-            [self._btn_topic_discuss, self._btn_topic_change, self._btn_topic_evaluate],
-            spacing=2,
+        self._ki_topic_shell = ft.Container(
+            bgcolor=config.SURFACE,
+            border_radius=8,
+            padding=ft.padding.all(10),
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            content=self._ki_topic_tabs,
         )
 
         self._chat_history = ft.ListView(
@@ -500,7 +515,7 @@ class MarkdownStudio:
             auto_scroll=True,
         )
         self._chat_input = ft.TextField(
-            hint_text="Frage zur Datei…",
+            hint_text="Ask",
             min_lines=1,
             max_lines=4,
             multiline=True,
@@ -509,7 +524,7 @@ class MarkdownStudio:
             bgcolor=config.SURFACE,
             border_radius=8,
             expand=True,
-            text_size=13,
+            text_size=12,
             border_color=ft.Colors.GREY_700,
             focused_border_color=config.FEDORA_BLUE,
             cursor_color=config.FEDORA_BLUE,
@@ -518,8 +533,10 @@ class MarkdownStudio:
         )
         self._chat_send_btn = ft.IconButton(
             icon=ft.Icons.SEND,
-            tooltip="Senden",
+            icon_size=20,
+            tooltip="Send",
             icon_color=config.FEDORA_BLUE,
+            style=ft.ButtonStyle(padding=ft.padding.all(4)),
             on_click=lambda e: self.page.run_task(self._send_chat_message, e),
         )
         self._chat_model_options: list[str] = []
@@ -539,7 +556,7 @@ class MarkdownStudio:
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
             content=ft.Row(
                 [self._chat_model_btn, self._chat_input, self._chat_send_btn],
-                vertical_alignment=ft.CrossAxisAlignment.END,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=4,
             ),
         )
@@ -561,23 +578,18 @@ class MarkdownStudio:
 
         self._right_ki_column = ft.Column(
             [
-                self._topic_strip,
-                ft.Container(
-                    content=ft.Column(
-                        [self._pill_area_discuss, self._pill_area_change, self._pill_area_evaluate],
-                        tight=True,
-                        spacing=0,
-                    ),
-                    padding=ft.padding.only(bottom=4),
-                ),
+                self._ki_topic_shell,
                 self._right_chat_section,
             ],
             expand=True,
             spacing=8,
         )
 
+        self._pill_row_discuss.on_size_change = self._on_ki_pill_row_size_discuss
+        self._pill_row_change.on_size_change = self._on_ki_pill_row_size_change
+
         self.right_panel = ft.Container(
-            width=260,
+            width=SIDEBAR_EXPANDED_WIDTH_PX,
             margin=12,
             padding=8,
             bgcolor=config.SIDEBAR_SURFACE,
@@ -588,26 +600,45 @@ class MarkdownStudio:
 
         self.page.on_keyboard_event = self._on_page_keyboard
 
-    def _sync_ki_topic_buttons(self) -> None:
-        ix = self._ki_topic_index
-        for i, btn in enumerate((self._btn_topic_discuss, self._btn_topic_change, self._btn_topic_evaluate)):
-            sel = i == ix
-            btn.style = ft.ButtonStyle(
-                color=config.FEDORA_BLUE if sel else ft.Colors.GREY_400,
-                bgcolor=ft.Colors.with_opacity(0.18, config.FEDORA_BLUE) if sel else None,
-            )
-            if _ctrl_on_page(btn):
-                btn.update()
+    def _on_ki_tabs_change(self, e: ft.ControlEvent) -> None:
+        try:
+            self._ki_topic_index = int(e.data)
+        except (TypeError, ValueError):
+            self._ki_topic_index = int(self._ki_topic_tabs.selected_index)
 
     def _set_ki_topic(self, index: int) -> None:
-        self._ki_topic_index = max(0, min(2, int(index)))
-        self._pill_area_discuss.visible = self._ki_topic_index == 0
-        self._pill_area_change.visible = self._ki_topic_index == 1
-        self._pill_area_evaluate.visible = self._ki_topic_index == 2
-        self._sync_ki_topic_buttons()
-        for c in (self._pill_area_discuss, self._pill_area_change, self._pill_area_evaluate):
-            if _ctrl_on_page(c):
-                c.update()
+        ix = max(0, min(1, int(index)))
+        self._ki_topic_index = ix
+        if self._ki_topic_tabs.selected_index != ix:
+            self._ki_topic_tabs.selected_index = ix
+        if _ctrl_on_page(self._ki_topic_tabs):
+            self._ki_topic_tabs.update()
+
+    def _on_ki_pill_row_size_discuss(self, e: ft.LayoutSizeChangeEvent) -> None:
+        self._ki_tab_body_heights[0] = max(float(e.height), 28.0)
+        self._apply_ki_tab_bar_view_height()
+
+    def _on_ki_pill_row_size_change(self, e: ft.LayoutSizeChangeEvent) -> None:
+        self._ki_tab_body_heights[1] = max(float(e.height), 28.0)
+        self._apply_ki_tab_bar_view_height()
+
+    def _apply_ki_tab_bar_view_height(self) -> None:
+        inner = max(
+            self._ki_tab_body_heights[0],
+            self._ki_tab_body_heights[1],
+            float(KI_TAB_BODY_MIN_HEIGHT_PX),
+        )
+        h = inner + 2 * float(KI_TAB_PAGE_PAD_V_PX)
+        cur = float(self._ki_tab_bar_view.height or 0)
+        if abs(cur - h) < 0.75:
+            return
+        self._ki_tab_bar_view.height = h
+        if _ctrl_on_page(self._ki_tab_bar_view):
+            self._ki_tab_bar_view.update()
+
+    async def _defer_sync_ki_tab_height(self) -> None:
+        await asyncio.sleep(0.06)
+        self._apply_ki_tab_bar_view_height()
 
     def toggle_right(self, _e: ft.ControlEvent | None = None) -> None:
         self.right_open = not self.right_open
@@ -650,15 +681,21 @@ class MarkdownStudio:
     def _rebuild_topic_pills(self) -> None:
         def fill_row(row: ft.Row, topic: str) -> None:
             row.controls.clear()
-            for a in prompts.actions_for_topic(topic):
-                label = _QUICK_PILL_LABEL_DE.get(a.id, a.label)
+            actions = sorted(
+                prompts.actions_for_topic(topic),
+                key=lambda a: (a.label or "").casefold(),
+            )
+            for a in actions:
+                label = a.label
                 aid = a.id
                 row.controls.append(
                     ft.FilledButton(
                         content=label,
-                        icon=_quick_pill_icon(aid),
+                        elevation=0,
                         style=ft.ButtonStyle(
-                            padding=ft.padding.symmetric(horizontal=10, vertical=8),
+                            text_style=ft.TextStyle(size=KI_PILL_TEXT_SIZE),
+                            visual_density=ft.VisualDensity.COMPACT,
+                            padding=ft.padding.symmetric(horizontal=6, vertical=3),
                         ),
                         on_click=lambda e, action_id=aid: self.page.run_task(self._quick_margin_action, action_id),
                     )
@@ -666,19 +703,12 @@ class MarkdownStudio:
 
         fill_row(self._pill_row_discuss, TOPIC_DISCUSS)
         fill_row(self._pill_row_change, TOPIC_CHANGE)
-        fill_row(self._pill_row_evaluate, TOPIC_EVALUATE)
 
-        ev = prompts.actions_for_topic(TOPIC_EVALUATE)
-        self._evaluate_placeholder.visible = len(ev) == 0
-        self._pill_row_evaluate.visible = len(ev) > 0
-        if _ctrl_on_page(self._evaluate_placeholder):
-            self._evaluate_placeholder.update()
-        if _ctrl_on_page(self._pill_row_evaluate):
-            self._pill_row_evaluate.update()
-
-        for row in (self._pill_row_discuss, self._pill_row_change, self._pill_row_evaluate):
+        for row in (self._pill_row_discuss, self._pill_row_change):
             if _ctrl_on_page(row):
                 row.update()
+
+        self.page.run_task(self._defer_sync_ki_tab_height)
 
     def _invalidate_header_hide(self) -> None:
         self._header_hide_gen += 1
@@ -739,15 +769,6 @@ class MarkdownStudio:
         elif self._header_menu_open == 0:
             self._schedule_header_hide()
 
-    def _window_width(self) -> int:
-        try:
-            w = self.page.window.width  # type: ignore[attr-defined]
-            if w and w > 0:
-                return int(w)
-        except Exception:
-            pass
-        return max(900, int(getattr(self.page, "width", None) or 1200))
-
     def _on_page_keyboard(self, e: ft.KeyboardEvent) -> None:
         key = (e.key or "").lower()
         if key == "escape" and self._compose_tab_inline_rename_active:
@@ -760,8 +781,8 @@ class MarkdownStudio:
         self.toggle_right()
 
     async def _quick_margin_action(self, action_id: str) -> None:
-        buf = self._editor_buffer()
-        tf = self._compare_editor if self._main_tab_index == 1 else self.editor
+        buf = self.editor.value or ""
+        tf = self.editor
         sel = tf.selection
         selected = ""
         if sel is not None and not sel.is_collapsed:
@@ -774,7 +795,7 @@ class MarkdownStudio:
         bg = ft.Colors.with_opacity(0.35, ft.Colors.GREY_900) if role == "user" else ft.Colors.with_opacity(0.25, config.FEDORA_BLUE)
         align = ft.Alignment.CENTER_RIGHT if role == "user" else ft.Alignment.CENTER_LEFT
         bubble = ft.Container(
-            content=ft.Text(text, size=13, selectable=True, color=ft.Colors.GREY_100),
+            content=ft.Text(text, size=12, selectable=True, color=ft.Colors.GREY_100),
             padding=ft.padding.symmetric(horizontal=10, vertical=8),
             bgcolor=bg,
             border_radius=10,
@@ -807,7 +828,7 @@ class MarkdownStudio:
         messages.append({"role": "user", "content": raw})
 
         acc = ""
-        reply = ft.Text("", size=13, selectable=True, color=ft.Colors.GREY_100)
+        reply = ft.Text("", size=12, selectable=True, color=ft.Colors.GREY_100)
         wrap = ft.Container(
             content=reply,
             padding=ft.padding.symmetric(horizontal=10, vertical=8),
@@ -871,9 +892,8 @@ class MarkdownStudio:
             self.right_panel.bgcolor = ft.Colors.TRANSPARENT
 
     def reflow_columns(self, _e: ft.ControlEvent | None = None) -> None:
-        w = self._window_width()
-        left_w = max(160, int(w * 0.20)) if self.left_open else COLLAPSED_RAIL_WIDTH_PX
-        right_w = max(160, int(w * 0.20)) if self.right_open else COLLAPSED_RAIL_WIDTH_PX
+        left_w = SIDEBAR_EXPANDED_WIDTH_PX if self.left_open else COLLAPSED_RAIL_WIDTH_PX
+        right_w = SIDEBAR_EXPANDED_WIDTH_PX if self.right_open else COLLAPSED_RAIL_WIDTH_PX
         self.left_panel.width = left_w
         self.right_panel.width = right_w
         self._sync_side_panel_chrome()
@@ -884,69 +904,96 @@ class MarkdownStudio:
             self.page.run_task(self._debounced_compare_diff, self._compare_diff_gen)
         self.page.update()
 
+    def _working_document_text(self) -> str:
+        """Text compared to on-disk `last_saved_text` for dirty + save (Compose or Compare draft)."""
+        if self._main_tab_index == 1 and self._compare_candidate_source == "draft":
+            return self._compare_editor.value or ""
+        return self.editor.value or ""
+
     def _is_dirty(self) -> bool:
-        return self._editor_buffer() != self.last_saved_text
+        return self._working_document_text() != self.last_saved_text
 
     def _editor_buffer(self) -> str:
         if self._main_tab_index == 1:
             return self._compare_editor.value or ""
         return self.editor.value or ""
 
-    def _baseline_text(self) -> str:
-        if self._baseline_version_id is None:
-            return self.last_saved_text
-        try:
+    def _refresh_compare_tab_candidate_ui(self) -> None:
+        opts: list[ft.dropdown.Option] = [ft.dropdown.Option(key=_COMPARE_KEY_DRAFT, text="Draft")]
+        if self._compare_candidate_source == "ai_preview" and self._pending_ai_accept_action_id:
+            act = prompts.get_margin_action(self._pending_ai_accept_action_id)
+            ai_text = f"{act.label} · preview" if act else "AI · preview"
+            opts.append(ft.dropdown.Option(key=_COMPARE_KEY_AI, text=ai_text))
+        if self.current_path:
             with session_scope() as s:
-                return version_storage.load_version_body(s, self._baseline_version_id)
-        except BaseException:
-            return self.last_saved_text
-
-    def _refresh_version_dropdown_options(self) -> None:
-        opts: list[ft.dropdown.Option] = [ft.dropdown.Option(key="__disk__", text="Saved file (on disk)")]
-        if not self.current_path:
-            self._version_dropdown.options = opts
-            self._version_dropdown.value = "__disk__"
-            return
-        with session_scope() as s:
-            snaps = version_storage.list_snapshots(s, self.current_path.resolve())
-        for sn in snaps:
-            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(sn.created_at))
-            opts.append(ft.dropdown.Option(key=str(sn.version_id), text=f"{ts}  ({sn.reason})"))
-        self._version_dropdown.options = opts
-        if self._baseline_version_id is not None:
-            key = str(self._baseline_version_id)
-            if any(o.key == key for o in opts):
-                self._version_dropdown.value = key
-            else:
-                self._version_dropdown.value = "__disk__"
-                self._baseline_version_id = None
+                snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+            for sn in snaps:
+                opts.append(
+                    ft.dropdown.Option(
+                        key=str(sn.version_id),
+                        text=version_storage.snapshot_display_text(sn),
+                    )
+                )
+        self._compare_candidate_dropdown.options = opts
+        keys_ok = {o.key for o in opts}
+        if self._compare_candidate_source == "draft":
+            self._compare_candidate_dropdown.value = _COMPARE_KEY_DRAFT
+        elif self._compare_candidate_source == "ai_preview":
+            self._compare_candidate_dropdown.value = (
+                _COMPARE_KEY_AI if _COMPARE_KEY_AI in keys_ok else _COMPARE_KEY_DRAFT
+            )
+        elif self._compare_candidate_source == "snapshot" and self._compare_snapshot_version_id is not None:
+            sk = str(self._compare_snapshot_version_id)
+            self._compare_candidate_dropdown.value = sk if sk in keys_ok else _COMPARE_KEY_DRAFT
         else:
-            self._version_dropdown.value = "__disk__"
+            self._compare_candidate_dropdown.value = _COMPARE_KEY_DRAFT
+        if _ctrl_on_page(self._compare_candidate_dropdown):
+            self._compare_candidate_dropdown.update()
 
     def _sync_version_toolbar_state(self) -> None:
-        """Version dropdown lives in Compare tab; enable when a file is open."""
         has_doc = self.current_path is not None
-        self._version_dropdown.disabled = not has_doc
-        self._version_dropdown.tooltip = (
-            "Baseline for diff: on-disk save or a snapshot."
+        self._compare_candidate_dropdown.disabled = not has_doc
+        self._compare_candidate_dropdown.tooltip = (
+            "Pick draft, history, or AI preview for the right column."
             if has_doc
             else "Open a markdown file from the tree to list versions."
         )
-        if _ctrl_on_page(self._version_dropdown):
-            self._version_dropdown.update()
+        if _ctrl_on_page(self._compare_candidate_dropdown):
+            self._compare_candidate_dropdown.update()
 
-    async def _on_version_dropdown_change_async(self, e: ft.ControlEvent) -> None:
-        if self._version_dropdown.disabled or not self.current_path:
+    async def _on_compare_candidate_change_async(self, e: ft.ControlEvent) -> None:
+        if self._compare_candidate_dropdown.disabled or not self.current_path:
             return
         v = e.control.value
-        if v is None or v == "__disk__":
-            self._baseline_version_id = None
+        if v is None or v == _COMPARE_KEY_DRAFT:
+            self._compare_candidate_source = "draft"
+            self._compare_snapshot_version_id = None
+            self._pending_ai_accept_action_id = None
+            self._compare_editor.value = self.editor.value or ""
+            self._capture_compare_baseline_snapshot()
+            if _ctrl_on_page(self._compare_editor):
+                self._compare_editor.update()
+        elif v == _COMPARE_KEY_AI:
+            return
         else:
             try:
-                self._baseline_version_id = int(v)
-            except ValueError:
-                self._baseline_version_id = None
+                vid = int(v)
+            except (TypeError, ValueError):
+                return
+            self._compare_candidate_source = "snapshot"
+            self._compare_snapshot_version_id = vid
+            self._pending_ai_accept_action_id = None
+            try:
+                with session_scope() as s:
+                    body = version_storage.load_version_body(s, vid)
+                self._compare_editor.value = body
+                if _ctrl_on_page(self._compare_editor):
+                    self._compare_editor.update()
+            except BaseException:
+                self._snack("Could not load that version.")
+                return
         self._refresh_compare_diff_immediate()
+        self._refresh_title_bar()
 
     def _on_main_tabs_change(self, e: ft.ControlEvent) -> None:
         try:
@@ -960,56 +1007,425 @@ class MarkdownStudio:
         if new_ix == prev:
             return
         if prev == 0 and new_ix == 1:
-            self._compare_editor.value = self.editor.value or ""
-            if _ctrl_on_page(self._compare_editor):
-                self._compare_editor.update()
+            if self._compare_candidate_source == "draft":
+                self._compare_editor.value = self.editor.value or ""
+                self._capture_compare_baseline_snapshot()
+            self._rebuild_compare_paragraph_ui()
         elif prev == 1 and new_ix == 0:
-            self.editor.value = self._compare_editor.value or ""
-            if _ctrl_on_page(self.editor):
-                self.editor.update()
+            if self._compare_candidate_source == "draft":
+                self._sync_compare_buffer_from_fields()
+                self.editor.value = self._compare_editor.value or ""
+                if _ctrl_on_page(self.editor):
+                    self.editor.update()
         self._main_tab_index = new_ix
         if new_ix == 0:
             self._margin_gen += 1
             await self._debounced_compose_rebuild(self._margin_gen)
-        else:
-            self._refresh_compare_diff_immediate()
         self._refresh_title_bar()
 
-    def _refresh_compare_diff_immediate(self) -> None:
-        old_t = self._baseline_text()
-        new_t = self._compare_editor.value or ""
-        if len(old_t) + len(new_t) > _DIFF_SPAN_CHAR_CAP:
-            old_t = old_t[: _DIFF_SPAN_CHAR_CAP // 2] + "\n…"
-            new_t = new_t[: _DIFF_SPAN_CHAR_CAP // 2] + "\n…"
-        self._compare_old_text.spans = build_unified_spans(
-            old_t, new_t, base_size=13, base_color=ft.Colors.GREY_400
+    def _compare_para_text_style(self) -> ft.TextStyle:
+        return ft.TextStyle(
+            font_family="monospace",
+            size=_COMPARE_COL_FONT_SIZE,
+            height=_COMPARE_COL_LINE_HEIGHT,
+            color=ft.Colors.GREY_100,
         )
-        if _ctrl_on_page(self._compare_old_text):
-            self._compare_old_text.update()
+
+    def _compare_pill_colors(self, kind: paragraph_compare.SlotKind) -> tuple[str, str]:
+        m: dict[str, tuple[str, str]] = {
+            "unchanged": (ft.Colors.with_opacity(0.14, ft.Colors.GREY_500), ft.Colors.GREY_400),
+            "minor": (ft.Colors.with_opacity(0.28, ft.Colors.BLUE_400), ft.Colors.BLUE_100),
+            "major": (ft.Colors.with_opacity(0.28, ft.Colors.ORANGE_400), ft.Colors.ORANGE_100),
+            "rewritten": (ft.Colors.with_opacity(0.28, ft.Colors.PURPLE_400), ft.Colors.PURPLE_100),
+            "new": (ft.Colors.with_opacity(0.28, ft.Colors.GREEN_400), ft.Colors.GREEN_100),
+            "deleted": (ft.Colors.with_opacity(0.28, ft.Colors.RED_400), ft.Colors.RED_100),
+        }
+        return m.get(kind, (ft.Colors.with_opacity(0.2, ft.Colors.GREY_600), ft.Colors.GREY_200))
+
+    def _make_compare_pill(self, kind: paragraph_compare.SlotKind) -> ft.Container:
+        label = paragraph_compare.slot_kind_label(kind)
+        bg, fg = self._compare_pill_colors(kind)
+        return ft.Container(
+            content=ft.Text(
+                label,
+                size=10,
+                weight=ft.FontWeight.W_600,
+                color=fg,
+                max_lines=1,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            bgcolor=bg,
+            padding=ft.padding.symmetric(horizontal=5, vertical=3),
+            border_radius=10,
+            alignment=ft.Alignment.CENTER,
+        )
+
+    def _sync_compare_buffer_from_fields(self) -> None:
+        parts = [tf.value or "" for tf in self._compare_right_fields]
+        self._compare_editor.value = "\n\n".join(parts) if parts else ""
+
+    def _capture_compare_baseline_snapshot(self) -> None:
+        """Store Compose buffer as the Compare left baseline (draft mode only uses this via _compare_latest_baseline_text)."""
+        self._compare_baseline_snapshot = self.editor.value or ""
+
+    def _compare_latest_baseline_text(self) -> str:
+        """Baseline for the left diff column: frozen snapshot while editing Compare draft; else live Compose."""
+        if self._main_tab_index == 1 and self._compare_candidate_source == "draft":
+            return self._compare_baseline_snapshot
+        return self.editor.value or ""
+
+    def _compare_paragraph_diff_spans(self, left_para: str, right_para: str) -> list[ft.TextSpan]:
+        """Inline diff for left column: strikethrough removals, green additions vs right."""
+        cap = 80_000
+        lp, rp = left_para, right_para
+        if len(lp) + len(rp) > cap:
+            lp = lp[: cap // 2] + "\n…"
+            rp = rp[: cap // 2] + "\n…"
+        return build_unified_spans(
+            lp,
+            rp,
+            base_size=_COMPARE_COL_FONT_SIZE,
+            base_color=ft.Colors.GREY_100,
+            font_family="monospace",
+            insert_color=ft.Colors.LIGHT_GREEN_200,
+        )
+
+    def _refresh_compare_left_diff_spans(self) -> None:
+        """Update inline diff in the left column when the candidate text edits (same paragraph count)."""
+        if len(self._compare_left_diff_texts) != len(self._compare_right_fields):
+            return
+        baseline = self._compare_latest_baseline_text()
+        candidate = self._compare_editor.value or ""
+        if len(baseline) + len(candidate) > _DIFF_SPAN_CHAR_CAP:
+            half = _DIFF_SPAN_CHAR_CAP // 2
+            baseline = baseline[:half] + "\n…"
+            candidate = candidate[:half] + "\n…"
+        pairs = pair_paragraphs_for_compare(baseline, candidate)
+        for i, (left_txt, right_txt) in enumerate(pairs):
+            if i >= len(self._compare_left_diff_texts):
+                break
+            t = self._compare_left_diff_texts[i]
+            t.spans = self._compare_paragraph_diff_spans(left_txt, right_txt)
+            if _ctrl_on_page(t):
+                t.update()
+
+    def _rebuild_compare_paragraph_ui(self) -> None:
+        self._compare_pill_gen += 1
+        baseline = self._compare_latest_baseline_text()
+        candidate = self._compare_editor.value or ""
+        if len(baseline) + len(candidate) > _DIFF_SPAN_CHAR_CAP:
+            half = _DIFF_SPAN_CHAR_CAP // 2
+            baseline = baseline[:half] + "\n…"
+            candidate = candidate[:half] + "\n…"
+        pairs = pair_paragraphs_for_compare(baseline, candidate)
+        self._compare_row_stable_texts = [left for left, _ in pairs]
+        kinds_h = paragraph_compare.slot_kinds_heuristic(baseline, candidate)
+
+        self._compare_rows_listview.controls.clear()
+        self._compare_right_fields.clear()
+        self._compare_row_pill_hosts.clear()
+        self._compare_left_diff_texts.clear()
+
+        para_style = self._compare_para_text_style()
+        shared_tf_kwargs: dict[str, Any] = {
+            "multiline": True,
+            "max_lines": None,
+            "min_lines": 1,
+            "border": ft.InputBorder.NONE,
+            "filled": False,
+            "dense": True,
+            "text_size": _COMPARE_COL_FONT_SIZE,
+            "text_style": para_style,
+            "cursor_color": config.FEDORA_BLUE,
+            "selection_color": config.SELECTION_OVERLAY,
+            "content_padding": ft.padding.all(8),
+        }
+
+        show_actions = bool(self.current_path)
+        _compare_row_icon_style = ft.ButtonStyle(
+            padding=ft.padding.symmetric(horizontal=2, vertical=1),
+            visual_density=ft.VisualDensity.COMPACT,
+        )
+        for i, (left_txt, right_txt) in enumerate(pairs):
+            kind = kinds_h[i] if i < len(kinds_h) else "unchanged"
+            pill = self._make_compare_pill(kind)
+            pill_host = ft.Container(
+                content=pill,
+                width=_COMPARE_PILL_COL_W,
+                alignment=ft.Alignment.TOP_CENTER,
+                padding=ft.padding.only(top=4),
+            )
+            eval_cell = ft.Container(
+                width=_COMPARE_EVAL_COL_W,
+                alignment=ft.Alignment.TOP_CENTER,
+                padding=ft.padding.only(top=4, right=2),
+                content=ft.Container(),
+            )
+
+            left_diff = ft.Text(
+                spans=self._compare_paragraph_diff_spans(left_txt, right_txt),
+                selectable=True,
+            )
+            self._compare_left_diff_texts.append(left_diff)
+            left_cell = ft.Container(
+                content=left_diff,
+                expand=1,
+                padding=ft.padding.all(8),
+            )
+            right_tf = ft.TextField(
+                **shared_tf_kwargs,
+                value=right_txt,
+                read_only=False,
+                enable_interactive_selection=True,
+                hint_text="…",
+                on_change=lambda _e, ix=i: self._on_compare_para_field_change(ix),
+            )
+
+            actions_ctrl: ft.Control
+            actions_hover_wrap: ft.Container | None = None
+            if show_actions:
+                spark = self._paragraph_sparkle_menu_control(i, for_compare=True, compact=True)
+                row_h = _COMPARE_ACTION_GRID_CELL
+                inner_w = _COMPARE_ACTION_INNER_W
+                actions_inner = ft.Container(
+                    bgcolor=ft.Colors.with_opacity(0.12, ft.Colors.WHITE),
+                    border=ft.border.all(1, ft.Colors.with_opacity(0.45, ft.Colors.GREY_600)),
+                    border_radius=8,
+                    padding=ft.padding.symmetric(
+                        horizontal=_COMPARE_ACTION_H_PAD,
+                        vertical=_COMPARE_ACTION_V_PAD,
+                    ),
+                    content=ft.Container(
+                        width=inner_w,
+                        content=ft.Column(
+                            [
+                                ft.Container(
+                                    width=inner_w,
+                                    content=ft.Row(
+                                        [
+                                            _compare_grid_slot(
+                                                ft.IconButton(
+                                                    ft.Icons.CHECK_ROUNDED,
+                                                    icon_size=14,
+                                                    icon_color=config.FEDORA_BLUE,
+                                                    tooltip="Apply this paragraph to the document",
+                                                    style=_compare_row_icon_style,
+                                                    on_click=lambda _e, ix=i: self.page.run_task(
+                                                        self._compare_accept_paragraph_async, ix
+                                                    ),
+                                                ),
+                                                row_h=row_h,
+                                                expand=True,
+                                            ),
+                                            _compare_grid_slot(
+                                                ft.IconButton(
+                                                    ft.Icons.CLOSE_ROUNDED,
+                                                    icon_size=14,
+                                                    icon_color=ft.Colors.GREY_400,
+                                                    tooltip="Reset this paragraph to match latest (left)",
+                                                    style=_compare_row_icon_style,
+                                                    on_click=lambda _e, ix=i: self.page.run_task(
+                                                        self._compare_decline_paragraph_async, ix
+                                                    ),
+                                                ),
+                                                row_h=row_h,
+                                                expand=True,
+                                            ),
+                                        ],
+                                        spacing=0,
+                                    ),
+                                ),
+                                ft.Container(
+                                    width=inner_w,
+                                    content=ft.Row(
+                                        [
+                                            _compare_grid_slot(
+                                                ft.IconButton(
+                                                    ft.Icons.PLAY_ARROW,
+                                                    icon_size=14,
+                                                    icon_color=config.FEDORA_BLUE,
+                                                    tooltip=_PROJECT_PAGE_TOOLTIP,
+                                                    style=_compare_row_icon_style,
+                                                    on_click=lambda _e: self.page.run_task(self._open_project_page),
+                                                ),
+                                                row_h=row_h,
+                                                expand=True,
+                                            ),
+                                            _compare_grid_slot(
+                                                spark,
+                                                row_h=row_h,
+                                                expand=True,
+                                            ),
+                                        ],
+                                        spacing=0,
+                                    ),
+                                ),
+                            ],
+                            spacing=0,
+                            tight=True,
+                        ),
+                    ),
+                )
+                actions_hover_wrap = ft.Container(
+                    content=actions_inner,
+                    opacity=0.0,
+                    animate_opacity=180,
+                    alignment=ft.Alignment.TOP_CENTER,
+                )
+                actions_ctrl = actions_hover_wrap
+            else:
+                actions_ctrl = ft.Container(width=_COMPARE_ACTION_COL_W)
+
+            row_inner = ft.Row(
+                [
+                    eval_cell,
+                    left_cell,
+                    pill_host,
+                    ft.Container(right_tf, expand=1),
+                    ft.Container(
+                        content=actions_ctrl,
+                        width=_COMPARE_ACTION_COL_W,
+                        alignment=ft.Alignment.TOP_CENTER,
+                        padding=ft.padding.only(top=4),
+                    ),
+                ],
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            )
+            row: ft.Control = (
+                ft.Container(
+                    content=row_inner,
+                    on_hover=lambda e, w=actions_hover_wrap: self._on_compare_row_hover(e, w),
+                )
+                if actions_hover_wrap is not None
+                else row_inner
+            )
+            self._compare_rows_listview.controls.append(row)
+            self._compare_right_fields.append(right_tf)
+            self._compare_row_pill_hosts.append(pill_host)
+
+        self._sync_compare_buffer_from_fields()
+        if _ctrl_on_page(self._compare_rows_listview):
+            self._compare_rows_listview.update()
+
+        self._compare_refine_gen += 1
+        self.page.run_task(self._debounced_refine_compare_slots, self._compare_refine_gen)
+
+    def _refresh_compare_diff_immediate(self) -> None:
+        self._rebuild_compare_paragraph_ui()
 
     async def _debounced_compare_diff(self, gen: int) -> None:
         await asyncio.sleep(0.12)
         if gen != self._compare_diff_gen:
             return
-        self._refresh_compare_diff_immediate()
+        cand = self._compare_editor.value or ""
+        n_para = len(split_paragraphs(cand))
+        if n_para != len(self._compare_right_fields):
+            self._rebuild_compare_paragraph_ui()
+            return
+        self._refresh_compare_left_diff_spans()
+        self._compare_pill_gen += 1
+        pg = self._compare_pill_gen
+        self.page.run_task(self._debounced_compare_pill_refresh, pg)
 
-    def _on_compare_editor_change(self, _e: ft.ControlEvent) -> None:
+    async def _debounced_compare_pill_refresh(self, gen: int) -> None:
+        await asyncio.sleep(0.18)
+        if gen != self._compare_pill_gen:
+            return
+        if self._main_tab_index != 1:
+            return
+        baseline = self._compare_latest_baseline_text()
+        candidate = self._compare_editor.value or ""
+        kinds = paragraph_compare.slot_kinds_heuristic(baseline, candidate)
+        for i, host in enumerate(self._compare_row_pill_hosts):
+            k = kinds[i] if i < len(kinds) else "unchanged"
+            host.content = self._make_compare_pill(k)
+            if _ctrl_on_page(host):
+                host.update()
+
+    async def _debounced_refine_compare_slots(self, gen: int) -> None:
+        await asyncio.sleep(0.05)
+        if gen != self._compare_refine_gen:
+            return
+        if self._main_tab_index != 1:
+            return
+        baseline = self._compare_latest_baseline_text()
+        candidate = self._compare_editor.value or ""
+        if not baseline.strip() and not candidate.strip():
+            return
+        try:
+            refined = await paragraph_compare.classify_slots_async(
+                self.ollama,
+                chat_model=self.ollama_model,
+                embed_model=self.ollama_embed_model,
+                baseline_text=baseline,
+                new_text=candidate,
+            )
+        except BaseException:
+            return
+        if gen != self._compare_refine_gen:
+            return
+        for i, host in enumerate(self._compare_row_pill_hosts):
+            k = refined[i] if i < len(refined) else "unchanged"
+            host.content = self._make_compare_pill(k)
+            if _ctrl_on_page(host):
+                host.update()
+
+    def _on_compare_para_field_change(self, index: int) -> None:
+        self._sync_compare_buffer_from_fields()
+        cand = self._compare_editor.value or ""
+        n_para = len(split_paragraphs(cand))
+        if n_para != len(self._compare_right_fields):
+            self._rebuild_compare_paragraph_ui()
+            self._refresh_title_bar()
+            if self._compare_candidate_source == "draft" and self.current_path:
+                self._autosave_gen += 1
+                self.page.run_task(self._autosave_after_idle, self._autosave_gen)
+            return
         self._refresh_title_bar()
         self._compare_diff_gen += 1
         dgen = self._compare_diff_gen
         self.page.run_task(self._debounced_compare_diff, dgen)
+        if self._compare_candidate_source != "draft":
+            return
         if not self.current_path:
             return
         self._autosave_gen += 1
         agen = self._autosave_gen
         self.page.run_task(self._autosave_after_idle, agen)
 
-    def _on_compare_editor_size_change(self, e: ft.LayoutSizeChangeEvent) -> None:
-        cw = max(120.0, float(e.width))
-        reported = float(e.height)
-        paras = split_paragraphs(self._compare_editor.value or "")
-        est = estimate_total_editor_height(paras, cw)
-        self._last_editor_h = max(self._last_editor_h, reported, est * 0.98)
+    async def _compare_accept_paragraph_async(self, index: int) -> None:
+        if not self.current_path:
+            self._snack("Open a note first.")
+            return
+        if index < 0 or index >= len(self._compare_right_fields):
+            return
+        cand_para = self._compare_right_fields[index].value or ""
+        buf = self.editor.value or ""
+        self.editor.value = replace_paragraph_at_index(buf, index, cand_para)
+        self._capture_compare_baseline_snapshot()
+        if _ctrl_on_page(self.editor):
+            self.editor.update()
+        self._margin_gen += 1
+        await self._debounced_compose_rebuild(self._margin_gen)
+        self._rebuild_compare_paragraph_ui()
+        self._snack(f"Paragraph {index + 1} applied to the document.")
+
+    async def _compare_decline_paragraph_async(self, index: int) -> None:
+        if index < 0 or index >= len(self._compare_right_fields):
+            return
+        if index < len(self._compare_row_stable_texts):
+            revert = self._compare_row_stable_texts[index]
+        else:
+            paras = split_paragraphs(self._compare_latest_baseline_text() or "")
+            revert = paras[index] if 0 <= index < len(paras) else ""
+        self._compare_right_fields[index].value = revert
+        if _ctrl_on_page(self._compare_right_fields[index]):
+            self._compare_right_fields[index].update()
+        self._sync_compare_buffer_from_fields()
+        self._rebuild_compare_paragraph_ui()
+        self._refresh_title_bar()
 
     def _hide_prompt_footer(self, footer: ft.Row) -> None:
         footer.controls.clear()
@@ -1017,41 +1433,27 @@ class MarkdownStudio:
         if _ctrl_on_page(footer):
             footer.update()
 
-    async def _accept_paragraph_change_async(self, idx: int, reply: ft.Text, footer: ft.Row) -> None:
+    async def _stage_ai_candidate_async(self, idx: int, reply: ft.Text, footer: ft.Row, action_id: str) -> None:
         text = _strip_change_topic_preamble(reply.value or "")
         if not text:
             self._snack("Reply is empty.")
             return
-        if self._main_tab_index == 0:
-            buf = self.editor.value or ""
-            self.editor.value = replace_paragraph_at_index(buf, idx, text)
-            if _ctrl_on_page(self.editor):
-                self.editor.update()
-        else:
-            buf = self._compare_editor.value or ""
-            self._compare_editor.value = replace_paragraph_at_index(buf, idx, text)
-            if _ctrl_on_page(self._compare_editor):
-                self._compare_editor.update()
+        base = self.editor.value or ""
+        self._compare_editor.value = replace_paragraph_at_index(base, idx, text)
+        self._compare_candidate_source = "ai_preview"
+        self._compare_snapshot_version_id = None
+        self._pending_ai_accept_action_id = action_id
         self._hide_prompt_footer(footer)
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)
-        if self._main_tab_index == 1:
-            self._refresh_compare_diff_immediate()
+        self._main_tabs.selected_index = 1
+        self._main_tab_index = 1
+        self._refresh_compare_tab_candidate_ui()
+        self._compare_candidate_dropdown.value = _COMPARE_KEY_AI
+        if _ctrl_on_page(self._compare_editor):
+            self._compare_editor.update()
+        self._refresh_compare_diff_immediate()
         self._refresh_title_bar()
-        await self._after_ai_mutation_snapshot()
-
-    async def _after_ai_mutation_snapshot(self) -> None:
-        if not self.current_path:
-            return
-        buf = self._editor_buffer()
-        try:
-            with session_scope() as s:
-                version_storage.persist_version_snapshot(s, self.current_path.resolve(), buf, "ai_apply")
-            self._refresh_version_dropdown_options()
-            if _ctrl_on_page(self._version_dropdown):
-                self._version_dropdown.update()
-        except BaseException:
-            pass
 
     def _refresh_title_bar(self) -> None:
         if not self.current_path:
@@ -1091,14 +1493,11 @@ class MarkdownStudio:
         self._compose_tab_inline_rename_active = False
         self._compose_tab_filename_hit.visible = True
         self._compose_tab_filename_field.visible = False
-        self._compose_tab_filename_md_suffix.visible = False
         self._refresh_compose_tab_label()
         if _ctrl_on_page(self._compose_tab_filename_hit):
             self._compose_tab_filename_hit.update()
         if _ctrl_on_page(self._compose_tab_filename_field):
             self._compose_tab_filename_field.update()
-        if _ctrl_on_page(self._compose_tab_filename_md_suffix):
-            self._compose_tab_filename_md_suffix.update()
         if _ctrl_on_page(self._compose_tab_filename_row):
             self._compose_tab_filename_row.update()
 
@@ -1115,16 +1514,11 @@ class MarkdownStudio:
             if self._compose_tab_inline_rename_active:
                 return
             self._compose_tab_inline_rename_active = True
-            p = self.current_path
-            self._compose_tab_filename_field.value = _rename_title_field_value(p, is_dir=False)
-            is_md = p.suffix.lower() == ".md"
-            self._compose_tab_filename_md_suffix.visible = is_md
+            self._compose_tab_filename_field.value = self.current_path.name
             self._compose_tab_filename_hit.visible = False
             self._compose_tab_filename_field.visible = True
             if _ctrl_on_page(self._compose_tab_filename_field):
                 self._compose_tab_filename_field.update()
-            if _ctrl_on_page(self._compose_tab_filename_md_suffix):
-                self._compose_tab_filename_md_suffix.update()
             if _ctrl_on_page(self._compose_tab_filename_hit):
                 self._compose_tab_filename_hit.update()
             if _ctrl_on_page(self._compose_tab_filename_row):
@@ -1152,9 +1546,13 @@ class MarkdownStudio:
             if not old:
                 self._compose_tab_exit_rename_mode()
                 return
-            name = _rename_commit_basename(old, is_dir=False, field_value=self._compose_tab_filename_field.value or "")
-            if name is None:
+            name = (self._compose_tab_filename_field.value or "").strip()
+            if not name or name in (".", ".."):
                 self._snack("Invalid filename.")
+                self._compose_tab_exit_rename_mode()
+                return
+            if "/" in name or "\\" in name or "\x00" in name:
+                self._snack("Use a single filename only.")
                 self._compose_tab_exit_rename_mode()
                 return
             new_path = old.parent / name
@@ -1197,7 +1595,7 @@ class MarkdownStudio:
             self._rebuild_tree_ui()
             if _ctrl_on_page(self.tree_column):
                 self.tree_column.update()
-            self._refresh_version_dropdown_options()
+            self._refresh_compare_tab_candidate_ui()
             self._sync_version_toolbar_state()
             self._refresh_title_bar()
             self._snack(f'Renamed to "{name}".')
@@ -1207,7 +1605,7 @@ class MarkdownStudio:
         avail = max(200.0, float(e.width))
         reading_w = int(min(float(READING_MAX_PX), max(240, avail * COMPOSE_READING_WIDTH_FRAC)))
         cur = int(self._compose_reading_card.width or 0)
-        self._last_editor_content_w = max(120.0, float(reading_w - COMPOSE_SPARKLE_W - 8))
+        self._last_editor_content_w = max(120.0, float(reading_w - _COMPOSE_MARGIN_COL_W - 8))
         if cur == reading_w:
             return
         self._compose_reading_card.width = reading_w
@@ -1313,6 +1711,8 @@ class MarkdownStudio:
         self._sync_side_panel_chrome()
         self.center_panel.bgcolor = config.SURFACE
         self._sticky_tab_header.bgcolor = config.SURFACE
+        self._ki_sticky_tab_header.bgcolor = ft.Colors.TRANSPARENT
+        self._ki_topic_shell.bgcolor = config.SURFACE
         if self._header_shell:
             self._header_shell.bgcolor = config.SURFACE_VARIANT
         if self._menu_bar:
@@ -1345,26 +1745,174 @@ class MarkdownStudio:
         self.page.update()
 
     def _paragraph_for_index(self, idx: int) -> str:
-        paras = split_paragraphs(self._editor_buffer())
+        paras = split_paragraphs(self.editor.value or "")
         if 0 <= idx < len(paras):
             return paras[idx]
         return ""
 
-    def _compose_sparkle_menu_items(self, para_index: int) -> list[ft.PopupMenuItem]:
+    async def _run_compare_margin_action(self, action_id: str, index: int) -> None:
+        if index < 0 or index >= len(self._compare_right_fields):
+            return
+        override = self._compare_right_fields[index].value or ""
+        await self.run_margin_action(action_id, index, text_override=override)
+
+    async def _open_project_page(self, _e: ft.ControlEvent | None = None) -> None:
+        await self.page.launch_url(_PROJECT_PAGE_URL)
+
+    def _paragraph_sparkle_menu_control(self, para_index: int, *, for_compare: bool, compact: bool = False) -> ft.Control:
+        """Compose: cascade Discuss / Change / Evaluate. Compare cube: Change-topic prompts only (flat popup)."""
+        tooltip = (
+            "Change prompts for this paragraph"
+            if for_compare
+            else "LLM prompts for this paragraph"
+        )
+        task = self._run_compare_margin_action if for_compare else self.run_margin_action
+        _spark_icon = 14 if for_compare else (15 if compact else 18)
+        _spark_pad: int | ft.Padding = (
+            ft.padding.symmetric(horizontal=3, vertical=2)
+            if for_compare
+            else (2 if compact else 4)
+        )
+        _text_sz = 12 if compact else 13
+
+        _sparkle_btn_style = ft.ButtonStyle(
+            color=ft.Colors.with_opacity(0.45, ft.Colors.WHITE),
+            padding=(
+                ft.padding.symmetric(horizontal=2, vertical=1)
+                if for_compare
+                else ft.padding.all(1 if compact else 2)
+            ),
+            visual_density=ft.VisualDensity.COMPACT,
+        )
+
         if not prompts.MARGIN_ACTIONS:
-            return [
-                ft.PopupMenuItem(
-                    content=ft.Text("Add prompts in Settings → Prompts", size=13),
-                    disabled=True,
-                )
-            ]
-        return [
-            ft.PopupMenuItem(
-                content=a.label,
-                on_click=lambda e, aid=a.id, ix=para_index: self.page.run_task(self.run_margin_action, aid, ix),
+            return ft.PopupMenuButton(
+                icon=ft.Icons.AUTO_AWESOME,
+                icon_size=_spark_icon,
+                icon_color=ft.Colors.with_opacity(0.85, config.FEDORA_BLUE),
+                tooltip=tooltip,
+                padding=_spark_pad,
+                style=_sparkle_btn_style,
+                menu_position=ft.PopupMenuPosition.UNDER,
+                items=[
+                    ft.PopupMenuItem(
+                        content=ft.Text("Add prompts in Settings → Prompts", size=13),
+                    ),
+                ],
             )
-            for a in prompts.MARGIN_ACTIONS
-        ]
+
+        # Compare action card: only Change-topic actions (no Discuss / Evaluate presets).
+        if for_compare:
+            change_acts = tuple(sorted(prompts.actions_for_topic(TOPIC_CHANGE), key=lambda a: a.label.casefold()))
+            if not change_acts:
+                return ft.PopupMenuButton(
+                    icon=ft.Icons.AUTO_AWESOME,
+                    icon_size=_spark_icon,
+                    icon_color=ft.Colors.with_opacity(0.85, config.FEDORA_BLUE),
+                    tooltip=tooltip,
+                    padding=_spark_pad,
+                    style=_sparkle_btn_style,
+                    menu_position=ft.PopupMenuPosition.UNDER,
+                    items=[
+                        ft.PopupMenuItem(
+                            content=ft.Text("No Change prompts. Add them in Settings → Prompts", size=13),
+                        ),
+                    ],
+                )
+            compare_items = [
+                ft.PopupMenuItem(
+                    content=ft.Text(a.label, size=_text_sz),
+                    on_click=lambda e, aid=a.id, ix=para_index: self.page.run_task(task, aid, ix),
+                )
+                for a in change_acts
+            ]
+            return ft.PopupMenuButton(
+                icon=ft.Icons.AUTO_AWESOME,
+                icon_size=_spark_icon,
+                icon_color=ft.Colors.with_opacity(0.85, config.FEDORA_BLUE),
+                tooltip=tooltip,
+                padding=_spark_pad,
+                style=_sparkle_btn_style,
+                menu_position=ft.PopupMenuPosition.UNDER,
+                items=compare_items,
+            )
+
+        rows_for_menu: list[tuple[str, tuple[prompts.MarginAction, ...]]] = []
+        for topic in (TOPIC_DISCUSS, TOPIC_CHANGE, TOPIC_EVALUATE):
+            acts = prompts.actions_for_topic(topic)
+            if not acts:
+                continue
+            cat_label = _TOPIC_MENU_LABEL.get(topic, topic)
+            sorted_acts = tuple(sorted(acts, key=lambda a: a.label.casefold()))
+            rows_for_menu.append((cat_label, sorted_acts))
+
+        if not rows_for_menu:
+            return ft.PopupMenuButton(
+                icon=ft.Icons.AUTO_AWESOME,
+                icon_size=_spark_icon,
+                icon_color=ft.Colors.with_opacity(0.85, config.FEDORA_BLUE),
+                tooltip=tooltip,
+                padding=_spark_pad,
+                style=_sparkle_btn_style,
+                menu_position=ft.PopupMenuPosition.UNDER,
+                items=[
+                    ft.PopupMenuItem(content=ft.Text("No prompts for any topic.", size=13)),
+                ],
+            )
+
+        category_controls: list[ft.Control] = []
+        for cat_label, sorted_acts in rows_for_menu:
+            leaves: list[ft.Control] = []
+            for a in sorted_acts:
+                item_label = f"{cat_label} → {a.label}"
+                leaves.append(
+                    ft.MenuItemButton(
+                        content=ft.Text(item_label, size=_text_sz),
+                        on_click=lambda e, action_id=a.id, ix=para_index: self.page.run_task(
+                            task, action_id, ix
+                        ),
+                    )
+                )
+            category_controls.append(
+                ft.SubmenuButton(
+                    content=ft.Text(cat_label, size=_text_sz),
+                    controls=leaves,
+                )
+            )
+
+        root_menu = ft.SubmenuButton(
+            content=ft.Icon(
+                ft.Icons.AUTO_AWESOME,
+                size=_spark_icon,
+                color=ft.Colors.with_opacity(0.85, config.FEDORA_BLUE),
+            ),
+            tooltip=tooltip,
+            style=_sparkle_btn_style,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            controls=category_controls,
+            menu_style=ft.MenuStyle(
+                alignment=ft.Alignment.TOP_RIGHT,
+                visual_density=ft.VisualDensity.COMPACT,
+            ),
+        )
+
+        return ft.MenuBar(
+            controls=[root_menu],
+            style=ft.MenuStyle(
+                bgcolor={ft.ControlState.DEFAULT: ft.Colors.TRANSPARENT},
+                shadow_color={ft.ControlState.DEFAULT: ft.Colors.TRANSPARENT},
+                elevation={ft.ControlState.DEFAULT: 0},
+                visual_density=ft.VisualDensity.COMPACT,
+            ),
+        )
+
+    def _compose_sparkle_menu_control(self, para_index: int) -> ft.Control:
+        return self._paragraph_sparkle_menu_control(para_index, for_compare=False)
+
+    def _on_compare_row_hover(self, e: ft.ControlEvent, actions_wrap: ft.Container) -> None:
+        actions_wrap.opacity = 1.0 if e.data else 0.0
+        if _ctrl_on_page(actions_wrap):
+            actions_wrap.update()
 
     def _rebuild_compose_sparkle_slots(self) -> None:
         buf = self.editor.value or ""
@@ -1374,17 +1922,7 @@ class MarkdownStudio:
         self._compose_sparkle_column.controls.clear()
         self._compose_sparkle_roots.clear()
         for i in range(len(cur)):
-            menu = ft.PopupMenuButton(
-                icon=ft.Icons.AUTO_AWESOME,
-                icon_size=18,
-                icon_color=ft.Colors.with_opacity(0.85, config.FEDORA_BLUE),
-                tooltip="LLM prompts for this paragraph",
-                style=ft.ButtonStyle(
-                    color=ft.Colors.with_opacity(0.45, ft.Colors.WHITE),
-                    padding=ft.Padding.all(2),
-                ),
-                items=self._compose_sparkle_menu_items(i),
-            )
+            menu = self._compose_sparkle_menu_control(i)
             slot = ft.Container(
                 content=menu,
                 alignment=ft.Alignment.TOP_CENTER,
@@ -1427,7 +1965,7 @@ class MarkdownStudio:
 
         self._append_chat_line("user", f"Paragraph {idx + 1}: {act.label}")
 
-        reply = ft.Text("", size=13, selectable=True, color=ft.Colors.GREY_100)
+        reply = ft.Text("", size=12, selectable=True, color=ft.Colors.GREY_100)
         footer = ft.Row(spacing=8, visible=False)
         bubble = ft.Column([reply, footer], tight=True, spacing=8)
         wrap = ft.Container(
@@ -1496,9 +2034,10 @@ class MarkdownStudio:
         if act.topic == TOPIC_CHANGE:
             footer.controls = [
                 ft.FilledButton(
-                    "Accept",
-                    on_click=lambda _e, i=idx, r=reply, f=footer: self.page.run_task(
-                        self._accept_paragraph_change_async, i, r, f
+                    "Review",
+                    tooltip="Open Compare with this text as candidate",
+                    on_click=lambda _e, i=idx, r=reply, f=footer, aid=action_id: self.page.run_task(
+                        self._stage_ai_candidate_async, i, r, f, aid
                     ),
                 ),
                 ft.TextButton("Dismiss", on_click=lambda _e, f=footer: self._hide_prompt_footer(f)),
@@ -1524,32 +2063,36 @@ class MarkdownStudio:
             self._snack("Cannot rename outside the documents folder.")
             return
 
+        is_md_file = not is_dir and path.suffix.lower() == ".md"
         name_field = ft.TextField(
-            value=_rename_title_field_value(path, is_dir=is_dir),
+            value=path.stem if is_md_file else path.name,
             autofocus=True,
             dense=True,
-            width=320 if (not is_dir and path.suffix.lower() == ".md") else 360,
+            width=280 if is_md_file else 360,
         )
-        md_suffix = (
-            ft.Text(".md", size=14, color=ft.Colors.GREY_500)
-            if (not is_dir and path.suffix.lower() == ".md")
-            else None
-        )
-        dialog_content: ft.Control = (
-            ft.Row(
-                [name_field, md_suffix],
+        dialog_content: ft.Control
+        if is_md_file:
+            dialog_content = ft.Row(
+                [name_field, ft.Text(".md", size=14, color=ft.Colors.GREY_400)],
                 tight=True,
-                spacing=4,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
-            if md_suffix is not None
-            else name_field
-        )
+        else:
+            dialog_content = name_field
 
         async def apply_async() -> None:
-            new_name = _rename_commit_basename(path, is_dir=is_dir, field_value=name_field.value or "")
-            if new_name is None:
+            raw = (name_field.value or "").strip()
+            if is_md_file:
+                if raw.lower().endswith(".md"):
+                    raw = raw[: -len(".md")].strip()
+                new_name = f"{raw}.md" if raw else ""
+            else:
+                new_name = raw
+            if not new_name or new_name in (".", ".."):
                 self._snack("Invalid name.")
+                return
+            if "/" in new_name or "\\" in new_name:
+                self._snack("Name cannot contain path separators.")
                 return
 
             new_path = (path.parent / new_name).resolve()
@@ -1626,9 +2169,9 @@ class MarkdownStudio:
             self._rebuild_tree_ui()
             if _ctrl_on_page(self.tree_column):
                 self.tree_column.update()
-            self._refresh_version_dropdown_options()
-            if _ctrl_on_page(self._version_dropdown):
-                self._version_dropdown.update()
+            self._refresh_compare_tab_candidate_ui()
+            if _ctrl_on_page(self._compare_candidate_dropdown):
+                self._compare_candidate_dropdown.update()
             self._refresh_title_bar()
             self._snack("Renamed.")
 
@@ -1640,10 +2183,7 @@ class MarkdownStudio:
         self.page.show_dialog(
             ft.AlertDialog(
                 modal=True,
-                title=ft.Text(
-                    "Rename folder" if is_dir else ("Rename note" if path.suffix.lower() == ".md" else "Rename file"),
-                    weight=ft.FontWeight.W_600,
-                ),
+                title=ft.Text("Rename folder" if is_dir else "Rename file", weight=ft.FontWeight.W_600),
                 content=dialog_content,
                 actions=[
                     ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
@@ -1723,13 +2263,17 @@ class MarkdownStudio:
         except OSError as ex:
             self._snack(f"Could not open: {ex}")
             return
-        self._baseline_version_id = None
+        self._compare_candidate_source = "draft"
+        self._compare_snapshot_version_id = None
+        self._pending_ai_accept_action_id = None
         self.current_path = path
         self.last_saved_text = text
         self.editor.value = text
         self._compare_editor.value = text
+        self._compare_baseline_snapshot = text
         self._main_tabs.selected_index = 0
-        self._refresh_version_dropdown_options()
+        self._main_tab_index = 0
+        self._refresh_compare_tab_candidate_ui()
         self._sync_version_toolbar_state()
         if _ctrl_on_page(self.editor):
             self.editor.update()
@@ -1799,12 +2343,13 @@ class MarkdownStudio:
         *,
         silent: bool = False,
         snapshot_reason: version_storage.SnapshotReason | None = None,
+        version_display_label: str | None = None,
     ) -> None:
         if not self.current_path:
             if not silent:
                 self._snack("Open or create a note first.")
             return
-        buf = self._editor_buffer()
+        buf = self._working_document_text()
         reason: version_storage.SnapshotReason = snapshot_reason or ("autosave" if silent else "manual")
         try:
             self.current_path.write_text(buf, encoding="utf-8")
@@ -1814,12 +2359,21 @@ class MarkdownStudio:
         self.last_saved_text = buf
         try:
             with session_scope() as s:
-                version_storage.persist_version_snapshot(s, self.current_path.resolve(), buf, reason)
+                if version_display_label:
+                    version_storage.persist_version_snapshot(
+                        s,
+                        self.current_path.resolve(),
+                        buf,
+                        "ai_apply",
+                        display_label=version_display_label,
+                    )
+                else:
+                    version_storage.persist_version_snapshot(s, self.current_path.resolve(), buf, reason)
         except BaseException:
             pass
-        self._refresh_version_dropdown_options()
-        if _ctrl_on_page(self._version_dropdown):
-            self._version_dropdown.update()
+        self._refresh_compare_tab_candidate_ui()
+        if _ctrl_on_page(self._compare_candidate_dropdown):
+            self._compare_candidate_dropdown.update()
         self._margin_gen += 1
         if self._main_tab_index == 0:
             self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)
@@ -1860,7 +2414,7 @@ class MarkdownStudio:
         about_body = ft.Text(
             "Local Markdown writer with Ollama.\n\n"
             "File → Settings: models, paths, appearance, and margin prompts.\n"
-            "Compose: paragraph sparkle actions; Compare: baseline dropdown and live word-level diff.\n\n"
+            "Compose: paragraph sparkle actions; Compare: Latest (saved) vs other version, picker in header.\n\n"
             "Ctrl+J / ⌘+J: KI-Panel rechts ein/aus.",
             size=14,
         )
@@ -2255,7 +2809,6 @@ class MarkdownStudio:
             stack_children.append(self._header_shell)
 
         self._rebuild_topic_pills()
-        self._sync_ki_topic_buttons()
         self._sync_version_toolbar_state()
         self.reflow_columns()
         self._margin_gen += 1

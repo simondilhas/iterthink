@@ -13,3 +13,19 @@ __pycache__/
 .cursor/
 *.egg-info/
 .eggs/
+
+# Secrets and local env (never commit)
+.env
+.env.*
+!.env.example
+
+# Local databases / caches
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/

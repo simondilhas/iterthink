@@ -137,3 +137,21 @@ def slot_kind_label(kind: SlotKind) -> str:
         "new": "new",
         "deleted": "deleted",
     }[kind]
+
+
+def slot_kinds_heuristic(baseline: str, candidate: str) -> list[SlotKind]:
+    """Fast slot labels from alignment only (before embedding / LLM refinement)."""
+    new_paras = split_paragraphs(candidate)
+    n = len(new_paras)
+    if n == 0:
+        return []
+    diffs = compute_alignment(baseline, candidate)
+    by_new = _diff_by_new_index(diffs, n)
+    out: list[SlotKind] = []
+    for i in range(n):
+        d = by_new.get(i)
+        if d is None:
+            out.append("unchanged")
+            continue
+        out.append(_base_kind_from_diff(d))
+    return out

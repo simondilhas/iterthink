@@ -41,5 +41,6 @@ class DocumentVersion(Base):
         ForeignKey("document_versions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    display_label: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
     document: Mapped["Document"] = relationship("Document", back_populates="versions")

@@ -396,11 +396,14 @@ async def open_settings_dialog(studio: Any) -> None:
         except (OSError, ValueError, yaml.YAMLError) as ex:
             studio._snack(f"Could not save prompts: {ex}")
             return
-        studio._rebuild_margin_slots()
-        if hasattr(studio, "_rebuild_topic_pills"):
-            studio._rebuild_topic_pills()
-        if _ctrl_on_page(studio._margin_column):
-            studio._margin_column.update()
+        try:
+            if hasattr(studio, "_rebuild_topic_pills"):
+                studio._rebuild_topic_pills()
+            studio._margin_gen += 1
+            page.run_task(studio._debounced_compose_rebuild, studio._margin_gen)
+        except Exception as ex:
+            studio._snack(f"Prompts saved, but UI refresh failed: {ex}")
+            return
         studio._snack("Margin prompts saved.")
 
     tab_models = ft.Container(

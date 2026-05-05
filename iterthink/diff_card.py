@@ -31,9 +31,13 @@ def build_unified_spans(
     *,
     base_size: int = 12,
     base_color: str = ft.Colors.GREY_400,
+    font_family: str | None = None,
+    insert_color: str | None = None,
 ) -> list[ft.TextSpan]:
-    """Word-level inline diff for margin: deletions (red + strikethrough), insertions (green)."""
-    base = ft.TextStyle(size=base_size, color=base_color)
+    """Word-level inline diff: deletions (red + strikethrough), insertions (green tint / green text)."""
+    ins_color = insert_color if insert_color is not None else ft.Colors.GREY_200
+    ff = {"font_family": font_family} if font_family else {}
+    base = ft.TextStyle(size=base_size, color=base_color, **ff)
     a = _tokenize(old_text)
     b = _tokenize(new_text)
     if not a and not b:
@@ -58,6 +62,7 @@ def build_unified_spans(
                             bgcolor=_BG_DEL,
                             decoration=ft.TextDecoration.LINE_THROUGH,
                             decoration_color=ft.Colors.RED_200,
+                            **ff,
                         ),
                     )
                 )
@@ -67,7 +72,7 @@ def build_unified_spans(
                 spans.append(
                     ft.TextSpan(
                         text=chunk,
-                        style=ft.TextStyle(size=base_size, color=ft.Colors.GREY_200, bgcolor=_BG_NEW),
+                        style=ft.TextStyle(size=base_size, color=ins_color, bgcolor=_BG_NEW, **ff),
                     )
                 )
         else:  # replace
@@ -81,6 +86,7 @@ def build_unified_spans(
                             bgcolor=_BG_DEL,
                             decoration=ft.TextDecoration.LINE_THROUGH,
                             decoration_color=ft.Colors.RED_200,
+                            **ff,
                         ),
                     )
                 )
@@ -88,7 +94,7 @@ def build_unified_spans(
                 spans.append(
                     ft.TextSpan(
                         text=t,
-                        style=ft.TextStyle(size=base_size, color=ft.Colors.GREY_200, bgcolor=_BG_NEW),
+                        style=ft.TextStyle(size=base_size, color=ins_color, bgcolor=_BG_NEW, **ff),
                     )
                 )
 
