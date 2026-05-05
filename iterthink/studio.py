@@ -275,7 +275,7 @@ class MarkdownStudio:
             icon_color=config.FEDORA_BLUE,
             tooltip="Apply all paragraphs to the document",
             style=_compare_bulk_icon_style,
-            disabled=True,
+            visible=False,
             on_click=lambda _e: self.page.run_task(self._compare_approve_all_async),
         )
         self._compare_decline_all_btn = ft.IconButton(
@@ -284,26 +284,38 @@ class MarkdownStudio:
             icon_color=ft.Colors.GREY_400,
             tooltip="Reset all paragraphs to match latest (left)",
             style=_compare_bulk_icon_style,
-            disabled=True,
+            visible=False,
             on_click=lambda _e: self.page.run_task(self._compare_decline_all_async),
         )
         self._compare_tab_label_row = ft.Row(
             [
-                ft.Text("Comparison: ", size=14, color=ft.Colors.GREY_400),
-                self._compare_candidate_dropdown,
-                ft.Container(
-                    content=ft.Row(
-                        [self._compare_approve_all_btn, self._compare_decline_all_btn],
-                        tight=True,
-                        spacing=0,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    padding=ft.padding.only(left=6),
+                ft.Row(
+                    [
+                        ft.Text("Comparison: ", size=14, color=ft.Colors.GREY_400),
+                        self._compare_candidate_dropdown,
+                    ],
+                    tight=True,
+                    spacing=0,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Container(expand=True),
+                ft.Row(
+                    [
+                        self._compare_approve_all_btn,
+                        self._compare_decline_all_btn,
+                    ],
+                    tight=True,
+                    spacing=0,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
             ],
-            tight=True,
+            expand=True,
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._compare_tab_label_host = ft.Container(
+            content=self._compare_tab_label_row,
+            expand=True,
         )
         self._compare_rows_listview = ft.ListView(
             expand=True,
@@ -396,7 +408,7 @@ class MarkdownStudio:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         self._main_tab_bar = ft.TabBar(
-            tabs=[ft.Tab(label=self._compose_tab_label_row), ft.Tab(label=self._compare_tab_label_row)],
+            tabs=[ft.Tab(label=self._compose_tab_label_row), ft.Tab(label=self._compare_tab_label_host)],
             scrollable=False,
             tab_alignment=ft.TabAlignment.FILL,
             indicator_color=config.FEDORA_BLUE,
@@ -1518,11 +1530,16 @@ class MarkdownStudio:
             self._compare_candidate_dropdown.update()
         self._refresh_compare_bulk_buttons()
 
+    def _compare_has_pending_bulk_apply(self) -> bool:
+        if not self.current_path or not self._compare_right_fields:
+            return False
+        merged = "\n\n".join(tf.value or "" for tf in self._compare_right_fields)
+        return merged != (self.editor.value or "")
+
     def _refresh_compare_bulk_buttons(self) -> None:
-        n = len(self._compare_right_fields)
-        has_doc = self.current_path is not None
-        self._compare_approve_all_btn.disabled = not has_doc or n == 0
-        self._compare_decline_all_btn.disabled = n == 0
+        pending_apply = self._compare_has_pending_bulk_apply()
+        self._compare_approve_all_btn.visible = pending_apply
+        self._compare_decline_all_btn.visible = pending_apply
         if _ctrl_on_page(self._compare_approve_all_btn):
             self._compare_approve_all_btn.update()
         if _ctrl_on_page(self._compare_decline_all_btn):
@@ -2176,6 +2193,7 @@ class MarkdownStudio:
             self.dirty_dot.update()
             self.title_hit.update()
         self._refresh_compose_tab_label()
+        self._refresh_compare_bulk_buttons()
 
     def _refresh_compose_tab_label(self) -> None:
         if self._compose_tab_inline_rename_active:
