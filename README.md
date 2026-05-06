@@ -58,6 +58,12 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -U pip iterthi
 
 **From a clone (developers):** `pip install -e .` (or `pip install -r requirements.txt`), then `iterthink` or `python -m iterthink`.
 
+## Status
+
+- **Early:** The app is still evolving; defaults and behavior may change between releases.
+- **Platforms:** Primary development and testing are on **Fedora Linux**. Windows and macOS steps above are documented for convenience but are **not** run through regular QA—if something fails there, [open an issue](https://github.com/iterthink/iterthink/issues).
+- **AI backend:** **Ollama** is what we exercise most. Cloud models may work but are not covered in depth.
+
 ### Prompts (margin / KI actions)
 
 There is no separate “skills” layer in iterthink—per-paragraph AI actions are **margin actions** defined in `prompts.yaml`.

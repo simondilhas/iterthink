@@ -19,7 +19,7 @@ from iterthink.llm_router import (
 from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS, TOPIC_EVALUATE, VALID_TOPICS
 from iterthink.ollama_models import classify_installed_models
 from iterthink.ollama_util import ollama_error_message
-from iterthink.studio_constants import KI_TAB_ICON_PX, SIDEBAR_TOOLBAR_ROW_H_PX
+from iterthink.studio_constants import KI_TIER_TAB_ICON_PX, SIDEBAR_TOOLBAR_ROW_H_PX
 from iterthink.studio_llm import build_ki_tier_tabs
 from iterthink.studio_util import KI_TIERS, normalize_cloud_vendor, normalize_ki_tier
 
@@ -707,7 +707,7 @@ async def open_settings_dialog(studio: Any) -> None:
     settings_ki_tier_tabs = build_ki_tier_tabs(
         selected_index=_settings_tier_ix,
         on_change=_on_settings_ki_tier_tabs_change,
-        icon_size=KI_TAB_ICON_PX,
+        icon_size=KI_TIER_TAB_ICON_PX,
         tab_bar_height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
     )
 

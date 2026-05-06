@@ -23,6 +23,8 @@ KI_TAB_BODY_MIN_HEIGHT_PX = 96
 KI_TAB_PAGE_PAD_V_PX = 8
 KI_TAB_BAR_TO_PILLS_GAP_PX = 12
 KI_TAB_ICON_PX = 18
+# KI tier strip in chat composer: lighter than topic tabs (~15% smaller outlined glyphs).
+KI_TIER_TAB_ICON_PX = 15
 
 READING_MAX_PX = 720
 COMPOSE_READING_WIDTH_FRAC = 0.92

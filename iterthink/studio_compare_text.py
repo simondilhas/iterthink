@@ -11,7 +11,7 @@ import httpx
 
 from iterthink import config
 from iterthink import prompts
-from iterthink.compare_layout import pair_paragraphs_for_compare
+from iterthink.compare_layout import aligned_compare_pairs
 from iterthink.diff_card import build_unified_spans
 from iterthink.db.session import session_scope
 from iterthink.paragraph_align import compute_hash
@@ -304,6 +304,7 @@ class MarkdownStudioCompareText:
             "rewritten": (ft.Colors.with_opacity(0.28, ft.Colors.PURPLE_400), ft.Colors.PURPLE_100),
             "new": (ft.Colors.with_opacity(0.28, ft.Colors.GREEN_400), ft.Colors.GREEN_100),
             "deleted": (ft.Colors.with_opacity(0.28, ft.Colors.RED_400), ft.Colors.RED_100),
+            "moved": (ft.Colors.with_opacity(0.28, ft.Colors.TEAL_400), ft.Colors.TEAL_100),
         }
         return m.get(kind, (ft.Colors.with_opacity(0.2, ft.Colors.GREY_600), ft.Colors.GREY_200))
 
@@ -378,8 +379,8 @@ class MarkdownStudioCompareText:
     def _compare_paragraph_diff_spans(self, left_para: str, right_para: str) -> list[ft.TextSpan]:
         """Word-level inline diff for the left (Compose) column.
 
-        ``left_para`` / ``right_para`` match ``pair_paragraphs_for_compare``: compose baseline
-        vs compare-column snapshot. ``build_unified_spans`` expects (old, new), so we pass
+        ``left_para`` / ``right_para`` match ``aligned_compare_pairs`` (alignment-based baseline
+        vs candidate slot). ``build_unified_spans`` expects (old, new), so we pass
         ``(right_para, left_para)`` — snapshot as old, Compose as new.
         """
         cap = 80_000
@@ -406,7 +407,7 @@ class MarkdownStudioCompareText:
             half = _DIFF_SPAN_CHAR_CAP // 2
             baseline = baseline[:half] + "\n…"
             candidate = candidate[:half] + "\n…"
-        pairs = pair_paragraphs_for_compare(baseline, candidate)
+        pairs = aligned_compare_pairs(baseline, candidate)
         for i, (left_txt, right_txt) in enumerate(pairs):
             if i >= len(self._compare_left_diff_texts):
                 break
@@ -423,8 +424,11 @@ class MarkdownStudioCompareText:
             half = _DIFF_SPAN_CHAR_CAP // 2
             baseline = baseline[:half] + "\n…"
             candidate = candidate[:half] + "\n…"
-        pairs = pair_paragraphs_for_compare(baseline, candidate)
-        self._compare_row_stable_texts = [left for left, _ in pairs]
+        pairs = aligned_compare_pairs(baseline, candidate)
+        base_paras = split_paragraphs(baseline)
+        self._compare_row_stable_texts = [
+            base_paras[i] if i < len(base_paras) else "" for i in range(len(pairs))
+        ]
         kinds_h = paragraph_compare.slot_kinds_heuristic(baseline, candidate)
 
         self._compare_rows_listview.controls.clear()
@@ -585,33 +589,31 @@ class MarkdownStudioCompareText:
                     opacity=0.0,
                     animate_opacity=180,
                     width=COMPARE_ACTION_COL_W,
-                    right=0,
-                    top=4,
+                    alignment=ft.Alignment.TOP_CENTER,
+                    padding=ft.padding.only(top=4),
                 )
                 actions_ctrl = actions_hover_wrap
             else:
                 actions_ctrl = None
 
+            # Fixed outer columns (eval, actions); equal-width text columns; fixed pill between them.
+            row_cells: list[ft.Control] = [
+                eval_cell,
+                left_cell,
+                pill_host,
+                ft.Container(right_tf, expand=1),
+            ]
+            if actions_ctrl is not None:
+                row_cells.append(actions_ctrl)
             row_inner = ft.Row(
-                [
-                    eval_cell,
-                    left_cell,
-                    pill_host,
-                    ft.Container(right_tf, expand=1),
-                ],
+                row_cells,
                 spacing=4,
                 vertical_alignment=ft.CrossAxisAlignment.START,
             )
-            if actions_ctrl is not None:
-                row: ft.Control = ft.Stack(
-                    [
-                        ft.Container(
-                            content=row_inner,
-                            expand=True,
-                            on_hover=lambda e, w=actions_hover_wrap: self._on_compare_row_hover(e, w),
-                        ),
-                        actions_ctrl,
-                    ],
+            if actions_ctrl is not None and actions_hover_wrap is not None:
+                row = ft.Container(
+                    content=row_inner,
+                    on_hover=lambda e, w=actions_hover_wrap: self._on_compare_row_hover(e, w),
                 )
             else:
                 row = row_inner
@@ -684,7 +686,7 @@ class MarkdownStudioCompareText:
         if not baseline.strip() and not candidate.strip():
             return
         try:
-            refined = await paragraph_compare.classify_slots_async(
+            refined, aligned_lefts = await paragraph_compare.classify_slots_async(
                 self.ollama,
                 self._make_llm_backend(),
                 chat_model=self.chat_model_for_requests(),
@@ -701,6 +703,16 @@ class MarkdownStudioCompareText:
             host.content = self._make_compare_pill(k)
             if _ctrl_on_page(host):
                 host.update()
+        if (
+            len(aligned_lefts) == len(self._compare_left_diff_texts)
+            and len(aligned_lefts) == len(self._compare_right_fields)
+        ):
+            for i, left_txt in enumerate(aligned_lefts):
+                right_txt = self._compare_right_fields[i].value or ""
+                t = self._compare_left_diff_texts[i]
+                t.spans = self._compare_paragraph_diff_spans(left_txt, right_txt)
+                if _ctrl_on_page(t):
+                    t.update()
 
     def _on_compare_para_field_change(self, index: int) -> None:
         self._sync_compare_buffer_from_fields()

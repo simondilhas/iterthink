@@ -157,6 +157,83 @@ def get_check(check_id: str) -> Check | None:
     return None
 
 
+def _neutral_symbol_for_check(check: Check) -> str:
+    """Pick a neutral / no-effect symbol from the check's legend, for unchanged paragraphs."""
+    sym_set = {s.symbol for s in check.symbol_set}
+    for p in ("~", "●"):
+        if p in sym_set:
+            return p
+    for s in check.symbol_set:
+        low = s.label.lower()
+        if "neutral" in low or "no meaningful" in low or "no effect" in low:
+            return s.symbol
+    if "?" in sym_set:
+        return "?"
+    if check.symbol_set:
+        return check.symbol_set[0].symbol
+    return "?"
+
+
+def _set_at_dotted_path(root: dict[str, Any], path: str, value: Any) -> None:
+    parts = path.split(".")
+    cur: Any = root
+    for p in parts[:-1]:
+        nxt = cur.get(p)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[p] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+
+def unchanged_paragraph_payload(check: Check) -> dict[str, Any]:
+    """
+    JSON-shaped result used when OLD and NEW hashes match: no LLM call, but eval cells
+    and cache use the same shape as ``run_paragraph`` outputs.
+    """
+    sym = _neutral_symbol_for_check(check)
+    msg = "Paragraph text is unchanged; analysis skipped."
+    out: dict[str, Any] = {
+        check.symbol_field: sym,
+        "confidence": 1.0,
+        "recommendations": [],
+    }
+    # DGNB / project-style: metrics object + summary under metrics_path
+    if (
+        check.metric_keys
+        and check.metrics_path
+        and check.summary_path
+        and "None" in check.metric_value_set
+        and check.summary_path.startswith(check.metrics_path + ".")
+    ):
+        out["technical_label"] = "Editorial change"
+        block: dict[str, Any] = {mk.key: "None" for mk in check.metric_keys}
+        rel = check.summary_path[len(check.metrics_path) + 1 :]
+        _set_at_dotted_path(block, rel, msg)
+        _set_at_dotted_path(out, check.metrics_path, block)
+        return out
+
+    # Readability / LinkedIn: nested score dicts under *.old / *.new
+    if check.metric_keys and check.metrics_path.endswith(".new"):
+        root = check.metrics_path[: -len(".new")]
+        scores = {mk.key: 0.0 for mk in check.metric_keys}
+        out[root] = {"old": dict(scores), "new": dict(scores)}
+        if check.id == "readability":
+            out["readability_impact"] = "neutral"
+        elif check.id == "linkedin_virality":
+            out["virality_impact"] = "neutral"
+        out["problems"] = []
+        if check.summary_path:
+            _set_at_dotted_path(out, check.summary_path, msg)
+        return out
+
+    if check.summary_path:
+        _set_at_dotted_path(out, check.summary_path, msg)
+    else:
+        out["summary"] = msg
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Payload extractors (defensive against missing keys / legacy field names).
 # ---------------------------------------------------------------------------

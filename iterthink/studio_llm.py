@@ -19,28 +19,28 @@ def build_ki_tier_tabs(
     icon_size: int,
     tab_bar_height: float,
 ) -> ft.Tabs:
-    """Same chrome as the KI topic ``TabBar`` (underline, divider); ``ft.Tabs`` links bar + empty body."""
+    """Underline + divider like KI topic tabs; outlined icons, compact size, start-aligned cluster."""
     tier_tab_bar = ft.TabBar(
         tabs=[
             ft.Tab(
-                icon=ft.Icon(ft.Icons.COMPUTER, size=icon_size),
+                icon=ft.Icon(ft.Icons.MONITOR_OUTLINED, size=icon_size),
                 tooltip="Private: we use a local model on this machine (Ollama).",
                 height=tab_bar_height,
             ),
             ft.Tab(
-                icon=ft.Icon(ft.Icons.HOME, size=icon_size),
+                icon=ft.Icon(ft.Icons.HOME_OUTLINED, size=icon_size),
                 tooltip="Work: the model is shared with the approved LLM provider (OpenAI-compatible endpoint).",
                 height=tab_bar_height,
             ),
             ft.Tab(
-                icon=ft.Icon(ft.Icons.PUBLIC, size=icon_size),
+                icon=ft.Icon(ft.Icons.CLOUD_OUTLINED, size=icon_size),
                 tooltip="Cloud: chat is sent to the selected vendor API using vault credentials.",
                 height=tab_bar_height,
             ),
         ],
-        scrollable=False,
+        scrollable=True,
         secondary=True,
-        tab_alignment=ft.TabAlignment.FILL,
+        tab_alignment=ft.TabAlignment.START,
         indicator_color=config.FEDORA_BLUE,
         divider_color=ft.Colors.with_opacity(0.2, ft.Colors.GREY_700),
         label_padding=ft.padding.symmetric(horizontal=6, vertical=0),

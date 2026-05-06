@@ -10,7 +10,7 @@ import flet as ft
 from iterthink import checks as checks_mod
 from iterthink import checks_runner
 from iterthink import config
-from iterthink.compare_layout import pair_paragraphs_for_compare
+from iterthink.compare_layout import aligned_compare_pairs
 from iterthink.ollama_util import ollama_error_message
 from iterthink.paragraph_align import compute_hash
 from iterthink.studio_constants import (
@@ -124,7 +124,7 @@ class MarkdownStudioChecksUi:
         if not candidate.strip():
             self._snack("Open a note first to analyse it.")
             return
-        pairs = pair_paragraphs_for_compare(baseline, candidate)
+        pairs = aligned_compare_pairs(baseline, candidate)
         n = len(pairs)
         # Refresh hashes; reset results sized to the current document.
         self._check_para_hashes = [compute_hash(new) for _, new in pairs]
@@ -452,7 +452,7 @@ class MarkdownStudioChecksUi:
             return
         baseline = self._compare_latest_baseline_text()
         candidate = self._compare_editor.value or ""
-        pairs = pair_paragraphs_for_compare(baseline, candidate)
+        pairs = aligned_compare_pairs(baseline, candidate)
         new_hashes = [compute_hash(new) for _, new in pairs]
         prev_hashes = self._check_para_hashes
         n = len(new_hashes)

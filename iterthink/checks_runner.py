@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from iterthink.checks import Check
+from iterthink.checks import Check, unchanged_paragraph_payload
 from iterthink.db.models import ParagraphAnalysis
 from iterthink.db.session import session_scope
 from iterthink.ollama_util import chat_response_text
@@ -152,6 +152,8 @@ async def run_check_for_document(
     """Run ``check`` over each ``(old, new)`` pair.
 
     Skips paragraphs where both sides are blank (returns ``None``).
+    When OLD and NEW match (same content hash), skips the LLM and uses a neutral
+    synthetic payload (still written to cache when ``use_cache`` is true).
     Sequential to keep the backend responsive; the spinner-per-row UI
     gives immediate feedback. Uses cache unless ``use_cache=False`` (refresh).
     """
@@ -162,6 +164,16 @@ async def run_check_for_document(
             continue
         payload: dict | None = None
         err: str | None = None
+        if compute_hash(old) == compute_hash(new):
+            payload = unchanged_paragraph_payload(check)
+            if use_cache:
+                try:
+                    save_result(check.id, old, new, model, payload)
+                except BaseException as exc:  # noqa: BLE001
+                    err = f"Cache write failed: {type(exc).__name__}: {exc}"
+            results[i] = payload
+            await _emit(on_progress, i, payload, err)
+            continue
         if use_cache:
             payload = load_cached(check.id, old, new, model)
         if payload is None:

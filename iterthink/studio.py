@@ -29,6 +29,7 @@ from iterthink.studio_constants import (
     KI_TAB_BODY_MIN_HEIGHT_PX,
     KI_TAB_ICON_PX,
     KI_TAB_PAGE_PAD_V_PX,
+    KI_TIER_TAB_ICON_PX,
     RESULT_CARD_W as _RESULT_CARD_W,
     SIDEBAR_EXPANDED_WIDTH_PX,
     SIDEBAR_TOOLBAR_ROW_H_PX,
@@ -222,6 +223,12 @@ class MarkdownStudio(
             border=ft.InputBorder.NONE,
             border_width=0,
             content_padding=ft.padding.only(left=2, right=8, top=0, bottom=0),
+            menu_style=ft.MenuStyle(
+                bgcolor=config.SURFACE_VARIANT,
+                elevation=12,
+                shadow_color=ft.Colors.with_opacity(0.45, ft.Colors.BLACK),
+                visual_density=ft.VisualDensity.COMPACT,
+            ),
             options=[ft.dropdown.Option(key=_COMPARE_KEY_DRAFT, text="Draft")],
             value=_COMPARE_KEY_DRAFT,
             disabled=True,
@@ -707,7 +714,7 @@ class MarkdownStudio(
         self._ki_tier_tabs = build_ki_tier_tabs(
             selected_index=_tier_ix,
             on_change=self._on_ki_tier_tabs_change,
-            icon_size=KI_TAB_ICON_PX,
+            icon_size=KI_TIER_TAB_ICON_PX,
             tab_bar_height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
         )
         self._chat_model_options: list[str] = []
