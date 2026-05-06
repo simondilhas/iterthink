@@ -122,13 +122,15 @@ Raw data means nothing until it's clean, defined, reviewed, and acted on.
 
 ## License
 
-Licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
+Licensed under the [Business Source License 1.1](https://mariadb.com/bsl11/) (BUSL-1.1). Source is available; **individual, non-commercial** use is permitted under the Additional Use Grant in [LICENSE](LICENSE). After the **Change Date** (**2030-05-05**, four calendar years from **2026-05-05**), or the fourth anniversary of the first public distribution of that version under BUSL-1.1—**whichever comes first** per the license text—that version is available under the **Apache License 2.0**. Other production use requires a commercial license; contact **[Abstract AG](https://abstract.build)** at [info@abstract.build](mailto:info@abstract.build).
+
+The BUSL-1.1 text governs trademarks and logos: there is **no trademark grant** beyond what that license expressly allows.
 
 ---
 
 ## Contributing
 
-iterthink is fully open source. Read the code, trust it, improve it. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and pull request guidelines.
+The source is public and reviewable. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and pull request guidelines (contributions are licensed under the same terms as the project).
 
 [GitHub Issues →](https://github.com/iterthink/iterthink/issues)
 

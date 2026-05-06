@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve iterthink. By contributing, you agree that your contributions are licensed under the Apache License 2.0 (see `LICENSE`).
+Thanks for helping improve iterthink. By contributing, you agree that your contributions are licensed under the Business Source License 1.1 with the same Parameters as `LICENSE` (Additional Use Grant, Change Date, Change License).
 
 ## Before you start
 

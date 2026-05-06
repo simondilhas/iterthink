@@ -107,21 +107,21 @@ def _coerce_json(text: str) -> dict | None:
 
 
 async def run_paragraph(
-    ollama: Any,
+    llm_chat: Any,
     *,
     model: str,
     check: Check,
     old: str,
     new: str,
 ) -> tuple[dict | None, str | None]:
-    """One Ollama call. Returns ``(payload, error)``; on parse failure ``payload`` is ``None``."""
+    """One LLM call (Ollama or routed HTTP). Returns ``(payload, error)``."""
     user_text = check.user_template.format(old=old or "", new=new or "")
     messages = [
         {"role": "system", "content": check.system_prompt},
         {"role": "user", "content": user_text},
     ]
     try:
-        resp = await ollama.chat(
+        resp = await llm_chat.chat(
             model=model,
             messages=messages,
             stream=False,
@@ -141,7 +141,7 @@ async def run_paragraph(
 # ---------------------------------------------------------------------------
 
 async def run_check_for_document(
-    ollama: Any,
+    llm_chat: Any,
     *,
     model: str,
     check: Check,
@@ -152,7 +152,7 @@ async def run_check_for_document(
     """Run ``check`` over each ``(old, new)`` pair.
 
     Skips paragraphs where both sides are blank (returns ``None``).
-    Sequential to keep the local Ollama responsive; the spinner-per-row UI
+    Sequential to keep the backend responsive; the spinner-per-row UI
     gives immediate feedback. Uses cache unless ``use_cache=False`` (refresh).
     """
     results: list[dict | None] = [None] * len(pairs)
@@ -166,7 +166,7 @@ async def run_check_for_document(
             payload = load_cached(check.id, old, new, model)
         if payload is None:
             payload, err = await run_paragraph(
-                ollama, model=model, check=check, old=old, new=new
+                llm_chat, model=model, check=check, old=old, new=new
             )
             if payload is not None:
                 try:

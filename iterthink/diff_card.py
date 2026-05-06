@@ -109,8 +109,8 @@ def _clip(s: str, max_len: int = 2800) -> str:
     return s[: max_len - 1] + "…"
 
 
-async def judge_semantic(ollama: Any, model: str, original: str, revised: str) -> SemanticKind:
-    """Ask Ollama whether the revision shifts intent (NEW) or not (STABLE)."""
+async def judge_semantic(chat: Any, model: str, original: str, revised: str) -> SemanticKind:
+    """Ask the configured chat backend whether the revision shifts intent (NEW) or not (STABLE)."""
     messages = [
         {
             "role": "system",
@@ -126,7 +126,7 @@ async def judge_semantic(ollama: Any, model: str, original: str, revised: str) -
         },
     ]
     try:
-        resp = await ollama.chat(model=model, messages=messages, stream=False)
+        resp = await chat.chat(model=model, messages=messages, stream=False)
         raw = (chat_response_text(resp) or "").strip().upper()
         for token in raw.replace(",", " ").split():
             if token in ("NEW", "STABLE"):
@@ -136,7 +136,7 @@ async def judge_semantic(ollama: Any, model: str, original: str, revised: str) -
     return "STABLE"
 
 
-async def judge_rewritten_vs_major(ollama: Any, model: str, original: str, revised: str) -> RewriteVsMajor:
+async def judge_rewritten_vs_major(chat: Any, model: str, original: str, revised: str) -> RewriteVsMajor:
     """LLM tie-break: surface rewrite vs deeper semantic rewrite (rewritten)."""
     messages = [
         {
@@ -154,7 +154,7 @@ async def judge_rewritten_vs_major(ollama: Any, model: str, original: str, revis
         },
     ]
     try:
-        resp = await ollama.chat(model=model, messages=messages, stream=False)
+        resp = await chat.chat(model=model, messages=messages, stream=False)
         raw = (chat_response_text(resp) or "").strip().lower()
         for token in raw.replace(",", " ").split():
             if "rewritten" in token:

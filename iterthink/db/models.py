@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import ForeignKey, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from iterthink.db.base import Base
@@ -69,3 +69,14 @@ class ParagraphAnalysis(Base):
             name="uq_paragraph_analysis_key",
         ),
     )
+
+
+class CredentialVault(Base):
+    """Singleton row (id=1): PBKDF2 salt + Fernet ciphertext of API key JSON."""
+
+    __tablename__ = "credential_vault"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    kdf_salt: Mapped[bytes] = mapped_column(LargeBinary(), nullable=False)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary(), nullable=False)
+    verifier: Mapped[bytes] = mapped_column(LargeBinary(), nullable=False)

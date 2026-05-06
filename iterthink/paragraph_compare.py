@@ -58,7 +58,8 @@ def _base_kind_from_diff(d: DiffParagraph) -> SlotKind:
 
 
 async def classify_slots_async(
-    ollama: Any,
+    embed_client: Any,
+    llm_chat: Any,
     *,
     chat_model: str,
     embed_model: str,
@@ -101,11 +102,11 @@ async def classify_slots_async(
     olds = [o for _, o, _ in major_work]
     news = [p for _, _, p in major_work]
     try:
-        emb_old = await embed_texts(ollama, embed_model, olds)
-        emb_new = await embed_texts(ollama, embed_model, news)
+        emb_old = await embed_texts(embed_client, embed_model, olds)
+        emb_new = await embed_texts(embed_client, embed_model, news)
     except BaseException:
         for _j, (slot_i, o, p) in enumerate(major_work):
-            verdict = await judge_rewritten_vs_major(ollama, chat_model, o, p)
+            verdict = await judge_rewritten_vs_major(llm_chat, chat_model, o, p)
             out[slot_i] = "rewritten" if verdict == "rewritten" else "major"
         return out
 
@@ -113,7 +114,7 @@ async def classify_slots_async(
         vo = emb_old[j_idx] if j_idx < len(emb_old) else []
         vn = emb_new[j_idx] if j_idx < len(emb_new) else []
         if not vo or not vn:
-            verdict = await judge_rewritten_vs_major(ollama, chat_model, o, p)
+            verdict = await judge_rewritten_vs_major(llm_chat, chat_model, o, p)
             out[slot_i] = "rewritten" if verdict == "rewritten" else "major"
             continue
         c = _cosine([float(x) for x in vo], [float(x) for x in vn])
@@ -122,7 +123,7 @@ async def classify_slots_async(
         elif c >= _COSINE_MAJOR_SURFACE:
             out[slot_i] = "major"
         else:
-            verdict = await judge_rewritten_vs_major(ollama, chat_model, o, p)
+            verdict = await judge_rewritten_vs_major(llm_chat, chat_model, o, p)
             out[slot_i] = "rewritten" if verdict == "rewritten" else "major"
 
     return out

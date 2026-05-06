@@ -8,10 +8,20 @@ from typing import Any
 import flet as ft
 import yaml
 
-from iterthink import config, prompts, store_db
+from iterthink import config, licensing, passphrase_keyring, prompts, remote_model_list, store_db, vault_store
+from iterthink.llm_router import (
+    DEFAULT_COMPANY_OPENAI_BASE,
+    SECRET_CLOUD_ANTHROPIC,
+    SECRET_CLOUD_GOOGLE,
+    SECRET_CLOUD_OPENAI,
+    SECRET_COMPANY_OPENAI,
+)
 from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS, TOPIC_EVALUATE, VALID_TOPICS
 from iterthink.ollama_models import classify_installed_models
 from iterthink.ollama_util import ollama_error_message
+from iterthink.studio_constants import KI_TAB_ICON_PX, SIDEBAR_TOOLBAR_ROW_H_PX
+from iterthink.studio_llm import build_ki_tier_tabs
+from iterthink.studio_util import KI_TIERS, normalize_cloud_vendor, normalize_ki_tier
 
 
 def _apply_paths_and_theme(studio: Any, *, store_changed: bool) -> None:
@@ -45,22 +55,21 @@ async def open_settings_dialog(studio: Any) -> None:
     try:
         chat_opts, embed_opts = await classify_installed_models(ollama)
     except BaseException as ex:
-        studio._snack(f"Could not list models: {ollama_error_message(ex)}")
-        return
+        studio._snack(f"Could not list Ollama models (Local section): {ollama_error_message(ex)}")
     if not embed_opts:
-        studio._snack("No embedding models found. Try: ollama pull nomic-embed-text")
+        studio._snack("No embedding models found locally. Try: ollama pull nomic-embed-text")
     if not chat_opts:
-        studio._snack("No chat models found. Try: ollama pull llama3.2")
+        studio._snack("No chat models found locally. Try: ollama pull llama3.2")
 
     chat_dd = ft.Dropdown(
-        label="Chat model (margin / LLM)",
+        label="Chat model (Ollama — Local tier)",
         options=[ft.dropdown.Option(n) for n in chat_opts],
         value=studio.ollama_model if studio.ollama_model in chat_opts else (chat_opts[0] if chat_opts else None),
         expand=True,
         disabled=not chat_opts,
     )
     embed_dd = ft.Dropdown(
-        label="Embedding model",
+        label="Embedding model (Ollama — Local tier)",
         options=[ft.dropdown.Option(n) for n in embed_opts],
         value=studio.ollama_embed_model if studio.ollama_embed_model in embed_opts else (embed_opts[0] if embed_opts else None),
         expand=True,
@@ -68,7 +77,7 @@ async def open_settings_dialog(studio: Any) -> None:
     )
 
     status_txt = ft.Text(
-        f"{len(chat_opts)} chat, {len(embed_opts)} embedding models.",
+        f"{len(chat_opts)} chat, {len(embed_opts)} embedding models (Ollama).",
         size=12,
         color=ft.Colors.GREY_500,
     )
@@ -88,13 +97,13 @@ async def open_settings_dialog(studio: Any) -> None:
             chat_dd.value = chat_opts[0]
         if embed_dd.value not in embed_opts and embed_opts:
             embed_dd.value = embed_opts[0]
-        status_txt.value = f"{len(chat_opts)} chat, {len(embed_opts)} embedding models."
+        status_txt.value = f"{len(chat_opts)} chat, {len(embed_opts)} embedding models (Ollama)."
         if _ctrl_on_page(chat_dd):
             chat_dd.update()
             embed_dd.update()
             status_txt.update()
 
-    async def save_models(_e: ft.ControlEvent | None = None) -> None:
+    async def save_local_models(_e: ft.ControlEvent | None = None) -> None:
         cm = (chat_dd.value or "").strip()
         em = (embed_dd.value or "").strip()
         if not cm:
@@ -114,8 +123,282 @@ async def open_settings_dialog(studio: Any) -> None:
         studio.ollama_model = cm
         studio.ollama_embed_model = em
         studio._refresh_chat_model_button()
-        page.pop_dialog()
-        studio._snack("Model settings saved.")
+        studio._snack("Local Ollama models saved.")
+
+    cloud_vendor_seg = ft.SegmentedButton(
+        segments=[
+            ft.Segment(value="anthropic", label=ft.Text("Claude")),
+            ft.Segment(value="openai", label=ft.Text("ChatGPT")),
+            ft.Segment(value="google", label=ft.Text("Gemini")),
+        ],
+        selected=[normalize_cloud_vendor(studio.cloud_vendor)],
+        expand=True,
+        show_selected_icon=False,
+    )
+
+    def _on_cloud_vendor_change(e: ft.ControlEvent) -> None:
+        sel = list(getattr(e.control, "selected", []) or [])
+        if not sel:
+            return
+        studio.cloud_vendor = normalize_cloud_vendor(sel[0])
+        store_db.settings_set(studio._db, store_db.SETTINGS_CLOUD_VENDOR, studio.cloud_vendor)
+
+    cloud_vendor_seg.on_change = _on_cloud_vendor_change
+
+    def _model_dd_options(ids: list[str], *, current: str) -> list[ft.dropdown.Option]:
+        cur = (current or "").strip()
+        ordered: list[str] = []
+        seen: set[str] = set()
+        if cur:
+            ordered.append(cur)
+            seen.add(cur)
+        for x in ids:
+            x = (x or "").strip()
+            if x and x not in seen:
+                ordered.append(x)
+                seen.add(x)
+        return [ft.dropdown.Option(x) for x in ordered]
+
+    def _vault_key(name: str) -> str:
+        cache = getattr(studio, "_api_secrets_cache", None)
+        if not isinstance(cache, dict):
+            return ""
+        return (cache.get(name) or "").strip()
+
+    company_key_tf = ft.TextField(
+        label="OpenAI API key (stored encrypted)",
+        password=True,
+        can_reveal_password=True,
+        expand=True,
+        dense=True,
+    )
+    company_base_tf = ft.TextField(
+        label="Full company API URL",
+        value=studio.company_openai_base_url or "https://api.openai.com/v1",
+        hint_text="Full path, no trailing slash. OpenAI: …/v1 · Infomaniak: …/2/ai/…/openai/v1",
+        expand=True,
+        dense=True,
+    )
+    company_model_tf = ft.TextField(
+        label="Chat model id",
+        value=studio.company_openai_model or "gpt-4o-mini",
+        expand=True,
+        dense=True,
+    )
+
+    cloud_anthropic_key_tf = ft.TextField(
+        label="Anthropic API key",
+        password=True,
+        can_reveal_password=True,
+        expand=True,
+        dense=True,
+    )
+    _am = studio.cloud_anthropic_model or "claude-3-5-sonnet-20241022"
+    cloud_anthropic_model_dd = ft.Dropdown(
+        label="Claude model",
+        value=_am,
+        options=_model_dd_options([_am], current=_am),
+        editable=True,
+        enable_search=True,
+        dense=True,
+        expand=True,
+    )
+    cloud_openai_key_tf = ft.TextField(
+        label="OpenAI API key (ChatGPT / OpenAI cloud)",
+        password=True,
+        can_reveal_password=True,
+        expand=True,
+        dense=True,
+    )
+    _com = studio.cloud_openai_model or "gpt-4o-mini"
+    cloud_openai_model_dd = ft.Dropdown(
+        label="OpenAI model (cloud)",
+        value=_com,
+        options=_model_dd_options([_com], current=_com),
+        editable=True,
+        enable_search=True,
+        dense=True,
+        expand=True,
+    )
+    cloud_google_key_tf = ft.TextField(
+        label="Google AI API key",
+        password=True,
+        can_reveal_password=True,
+        expand=True,
+        dense=True,
+    )
+    _gm = studio.cloud_google_model or "gemini-1.5-flash"
+    cloud_google_model_dd = ft.Dropdown(
+        label="Gemini model",
+        value=_gm,
+        options=_model_dd_options([_gm], current=_gm),
+        editable=True,
+        enable_search=True,
+        dense=True,
+        expand=True,
+    )
+
+    async def refresh_cloud_anthropic_models(_e: ft.ControlEvent | None = None) -> None:
+        key = (cloud_anthropic_key_tf.value or "").strip() or _vault_key(SECRET_CLOUD_ANTHROPIC)
+        ids, err = await remote_model_list.fetch_anthropic_models(key)
+        if err:
+            studio._snack(err)
+            return
+        if not ids:
+            studio._snack("No Anthropic models in response.")
+            return
+        cur = (cloud_anthropic_model_dd.value or "").strip()
+        cloud_anthropic_model_dd.options = _model_dd_options(ids, current=cur)
+        cloud_anthropic_model_dd.value = cur if (cur in ids or cur) else ids[0]
+        if _ctrl_on_page(cloud_anthropic_model_dd):
+            cloud_anthropic_model_dd.update()
+        studio._snack(f"Loaded {len(ids)} Claude models.")
+
+    async def refresh_cloud_openai_models(_e: ft.ControlEvent | None = None) -> None:
+        key = (cloud_openai_key_tf.value or "").strip() or _vault_key(SECRET_CLOUD_OPENAI)
+        ids, err = await remote_model_list.fetch_openai_compatible_models(DEFAULT_COMPANY_OPENAI_BASE, key)
+        if err:
+            studio._snack(err)
+            return
+        if not ids:
+            studio._snack("No OpenAI models in response.")
+            return
+        cur = (cloud_openai_model_dd.value or "").strip()
+        cloud_openai_model_dd.options = _model_dd_options(ids, current=cur)
+        cloud_openai_model_dd.value = cur if (cur in ids or cur) else ids[0]
+        if _ctrl_on_page(cloud_openai_model_dd):
+            cloud_openai_model_dd.update()
+        studio._snack(f"Loaded {len(ids)} OpenAI models.")
+
+    async def refresh_cloud_google_models(_e: ft.ControlEvent | None = None) -> None:
+        key = (cloud_google_key_tf.value or "").strip() or _vault_key(SECRET_CLOUD_GOOGLE)
+        ids, err = await remote_model_list.fetch_google_generative_models(key)
+        if err:
+            studio._snack(err)
+            return
+        if not ids:
+            studio._snack("No Gemini models in response.")
+            return
+        cur = (cloud_google_model_dd.value or "").strip()
+        cloud_google_model_dd.options = _model_dd_options(ids, current=cur)
+        cloud_google_model_dd.value = cur if (cur in ids or cur) else ids[0]
+        if _ctrl_on_page(cloud_google_model_dd):
+            cloud_google_model_dd.update()
+        studio._snack(f"Loaded {len(ids)} Gemini models.")
+
+    crypto_passphrase_tf = ft.TextField(
+        label="Encryption passphrase (for API keys — never stored in plaintext)",
+        password=True,
+        can_reveal_password=True,
+        expand=True,
+        dense=True,
+    )
+    crypto_feedback_txt = ft.Text("", size=12, color=ft.Colors.GREY_500)
+
+    async def unlock_vault(_e: ft.ControlEvent | None = None) -> None:
+        phrase = (crypto_passphrase_tf.value or "").strip()
+        ok, msg = studio.try_unlock_credential_vault(phrase)
+        crypto_feedback_txt.value = msg
+        crypto_feedback_txt.color = ft.Colors.GREEN_400 if ok else ft.Colors.ORANGE_400
+        if _ctrl_on_page(crypto_feedback_txt):
+            crypto_feedback_txt.update()
+        studio._snack(msg)
+
+    async def save_passphrase_to_keyring(_e: ft.ControlEvent | None = None) -> None:
+        phrase = (crypto_passphrase_tf.value or "").strip()
+        if not phrase:
+            studio._snack("Enter the encryption passphrase first.")
+            return
+        if not vault_store.vault_exists():
+            studio._snack("Save API keys first (company or cloud) before storing a passphrase.")
+            return
+        ok, msg = studio.try_unlock_credential_vault(phrase)
+        if not ok:
+            crypto_feedback_txt.value = msg
+            crypto_feedback_txt.color = ft.Colors.ORANGE_400
+            if _ctrl_on_page(crypto_feedback_txt):
+                crypto_feedback_txt.update()
+            studio._snack(msg)
+            return
+        ok2, msg2 = passphrase_keyring.set_stored_passphrase(phrase)
+        crypto_feedback_txt.value = msg2
+        crypto_feedback_txt.color = ft.Colors.GREEN_400 if ok2 else ft.Colors.RED_400
+        if _ctrl_on_page(crypto_feedback_txt):
+            crypto_feedback_txt.update()
+        studio._snack(msg2)
+
+    async def remove_passphrase_from_keyring(_e: ft.ControlEvent | None = None) -> None:
+        ok, msg = passphrase_keyring.delete_stored_passphrase()
+        crypto_feedback_txt.value = msg
+        crypto_feedback_txt.color = ft.Colors.GREEN_400 if ok else ft.Colors.RED_400
+        if _ctrl_on_page(crypto_feedback_txt):
+            crypto_feedback_txt.update()
+        studio._snack(msg)
+
+    async def save_company_settings(_e: ft.ControlEvent | None = None) -> None:
+        store_db.settings_set(studio._db, store_db.SETTINGS_COMPANY_OPENAI_BASE_URL, (company_base_tf.value or "").strip())
+        store_db.settings_set(studio._db, store_db.SETTINGS_COMPANY_OPENAI_MODEL, (company_model_tf.value or "").strip())
+        studio.company_openai_base_url = (company_base_tf.value or "").strip() or "https://api.openai.com/v1"
+        studio.company_openai_model = (company_model_tf.value or "").strip() or "gpt-4o-mini"
+        key = (company_key_tf.value or "").strip()
+        if key:
+            phrase = (crypto_passphrase_tf.value or "").strip()
+            if not phrase:
+                studio._snack("Enter the encryption passphrase to save the company API key.")
+                crypto_feedback_txt.value = "Passphrase required to encrypt the API key."
+                crypto_feedback_txt.color = ft.Colors.ORANGE_400
+                if _ctrl_on_page(crypto_feedback_txt):
+                    crypto_feedback_txt.update()
+                return
+            ok, msg = studio.save_credential_vault_entries(phrase, {SECRET_COMPANY_OPENAI: key})
+            crypto_feedback_txt.value = msg
+            crypto_feedback_txt.color = ft.Colors.GREEN_400 if ok else ft.Colors.RED_400
+            if _ctrl_on_page(crypto_feedback_txt):
+                crypto_feedback_txt.update()
+            studio._snack(msg)
+            return
+        crypto_feedback_txt.value = ""
+        if _ctrl_on_page(crypto_feedback_txt):
+            crypto_feedback_txt.update()
+        studio._snack("Company settings saved (base URL and model).")
+
+    async def save_cloud_settings(_e: ft.ControlEvent | None = None) -> None:
+        sel = list(getattr(cloud_vendor_seg, "selected", []) or [])
+        if sel:
+            studio.cloud_vendor = normalize_cloud_vendor(sel[0])
+            store_db.settings_set(studio._db, store_db.SETTINGS_CLOUD_VENDOR, studio.cloud_vendor)
+        store_db.settings_set(studio._db, store_db.SETTINGS_CLOUD_ANTHROPIC_MODEL, (cloud_anthropic_model_dd.value or "").strip())
+        store_db.settings_set(studio._db, store_db.SETTINGS_CLOUD_OPENAI_MODEL, (cloud_openai_model_dd.value or "").strip())
+        store_db.settings_set(studio._db, store_db.SETTINGS_CLOUD_GOOGLE_MODEL, (cloud_google_model_dd.value or "").strip())
+        studio.cloud_anthropic_model = (cloud_anthropic_model_dd.value or "").strip() or "claude-3-5-sonnet-20241022"
+        studio.cloud_openai_model = (cloud_openai_model_dd.value or "").strip() or "gpt-4o-mini"
+        studio.cloud_google_model = (cloud_google_model_dd.value or "").strip() or "gemini-1.5-flash"
+        updates = {
+            SECRET_CLOUD_ANTHROPIC: (cloud_anthropic_key_tf.value or "").strip(),
+            SECRET_CLOUD_OPENAI: (cloud_openai_key_tf.value or "").strip(),
+            SECRET_CLOUD_GOOGLE: (cloud_google_key_tf.value or "").strip(),
+        }
+        keys_nonempty = {k: v for k, v in updates.items() if v}
+        if keys_nonempty:
+            phrase = (crypto_passphrase_tf.value or "").strip()
+            if not phrase:
+                studio._snack("Enter the encryption passphrase to save cloud API keys.")
+                crypto_feedback_txt.value = "Passphrase required to encrypt API keys."
+                crypto_feedback_txt.color = ft.Colors.ORANGE_400
+                if _ctrl_on_page(crypto_feedback_txt):
+                    crypto_feedback_txt.update()
+                return
+            ok, msg = studio.save_credential_vault_entries(phrase, keys_nonempty)
+            crypto_feedback_txt.value = msg
+            crypto_feedback_txt.color = ft.Colors.GREEN_400 if ok else ft.Colors.RED_400
+            if _ctrl_on_page(crypto_feedback_txt):
+                crypto_feedback_txt.update()
+            studio._snack(msg)
+            return
+        crypto_feedback_txt.value = ""
+        if _ctrl_on_page(crypto_feedback_txt):
+            crypto_feedback_txt.update()
+        studio._snack("Cloud settings saved (vendor and models).")
 
     docs_tf = ft.TextField(
         label="Documents root (Markdown tree)",
@@ -406,18 +689,139 @@ async def open_settings_dialog(studio: Any) -> None:
             return
         studio._snack("Margin prompts saved.")
 
+    def _on_settings_ki_tier_tabs_change(e: ft.ControlEvent) -> None:
+        try:
+            idx = int(e.data)
+        except (TypeError, ValueError):
+            idx = int(getattr(e.control, "selected_index", 0))
+        if not (0 <= idx < len(KI_TIERS)):
+            return
+        studio.ki_tier = KI_TIERS[idx]
+        store_db.settings_set(studio._db, store_db.SETTINGS_KI_TIER, studio.ki_tier)
+        if hasattr(studio, "_sync_ki_tier_tabs_ui"):
+            studio._sync_ki_tier_tabs_ui()
+        if hasattr(studio, "_sync_chat_model_ui"):
+            studio._sync_chat_model_ui()
+
+    _settings_tier_ix = KI_TIERS.index(normalize_ki_tier(studio.ki_tier))
+    settings_ki_tier_tabs = build_ki_tier_tabs(
+        selected_index=_settings_tier_ix,
+        on_change=_on_settings_ki_tier_tabs_change,
+        icon_size=KI_TAB_ICON_PX,
+        tab_bar_height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+    )
+
     tab_models = ft.Container(
         padding=8,
         content=ft.Column(
             [
+                ft.Text("Default KI tier", weight=ft.FontWeight.W_600, size=14),
+                ft.Text(
+                    "Matches the KI panel toggle. Work = organisation OpenAI-compatible API; Cloud = vendor below.",
+                    size=11,
+                    color=ft.Colors.GREY_500,
+                ),
+                settings_ki_tier_tabs,
+                ft.Divider(height=12),
+                ft.Text("Local (Ollama)", weight=ft.FontWeight.W_600, size=14),
+                ft.Text(
+                    "Chat routing uses Local when the KI panel tier is Local. Embeddings always use Ollama here.",
+                    size=11,
+                    color=ft.Colors.GREY_500,
+                ),
                 chat_dd,
                 embed_dd,
                 status_txt,
                 ft.Row(
-                    [ft.TextButton("Refresh list", on_click=lambda e: page.run_task(refresh_lists, e))],
+                    [ft.TextButton("Refresh Ollama list", on_click=lambda e: page.run_task(refresh_lists, e))],
                     alignment=ft.MainAxisAlignment.START,
                 ),
-                ft.FilledButton("Save models", on_click=lambda e: page.run_task(save_models, e)),
+                ft.FilledButton("Save local models", on_click=lambda e: page.run_task(save_local_models, e)),
+                ft.Divider(height=16),
+                ft.Text("Encryption passphrase", weight=ft.FontWeight.W_600, size=14),
+                ft.Text(
+                    "Used only to encrypt API keys in the database. Not stored as plaintext. "
+                    "Required when you type a new key and press Save company or Save cloud. "
+                    "Optionally store this passphrase in the OS keyring (Linux Secret Service, "
+                    "Windows Credential Manager, macOS Keychain) so the app can unlock the vault on startup.",
+                    size=11,
+                    color=ft.Colors.GREY_500,
+                ),
+                crypto_passphrase_tf,
+                ft.Row(
+                    [
+                        ft.OutlinedButton("Unlock session", on_click=lambda e: page.run_task(unlock_vault, e)),
+                        ft.OutlinedButton(
+                            "Save passphrase to keyring",
+                            on_click=lambda e: page.run_task(save_passphrase_to_keyring, e),
+                        ),
+                        ft.OutlinedButton(
+                            "Remove passphrase from keyring",
+                            on_click=lambda e: page.run_task(remove_passphrase_from_keyring, e),
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.START,
+                    wrap=True,
+                ),
+                crypto_feedback_txt,
+                ft.Divider(height=16),
+                ft.Text("Company (OpenAI-compatible)", weight=ft.FontWeight.W_600, size=14),
+                ft.Text(
+                    "Use the full API URL your IT docs show for OpenAI-compatible access (not only the hostname).",
+                    size=11,
+                    color=ft.Colors.GREY_500,
+                ),
+                company_key_tf,
+                company_base_tf,
+                company_model_tf,
+                ft.Row(
+                    [ft.FilledButton("Save company", on_click=lambda e: page.run_task(save_company_settings, e))],
+                    alignment=ft.MainAxisAlignment.START,
+                ),
+                ft.Divider(height=16),
+                ft.Text("Cloud", weight=ft.FontWeight.W_600, size=14),
+                ft.Text("Vendor for the Cloud tier (KI panel):", size=11, color=ft.Colors.GREY_500),
+                cloud_vendor_seg,
+                cloud_anthropic_key_tf,
+                ft.Row(
+                    [
+                        cloud_anthropic_model_dd,
+                        ft.TextButton(
+                            "List Claude models",
+                            on_click=lambda e: page.run_task(refresh_cloud_anthropic_models, e),
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                cloud_openai_key_tf,
+                ft.Row(
+                    [
+                        cloud_openai_model_dd,
+                        ft.TextButton(
+                            "List OpenAI models",
+                            on_click=lambda e: page.run_task(refresh_cloud_openai_models, e),
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                cloud_google_key_tf,
+                ft.Row(
+                    [
+                        cloud_google_model_dd,
+                        ft.TextButton(
+                            "List Gemini models",
+                            on_click=lambda e: page.run_task(refresh_cloud_google_models, e),
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Row(
+                    [ft.FilledButton("Save cloud", on_click=lambda e: page.run_task(save_cloud_settings, e))],
+                    alignment=ft.MainAxisAlignment.START,
+                ),
             ],
             tight=True,
             spacing=12,
@@ -502,7 +906,131 @@ async def open_settings_dialog(studio: Any) -> None:
         ),
     )
 
-    panels = [tab_models, tab_paths, tab_app, tab_prompts]
+    def _license_status_label() -> str:
+        return "Status: Licensed" if licensing.is_licensed() else "Status: Free for personal use"
+
+    license_status_txt = ft.Text(_license_status_label(), size=14)
+
+    license_buy_block = ft.Container(
+        visible=not licensing.is_licensed(),
+        padding=ft.padding.all(12),
+        border_radius=8,
+        bgcolor=ft.Colors.with_opacity(0.12, config.FEDORA_BLUE),
+        border=ft.border.all(1, ft.Colors.with_opacity(0.4, config.FEDORA_BLUE)),
+        content=ft.Text(
+            spans=[
+                ft.TextSpan(
+                    "Buy a licence ",
+                    style=ft.TextStyle(color=ft.Colors.GREY_200, size=14, weight=ft.FontWeight.W_500),
+                ),
+                ft.TextSpan(
+                    "www.iterthink.com/#pricing",
+                    url=licensing.PRICING_URL,
+                    style=ft.TextStyle(
+                        color=config.FEDORA_BLUE,
+                        size=14,
+                        weight=ft.FontWeight.W_600,
+                        decoration=ft.TextDecoration.UNDERLINE,
+                    ),
+                ),
+            ],
+        ),
+    )
+
+    # TextField.value can lag the last keystrokes until blur; mirror via on_change.
+    _license_phrase_mirror: list[str] = [""]
+
+    def _on_license_passphrase_change(e: ft.ControlEvent) -> None:
+        _license_phrase_mirror[0] = e.control.value or ""
+
+    license_passphrase_tf = ft.TextField(
+        label="License passphrase",
+        password=True,
+        can_reveal_password=True,
+        expand=True,
+        dense=True,
+        on_change=_on_license_passphrase_change,
+    )
+    license_feedback_txt = ft.Text("", size=12, selectable=False)
+    license_remove_btn = ft.TextButton(
+        "Remove license",
+        visible=licensing.is_licensed(),
+        on_click=lambda _e: None,
+    )
+
+    def _sync_license_tab_ui() -> None:
+        license_status_txt.value = _license_status_label()
+        licensed = licensing.is_licensed()
+        license_remove_btn.visible = licensed
+        license_buy_block.visible = not licensed
+        if _ctrl_on_page(license_status_txt):
+            license_status_txt.update()
+        if _ctrl_on_page(license_remove_btn):
+            license_remove_btn.update()
+        if _ctrl_on_page(license_buy_block):
+            license_buy_block.update()
+
+    def activate_license(_e: ft.ControlEvent | None = None) -> None:
+        phrase = (license_passphrase_tf.value or _license_phrase_mirror[0] or "").strip()
+        if not phrase:
+            license_feedback_txt.value = "Enter a passphrase."
+            license_feedback_txt.color = ft.Colors.ORANGE_400
+            if _ctrl_on_page(license_feedback_txt):
+                license_feedback_txt.update()
+            studio._snack("Enter a passphrase.")
+            return
+        if licensing.activate(phrase):
+            license_passphrase_tf.value = ""
+            _license_phrase_mirror[0] = ""
+            if _ctrl_on_page(license_passphrase_tf):
+                license_passphrase_tf.update()
+            _sync_license_tab_ui()
+            if hasattr(studio, "_refresh_license_banner"):
+                studio._refresh_license_banner()
+            license_feedback_txt.value = "License activated."
+            license_feedback_txt.color = ft.Colors.GREEN_400
+            if _ctrl_on_page(license_feedback_txt):
+                license_feedback_txt.update()
+            studio._snack("License activated.")
+        else:
+            license_feedback_txt.value = "Invalid passphrase."
+            license_feedback_txt.color = ft.Colors.RED_400
+            if _ctrl_on_page(license_feedback_txt):
+                license_feedback_txt.update()
+            studio._snack("Invalid passphrase.")
+
+    def remove_license(_e: ft.ControlEvent | None = None) -> None:
+        licensing.deactivate()
+        _license_phrase_mirror[0] = ""
+        _sync_license_tab_ui()
+        if hasattr(studio, "_refresh_license_banner"):
+            studio._refresh_license_banner()
+        license_feedback_txt.value = "License removed."
+        license_feedback_txt.color = ft.Colors.GREY_400
+        if _ctrl_on_page(license_feedback_txt):
+            license_feedback_txt.update()
+        studio._snack("License removed.")
+
+    license_remove_btn.on_click = remove_license
+
+    tab_license = ft.Container(
+        padding=8,
+        content=ft.Column(
+            [
+                license_status_txt,
+                license_buy_block,
+                license_passphrase_tf,
+                ft.FilledButton("Activate", on_click=activate_license),
+                license_feedback_txt,
+                license_remove_btn,
+            ],
+            tight=True,
+            spacing=12,
+            scroll=ft.ScrollMode.AUTO,
+        ),
+    )
+
+    panels = [tab_models, tab_paths, tab_app, tab_prompts, tab_license]
     tab_stack = ft.Stack(controls=panels, expand=True)
     for i, c in enumerate(panels):
         c.visible = i == 0
@@ -529,6 +1057,7 @@ async def open_settings_dialog(studio: Any) -> None:
             ft.NavigationRailDestination(icon=ft.Icons.FOLDER_OUTLINED, label="Paths"),
             ft.NavigationRailDestination(icon=ft.Icons.PALETTE_OUTLINED, label="App"),
             ft.NavigationRailDestination(icon=ft.Icons.FORMAT_LIST_BULLETED, label="Prompts"),
+            ft.NavigationRailDestination(icon=ft.Icons.KEY, label="License"),
         ],
         on_change=on_rail_change,
     )

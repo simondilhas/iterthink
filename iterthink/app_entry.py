@@ -59,6 +59,8 @@ async def main(page: ft.Page) -> None:
     page.window.on_event = on_window_event
 
     async def _ollama_startup_check() -> None:
+        if getattr(studio, "ki_tier", "local") != "local":
+            return
         try:
             await studio.ollama.list()
         except BaseException as ex:

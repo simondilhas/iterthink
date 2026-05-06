@@ -58,7 +58,8 @@ async def embed_texts(client: Any, model: str, inputs: list[str]) -> list[list[f
 
 async def classify_paragraph_slots_batch(
     conn: Any,
-    ollama: Any,
+    embed_client: Any,
+    llm_chat: Any,
     *,
     chat_model: str,
     embed_model: str,
@@ -80,24 +81,24 @@ async def classify_paragraph_slots_batch(
     new_texts = [p for _, _, p in work]
 
     try:
-        new_vecs = await embed_texts(ollama, embed_model, new_texts)
+        new_vecs = await embed_texts(embed_client, embed_model, new_texts)
     except BaseException:
         for i, o, p in work:
-            results.append((i, await judge_semantic(ollama, chat_model, o, p)))
+            results.append((i, await judge_semantic(llm_chat, chat_model, o, p)))
         return results
 
     for j, (i, o, p) in enumerate(work):
         ho = text_hash(o)
         hp = text_hash(p)
         if j >= len(new_vecs) or not new_vecs[j]:
-            results.append((i, await judge_semantic(ollama, chat_model, o, p)))
+            results.append((i, await judge_semantic(llm_chat, chat_model, o, p)))
             continue
 
         new_emb = new_vecs[j]
         latest = store_db.latest_observation(conn, doc_path, i, embed_model)
 
         if latest is None:
-            kind = await judge_semantic(ollama, chat_model, o, p)
+            kind = await judge_semantic(llm_chat, chat_model, o, p)
             prev_text_hash: str | None = ho
             cosine_to_prev: float | None = None
         else:
@@ -109,7 +110,7 @@ async def classify_paragraph_slots_batch(
             elif cosine_to_prev <= COSINE_NEW:
                 kind = "NEW"
             else:
-                kind = await judge_semantic(ollama, chat_model, o, p)
+                kind = await judge_semantic(llm_chat, chat_model, o, p)
 
         new_blob = floats_to_blob(new_emb)
         store_db.paragraph_text_upsert(conn, ho, o)

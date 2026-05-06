@@ -14,6 +14,14 @@ SCHEMA_VERSION = 1
 SETTINGS_CHAT = "ollama_chat_model"
 SETTINGS_EMBED = "ollama_embed_model"
 
+SETTINGS_KI_TIER = "ki_tier"
+SETTINGS_CLOUD_VENDOR = "cloud_vendor"
+SETTINGS_COMPANY_OPENAI_MODEL = "company_openai_model"
+SETTINGS_COMPANY_OPENAI_BASE_URL = "company_openai_base_url"
+SETTINGS_CLOUD_ANTHROPIC_MODEL = "cloud_anthropic_model"
+SETTINGS_CLOUD_OPENAI_MODEL = "cloud_openai_model"
+SETTINGS_CLOUD_GOOGLE_MODEL = "cloud_google_model"
+
 
 def ensure_store_dir() -> None:
     config.STORE_DIR.mkdir(parents=True, exist_ok=True)
