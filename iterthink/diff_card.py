@@ -14,9 +14,9 @@ from iterthink.ollama_util import chat_response_text
 SemanticKind = Literal["STABLE", "NEW"]
 RewriteVsMajor = Literal["rewritten", "major"]
 
-# Low-opacity highlights (ARGB ~25%)
-_BG_NEW = "#402ECC71"
-_BG_DEL = "#40FF5252"
+# Ghost-preview highlights (ARGB ~14%): added stays light green, removed is light red + strikethrough.
+_BG_NEW = "#252ECC71"
+_BG_DEL = "#25FF5252"
 
 
 def _tokenize(s: str) -> list[str]:
@@ -33,11 +33,16 @@ def build_unified_spans(
     base_color: str = ft.Colors.GREY_400,
     font_family: str | None = None,
     insert_color: str | None = None,
+    line_height: float | None = None,
 ) -> list[ft.TextSpan]:
     """Word-level inline diff: deletions (red + strikethrough), insertions (green tint / green text)."""
     ins_color = insert_color if insert_color is not None else ft.Colors.GREY_200
-    ff = {"font_family": font_family} if font_family else {}
-    base = ft.TextStyle(size=base_size, color=base_color, **ff)
+    style_kw: dict[str, Any] = {}
+    if font_family:
+        style_kw["font_family"] = font_family
+    if line_height is not None:
+        style_kw["height"] = line_height
+    base = ft.TextStyle(size=base_size, color=base_color, **style_kw)
     a = _tokenize(old_text)
     b = _tokenize(new_text)
     if not a and not b:
@@ -62,7 +67,7 @@ def build_unified_spans(
                             bgcolor=_BG_DEL,
                             decoration=ft.TextDecoration.LINE_THROUGH,
                             decoration_color=ft.Colors.RED_200,
-                            **ff,
+                            **style_kw,
                         ),
                     )
                 )
@@ -72,7 +77,7 @@ def build_unified_spans(
                 spans.append(
                     ft.TextSpan(
                         text=chunk,
-                        style=ft.TextStyle(size=base_size, color=ins_color, bgcolor=_BG_NEW, **ff),
+                        style=ft.TextStyle(size=base_size, color=ins_color, bgcolor=_BG_NEW, **style_kw),
                     )
                 )
         else:  # replace
@@ -86,7 +91,7 @@ def build_unified_spans(
                             bgcolor=_BG_DEL,
                             decoration=ft.TextDecoration.LINE_THROUGH,
                             decoration_color=ft.Colors.RED_200,
-                            **ff,
+                            **style_kw,
                         ),
                     )
                 )
@@ -94,9 +99,107 @@ def build_unified_spans(
                 spans.append(
                     ft.TextSpan(
                         text=t,
-                        style=ft.TextStyle(size=base_size, color=ins_color, bgcolor=_BG_NEW, **ff),
+                        style=ft.TextStyle(size=base_size, color=ins_color, bgcolor=_BG_NEW, **style_kw),
                     )
                 )
+
+    if not spans:
+        return [ft.TextSpan(text=" ", style=base)]
+    return spans
+
+
+def _diff_style_kwargs(
+    *,
+    font_family: str | None,
+    line_height: float | None,
+) -> dict[str, Any]:
+    style_kw: dict[str, Any] = {}
+    if font_family:
+        style_kw["font_family"] = font_family
+    if line_height is not None:
+        style_kw["height"] = line_height
+    return style_kw
+
+
+def build_old_side_spans(
+    old_text: str,
+    new_text: str,
+    *,
+    base_size: int = 12,
+    base_color: str = ft.Colors.GREY_400,
+    font_family: str | None = None,
+    line_height: float | None = None,
+) -> list[ft.TextSpan]:
+    """Old side only: equal tokens (base) + deletions (red + strikethrough). Skips insertions."""
+    style_kw = _diff_style_kwargs(font_family=font_family, line_height=line_height)
+    base = ft.TextStyle(size=base_size, color=base_color, **style_kw)
+    del_style = ft.TextStyle(
+        size=base_size,
+        color=base_color,
+        bgcolor=_BG_DEL,
+        decoration=ft.TextDecoration.LINE_THROUGH,
+        decoration_color=ft.Colors.RED_200,
+        **style_kw,
+    )
+    a = _tokenize(old_text)
+    b = _tokenize(new_text)
+    if not a and not b:
+        return [ft.TextSpan(text=" ", style=base)]
+
+    spans: list[ft.TextSpan] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b).get_opcodes():
+        if tag == "equal":
+            chunk = "".join(a[i1:i2])
+            if chunk:
+                spans.append(ft.TextSpan(text=chunk, style=base))
+        elif tag == "delete":
+            chunk = "".join(a[i1:i2])
+            if chunk:
+                spans.append(ft.TextSpan(text=chunk, style=del_style))
+        elif tag == "replace":
+            for t in a[i1:i2]:
+                spans.append(ft.TextSpan(text=t, style=del_style))
+        # insert: skipped (lives only on the new side)
+
+    if not spans:
+        return [ft.TextSpan(text=" ", style=base)]
+    return spans
+
+
+def build_new_side_spans(
+    old_text: str,
+    new_text: str,
+    *,
+    base_size: int = 12,
+    base_color: str = ft.Colors.GREY_400,
+    font_family: str | None = None,
+    insert_color: str | None = None,
+    line_height: float | None = None,
+) -> list[ft.TextSpan]:
+    """New side only: equal tokens (base) + insertions (green). Skips deletions."""
+    ins_color = insert_color if insert_color is not None else ft.Colors.GREY_200
+    style_kw = _diff_style_kwargs(font_family=font_family, line_height=line_height)
+    base = ft.TextStyle(size=base_size, color=base_color, **style_kw)
+    ins_style = ft.TextStyle(size=base_size, color=ins_color, bgcolor=_BG_NEW, **style_kw)
+    a = _tokenize(old_text)
+    b = _tokenize(new_text)
+    if not a and not b:
+        return [ft.TextSpan(text=" ", style=base)]
+
+    spans: list[ft.TextSpan] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b).get_opcodes():
+        if tag == "equal":
+            chunk = "".join(b[j1:j2])
+            if chunk:
+                spans.append(ft.TextSpan(text=chunk, style=base))
+        elif tag == "insert":
+            chunk = "".join(b[j1:j2])
+            if chunk:
+                spans.append(ft.TextSpan(text=chunk, style=ins_style))
+        elif tag == "replace":
+            for t in b[j1:j2]:
+                spans.append(ft.TextSpan(text=t, style=ins_style))
+        # delete: skipped (lives only on the old side)
 
     if not spans:
         return [ft.TextSpan(text=" ", style=base)]

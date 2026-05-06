@@ -19,7 +19,7 @@ from iterthink.studio_components import (
     action_rail_icon_button_style,
     sparkle_margin_popup_menu,
 )
-from iterthink.margin import paragraph_index_at_offset, split_paragraphs
+from iterthink.margin import paragraph_index_at_offset, replace_paragraph_at_index, split_paragraphs
 from iterthink.llm_router import remote_http_error_message
 from iterthink.ollama_util import chat_response_text, chat_stream_delta, ollama_error_message
 from iterthink.studio_constants import (
@@ -28,6 +28,7 @@ from iterthink.studio_constants import (
     COMPOSE_READING_WIDTH_FRAC,
     PROJECT_PAGE_URL as _PROJECT_PAGE_URL,
     READING_MAX_PX,
+    TAB_FUTURE,
     TAB_PRESENT,
 )
 from iterthink.studio_util import ctrl_on_page as _ctrl_on_page
@@ -825,6 +826,35 @@ class MarkdownStudioCompose:
         reply.value = acc
         if _ctrl_on_page(reply):
             reply.update()
+
+        if act.topic == TOPIC_CHANGE and self.current_path:
+            buf = self.editor.value or ""
+            if replace_span is not None:
+                a, b = replace_span
+                cand_buf = buf[:a] + acc + buf[b:]
+                loc_label = "selection"
+            else:
+                cand_buf = replace_paragraph_at_index(buf, idx, acc)
+                loc_label = f"paragraph {idx + 1}"
+            try:
+                with session_scope() as s:
+                    new_vid = version_storage.persist_version_snapshot(
+                        s,
+                        self.current_path.resolve(),
+                        cand_buf,
+                        "ai_proposal",
+                        display_label=f"{act.label} - {loc_label}",
+                    )
+                if new_vid is not None:
+                    self._ai_proposal_action_ids[new_vid] = action_id
+                    self._latest_ai_proposal_vid = new_vid
+                    self._refresh_compare_tab_candidate_ui()
+                    if self._main_tab_index == TAB_FUTURE:
+                        self._select_proposal_as_review_candidate(new_vid)
+                        self._rebuild_future_paragraph_ui()
+                        self._refresh_compare_diff_immediate()
+            except BaseException:
+                pass
 
         if act.topic == TOPIC_CHANGE:
             apply_snippet = (

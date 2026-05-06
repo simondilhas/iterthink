@@ -17,6 +17,7 @@ from iterthink.studio_constants import (
     COMPARE_EVAL_COL_W,
     KI_PILL_TEXT_SIZE,
     RESULT_CARD_HIDE_DELAY_SEC,
+    TAB_FUTURE,
     TAB_HISTORY,
 )
 from iterthink.studio_util import ctrl_on_page as _ctrl_on_page
@@ -111,8 +112,9 @@ class MarkdownStudioChecksUi:
         if check is None:
             self._snack(f"Check '{check_id}' is not configured.")
             return
-        # Make sure History tab is selected so user sees results.
-        if self._main_tab_index != TAB_HISTORY:
+        # Stay put if user is already on a tab with eval cells (History or Review);
+        # otherwise jump to History so the symbols are visible.
+        if self._main_tab_index not in (TAB_HISTORY, TAB_FUTURE):
             self._main_tabs.selected_index = TAB_HISTORY
             if _ctrl_on_page(self._main_tabs):
                 self._main_tabs.update()

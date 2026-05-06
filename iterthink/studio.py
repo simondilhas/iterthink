@@ -118,12 +118,20 @@ class MarkdownStudio(
         self._main_tab_index: int = TAB_PRESENT
         self._compare_tab_bar_hover_index1: bool = False
         self._compare_dropdown_hover: bool = False
+        self._compare_version_dd_focused: bool = False
         self._compare_candidate_source: CompareCandidateSource = "draft"
         self._compare_snapshot_version_id: int | None = None
         self._pending_ai_accept_action_id: str | None = None
-        # History tab: right column = current draft (editable)
+        # AI proposal book-keeping: every change-topic reply persists an ai_proposal snapshot;
+        # action_id is kept in-memory so accept can label the apply correctly. _latest_ai_proposal_vid
+        # is the most recently persisted proposal for the current document (auto-selected on Review).
+        self._ai_proposal_action_ids: dict[int, str] = {}
+        self._latest_ai_proposal_vid: int | None = None
+        # History tab: left + right are read-only diff Texts; _compare_right_fields holds hidden carriers
+        # so length-based code (hash invalidation, bulk-apply checks) keeps working unchanged.
         self._compare_right_fields: list[ft.TextField] = []
         self._compare_left_diff_texts: list[ft.Text] = []
+        self._compare_right_diff_texts: list[ft.Text] = []
         self._compare_row_pill_hosts: list[ft.Container] = []
         self._compare_row_stable_texts: list[str] = []
         self._compare_pill_gen: int = 0
@@ -276,11 +284,11 @@ class MarkdownStudio(
             expand=True,
             dense=True,
             text_style=_tb_dd_text_style,
-            filled=True,
-            fill_color=config.SURFACE,
+            filled=False,
+            bgcolor=ft.Colors.TRANSPARENT,
             border=ft.InputBorder.NONE,
             border_width=0,
-            content_padding=ft.padding.symmetric(horizontal=4, vertical=0),
+            content_padding=ft.padding.symmetric(horizontal=6, vertical=0),
             menu_style=_dd_menu_style,
             options=[
                 ft.dropdown.Option(
@@ -293,11 +301,20 @@ class MarkdownStudio(
             disabled=True,
             tooltip="Pick a version snapshot to compare against the current draft.",
             on_select=lambda e: self.page.run_task(self._on_compare_candidate_change_async, e),
+            on_focus=lambda _e: self._set_compare_version_dd_focused(True),
+            on_blur=lambda _e: self._set_compare_version_dd_focused(False),
         )
+        # Rim matches tree search field: surface fill + grey outline; blue only on hover/focus (see studio_history).
         self._compare_dropdown_hover_wrap = ft.Container(
             content=self._compare_candidate_dropdown,
             on_hover=self._on_compare_dropdown_container_hover,
             expand=True,
+            bgcolor=config.SURFACE,
+            border_radius=float(SIDEBAR_INNER_BORDER_RADIUS_PX),
+            border=ft.Border.all(1, ft.Colors.GREY_700),
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            alignment=ft.Alignment.CENTER_LEFT,
+            padding=ft.padding.symmetric(horizontal=2, vertical=1),
         )
         self._review_candidate_dropdown = ft.Dropdown(
             expand=True,

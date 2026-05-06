@@ -18,7 +18,16 @@ from sqlalchemy.orm import Session
 from iterthink import config
 from iterthink.db.models import Document, DocumentVersion
 
-SnapshotReason = Literal["manual", "autosave", "pre_switch", "ai_apply", "ai_staged", "before_apply", "import"]
+SnapshotReason = Literal[
+    "manual",
+    "autosave",
+    "pre_switch",
+    "ai_apply",
+    "ai_staged",
+    "ai_proposal",
+    "before_apply",
+    "import",
+]
 
 SnapshotBucket = Literal["history", "import"]
 
