@@ -21,9 +21,6 @@ COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE = ft.ButtonStyle(
 # KI sidebar / analyse pills
 KI_PILL_TEXT_SIZE = 10
 
-# Compare row chrome (evaluate column width)
-COMPARE_EVAL_COL_W = 56
-
 # Floating Analyse result card timing
 RESULT_CARD_HIDE_DELAY_SEC = 0.18
 
@@ -74,6 +71,8 @@ COMPARE_ACTION_INNER_W = COMPARE_ACTION_GRID_CELL * 2
 COMPARE_ACTION_H_PAD = 5
 COMPARE_ACTION_V_PAD = 2
 COMPARE_ACTION_COL_W = COMPARE_ACTION_INNER_W + 2 * COMPARE_ACTION_H_PAD
+# Eval column on Compare/Review rows mirrors the action column width so the row stays symmetric.
+COMPARE_EVAL_COL_W = COMPARE_ACTION_COL_W
 
 PROJECT_PAGE_URL = "https://www.yourcompanyos.io"
 PROJECT_PAGE_TOOLTIP = "Start workflow on {yourcompany}os."

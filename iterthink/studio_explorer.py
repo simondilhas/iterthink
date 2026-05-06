@@ -437,6 +437,7 @@ class MarkdownStudioExplorer:
         self._compare_pdf_peer_snapshot_id = None
         self._latest_ai_proposal_vid = None
         self._ai_proposal_action_ids.clear()
+        self._loaded_proposal_sha = None
         self.current_path = path
         self.last_saved_text = text
         self.editor.value = text

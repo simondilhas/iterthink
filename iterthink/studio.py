@@ -127,6 +127,9 @@ class MarkdownStudio(
         # is the most recently persisted proposal for the current document (auto-selected on Review).
         self._ai_proposal_action_ids: dict[int, str] = {}
         self._latest_ai_proposal_vid: int | None = None
+        # Sha of the proposal body currently displayed in the Review right column; used to
+        # decide whether to persist a new ai_proposal snapshot when the user leaves it.
+        self._loaded_proposal_sha: str | None = None
         # History tab: left + right are read-only diff Texts; _compare_right_fields holds hidden carriers
         # so length-based code (hash invalidation, bulk-apply checks) keeps working unchanged.
         self._compare_right_fields: list[ft.TextField] = []
@@ -136,9 +139,10 @@ class MarkdownStudio(
         self._compare_row_stable_texts: list[str] = []
         self._compare_pill_gen: int = 0
         self._compare_refine_gen: int = 0
-        # Future tab: left column = current draft (editable), right column = AI proposal (read-only)
-        self._future_left_fields: list[ft.TextField] = []
-        self._future_right_diff_texts: list[ft.Text] = []
+        # Future tab: left column = current draft (read-only diff with deletions),
+        # right column = AI proposal (editable, plain). _compare_right_fields holds the editable
+        # right TextFields so accept/decline handlers stay shared with History.
+        self._future_left_diff_texts: list[ft.Text] = []
         self._future_row_pill_hosts: list[ft.Container] = []
         self._future_row_stable_texts: list[str] = []
         # Compose text frozen when opening Compare (draft); left column diffs vs this, not live editor drift.
@@ -533,7 +537,7 @@ class MarkdownStudio(
                         expand=1,
                     ),
                     ft.Container(
-                        content=ft.Text("Draft", style=_tb_label_style),
+                        content=ft.Text("Current Version", style=_tb_label_style),
                         expand=1,
                         alignment=ft.Alignment(0, 0),
                     ),
@@ -563,12 +567,12 @@ class MarkdownStudio(
             visible=True,
         )
 
-        # Review: left = "Draft"  |  right = proposal/import selector + bulk accept/decline
+        # Review: left = "Current Version"  |  right = proposal/import selector + bulk accept/decline
         self._toolbar_review = ft.Container(
             content=ft.Row(
                 [
                     ft.Container(
-                        content=ft.Text("Draft", style=_tb_label_style),
+                        content=ft.Text("Current Version", style=_tb_label_style),
                         expand=1,
                         alignment=ft.Alignment(0, 0),
                     ),

@@ -226,6 +226,9 @@ class MarkdownStudioCompareText:
                 self._pending_ai_accept_action_id = (
                     self._pending_ai_accept_action_id or "ai_proposal"
                 )
+                self._loaded_proposal_sha = version_storage.content_sha256(
+                    self._compare_editor.value or ""
+                )
             self._rebuild_future_paragraph_ui()
             self._refresh_compare_tab_candidate_ui()
             self._refresh_compare_diff_immediate()
@@ -283,6 +286,7 @@ class MarkdownStudioCompareText:
             or (row.display_label if row else None)
             or "ai_proposal"
         )
+        self._loaded_proposal_sha = version_storage.content_sha256(body)
         if _ctrl_on_page(self._compare_editor):
             self._compare_editor.update()
 
@@ -365,9 +369,9 @@ class MarkdownStudioCompareText:
             await self.save_file(silent=True, snapshot_reason="pre_switch")
 
         # Leaving Present: nothing to flush (editor is the source of truth).
-        # Leaving History: right fields are the current draft — already in editor.value via
-        #   _on_compare_para_field_change → _on_future_left_field_change isn't used here; nothing to flush.
-        # Leaving Future: left fields were synced to editor on each keystroke.
+        # Leaving History: right fields are read-only carriers; current draft is editor.value.
+        # Leaving Future: right fields are the AI proposal candidate, kept in _compare_editor.value
+        #   in-memory; nothing to persist until Accept.
 
         # Entering History (TAB_HISTORY): prefer 2nd-newest history autosave (newest ≈ draft), else rebuild.
         if new_ix == TAB_HISTORY:
@@ -425,6 +429,9 @@ class MarkdownStudioCompareText:
                     self._compare_candidate_source = "ai_preview"
                     if not self._compare_editor.value:
                         self._compare_editor.value = self.editor.value or ""
+                    self._loaded_proposal_sha = version_storage.content_sha256(
+                        self._compare_editor.value or ""
+                    )
             self._rebuild_future_paragraph_ui()
 
         self._main_tab_index = new_ix
@@ -594,6 +601,15 @@ class MarkdownStudioCompareText:
             line_height=COMPARE_COL_LINE_HEIGHT,
         )
 
+    def _future_old_side_spans(self, cur_para: str, ai_para: str) -> list[ft.TextSpan]:
+        """Future left column: words from current draft, deletions struck red.
+
+        Caller convention for build_old_side_spans is (old, new). On Future, current text is
+        the 'old' side and the AI proposal is the 'new' side, so removed-by-AI tokens get
+        the strikethrough.
+        """
+        return self._compare_old_side_spans(cur_para, ai_para)
+
     def _compare_new_side_spans(self, old_para: str, new_para: str) -> list[ft.TextSpan]:
         """History right column: only words from the draft, insertions tinted green."""
         old_t, new_t = self._compare_diff_clip(old_para, new_para)
@@ -606,6 +622,27 @@ class MarkdownStudioCompareText:
             insert_color=ft.Colors.LIGHT_GREEN_200,
             line_height=COMPARE_COL_LINE_HEIGHT,
         )
+
+    def _refresh_future_left_diff_spans(self) -> None:
+        """Update Future left column diff spans (current vs candidate; same paragraph count)."""
+        if self._main_tab_index != TAB_FUTURE:
+            return
+        if len(self._future_left_diff_texts) != len(self._compare_right_fields):
+            return
+        current = self.editor.value or ""
+        candidate = self._compare_editor.value or ""
+        if len(current) + len(candidate) > _DIFF_SPAN_CHAR_CAP:
+            half = _DIFF_SPAN_CHAR_CAP // 2
+            current = current[:half] + "\n…"
+            candidate = candidate[:half] + "\n…"
+        pairs = pair_paragraphs_for_compare(current, candidate)
+        for i, (cur_txt, ai_txt) in enumerate(pairs):
+            if i >= len(self._future_left_diff_texts):
+                break
+            t = self._future_left_diff_texts[i]
+            t.spans = self._future_old_side_spans(cur_txt, ai_txt)
+            if _ctrl_on_page(t):
+                t.update()
 
     def _refresh_compare_left_diff_spans(self) -> None:
         """Update History inline diff for both columns (snapshot vs draft; same paragraph count)."""
@@ -758,9 +795,9 @@ class MarkdownStudioCompareText:
         self.page.run_task(self._debounced_refine_compare_slots, self._compare_refine_gen)
 
     def _rebuild_future_paragraph_ui(self) -> None:
-        """Future tab: current(editable) | pill | AI proposal(read-only) | actions(persistent)."""
+        """Future tab: eval | current(read-only diff with deletions) | pill | AI proposal(editable) | actions."""
         self._compare_pill_gen += 1
-        # Future: left = current draft, right = AI proposal
+        # Future: left = current draft (old), right = AI proposal (new) — deletions live on the left.
         current_text = self.editor.value or ""
         ai_text = self._compare_editor.value or ""
         if len(current_text) + len(ai_text) > _DIFF_SPAN_CHAR_CAP:
@@ -768,7 +805,7 @@ class MarkdownStudioCompareText:
             current_text = current_text[:half] + "\n…"
             ai_text = ai_text[:half] + "\n…"
         pairs = pair_paragraphs_for_compare(current_text, ai_text)
-        # stable_texts = current paragraphs (for decline = reject AI, revert right to current)
+        # stable_texts = current paragraphs (decline = reject AI, revert right to current)
         current_paras = split_paragraphs(current_text)
         self._compare_row_stable_texts = [
             current_paras[i] if i < len(current_paras) else "" for i in range(len(pairs))
@@ -776,15 +813,14 @@ class MarkdownStudioCompareText:
         kinds_h, disps_h = paragraph_compare.compare_slots_heuristic(current_text, ai_text)
 
         self._future_rows_listview.controls.clear()
-        self._future_left_fields.clear()
-        self._future_right_diff_texts.clear()
+        self._future_left_diff_texts.clear()
         self._future_row_pill_hosts.clear()
-        # Reuse _compare_right_fields for accept/decline handlers (right = AI proposal)
+        # _compare_right_fields holds the editable right TextFields (AI proposal); accept/decline reuse it.
         self._compare_right_fields.clear()
         self._compare_eval_hosts.clear()
 
         para_style = self._compare_para_text_style()
-        shared_tf_kwargs: dict[str, Any] = {
+        right_tf_kwargs: dict[str, Any] = {
             "multiline": True,
             "max_lines": None,
             "min_lines": 1,
@@ -795,7 +831,9 @@ class MarkdownStudioCompareText:
             "text_style": para_style,
             "cursor_color": config.FEDORA_BLUE,
             "selection_color": config.SELECTION_OVERLAY,
-            "content_padding": ft.padding.all(8),
+            # Outer container drives the inset (see _COMPARE_HISTORY_CELL_PAD); zero here so the
+            # editable inner box matches the read-only diff Text on the left to the pixel.
+            "content_padding": ft.padding.all(0),
         }
         show_actions = bool(self.current_path)
 
@@ -808,35 +846,34 @@ class MarkdownStudioCompareText:
                 alignment=ft.Alignment.TOP_CENTER,
                 padding=ft.padding.only(top=4),
             )
-            # Left: current draft (editable)
-            left_tf = ft.TextField(
-                **shared_tf_kwargs,
-                value=cur_txt,
+            # Left: current draft, read-only Text with deletions struck red (insertions skipped).
+            left_diff = ft.Text(
+                spans=self._future_old_side_spans(cur_txt, ai_txt),
+                style=para_style,
+                selectable=True,
+                expand=True,
+                no_wrap=False,
+            )
+            self._future_left_diff_texts.append(left_diff)
+            left_cell = ft.Container(
+                content=left_diff,
+                expand=1,
+                padding=_COMPARE_HISTORY_CELL_PAD,
+            )
+            # Right: AI proposal, editable plain TextField (no diff styling).
+            right_tf = ft.TextField(
+                **right_tf_kwargs,
+                value=ai_txt,
                 read_only=False,
                 enable_interactive_selection=True,
                 hint_text="…",
                 expand=True,
-                on_change=lambda _e, ix=i: self._on_future_left_field_change(ix),
-            )
-            # Right: AI proposal (read-only, shown with diff spans)
-            right_diff = ft.Text(
-                spans=self._compare_paragraph_diff_spans(cur_txt, ai_txt),
-                selectable=True,
-                expand=True,
+                on_change=lambda _e, ix=i: self._on_compare_para_field_change(ix),
             )
             right_cell = ft.Container(
-                content=right_diff,
+                content=right_tf,
                 expand=1,
-                padding=ft.padding.all(8),
-            )
-            # Also keep a read-only TextField so accept handler can read AI text value
-            right_tf_ro = ft.TextField(
-                **shared_tf_kwargs,
-                value=ai_txt,
-                read_only=True,
-                visible=False,
-                height=0,
-                width=0,
+                padding=_COMPARE_HISTORY_CELL_PAD,
             )
             if show_actions:
                 actions_ctrl, hover_wrap_future = self._build_actions_square(i, persistent=False)
@@ -846,10 +883,10 @@ class MarkdownStudioCompareText:
             # Eval cell (leftmost): AI-check symbol for this paragraph; populated by Analyse pills.
             eval_host = self._build_eval_cell(i)
 
-            # Review row: eval | current(editable) | pill | AI(read-only diff) | actions(hover)
+            # Review row: eval | current(read-only diff) | pill | AI proposal(editable) | actions(hover)
             row_cells: list[ft.Control] = [
                 eval_host,
-                ft.Container(left_tf, expand=1),
+                left_cell,
                 pill_host,
                 right_cell,
             ]
@@ -868,12 +905,9 @@ class MarkdownStudioCompareText:
             else:
                 row = row_inner
             self._future_rows_listview.controls.append(row)
-            self._future_left_fields.append(left_tf)
-            self._future_right_diff_texts.append(right_diff)
             self._future_row_pill_hosts.append(pill_host)
             self._compare_eval_hosts.append(eval_host)
-            # _compare_right_fields tracks AI text for accept/decline handlers
-            self._compare_right_fields.append(right_tf_ro)
+            self._compare_right_fields.append(right_tf)
 
         if _ctrl_on_page(self._future_rows_listview):
             self._future_rows_listview.update()
@@ -881,14 +915,6 @@ class MarkdownStudioCompareText:
         self._refresh_compare_bulk_buttons()
         self._compare_refine_gen += 1
         self.page.run_task(self._debounced_refine_compare_slots, self._compare_refine_gen)
-
-    def _on_future_left_field_change(self, index: int) -> None:
-        """Sync Future left field edits back to editor buffer and refresh title."""
-        parts = [tf.value or "" for tf in self._future_left_fields]
-        new_val = "\n\n".join(parts) if parts else ""
-        self.editor.value = new_val
-        self._refresh_title_bar()
-        self._kick_debounced_autosave()
 
     def _refresh_compare_diff_immediate(self) -> None:
         if self._main_tab_index == TAB_FUTURE:
@@ -913,9 +939,15 @@ class MarkdownStudioCompareText:
         cand = self._compare_editor.value or ""
         n_para = len(split_paragraphs(cand))
         if n_para != len(self._compare_right_fields):
-            self._rebuild_compare_paragraph_ui()
+            if self._main_tab_index == TAB_FUTURE:
+                self._rebuild_future_paragraph_ui()
+            else:
+                self._rebuild_compare_paragraph_ui()
             return
-        self._refresh_compare_left_diff_spans()
+        if self._main_tab_index == TAB_FUTURE:
+            self._refresh_future_left_diff_spans()
+        else:
+            self._refresh_compare_left_diff_spans()
         # Drop in-memory analysis results for paragraphs whose new-text hash changed.
         self._invalidate_check_results_for_changes()
         if self._active_check_id is not None:
@@ -1002,22 +1034,26 @@ class MarkdownStudioCompareText:
 
     def _on_compare_para_field_change(self, index: int) -> None:
         self._sync_compare_buffer_from_fields()
-        # In History, right fields track current draft (editor); in other modes, compare_editor.
-        if self._main_tab_index == TAB_HISTORY:
-            cand = self.editor.value or ""
-        else:
-            cand = self._compare_editor.value or ""
+        # History: right fields track the current draft (editor) → autosave to disk.
+        # Future:  right fields are the AI proposal candidate → in-memory only, no autosave.
+        on_future = self._main_tab_index == TAB_FUTURE
+        cand = (self.editor.value if not on_future else self._compare_editor.value) or ""
         n_para = len(split_paragraphs(cand))
         if n_para != len(self._compare_right_fields):
-            self._rebuild_compare_paragraph_ui()
+            if on_future:
+                self._rebuild_future_paragraph_ui()
+            else:
+                self._rebuild_compare_paragraph_ui()
             self._refresh_title_bar()
-            self._kick_debounced_autosave()
+            if not on_future:
+                self._kick_debounced_autosave()
             return
         self._refresh_title_bar()
         self._compare_diff_gen += 1
         dgen = self._compare_diff_gen
         self.page.run_task(self._debounced_compare_diff, dgen)
-        self._kick_debounced_autosave()
+        if not on_future:
+            self._kick_debounced_autosave()
 
     async def _compare_accept_paragraph_async(self, index: int) -> None:
         if not self.current_path:
@@ -1213,6 +1249,7 @@ class MarkdownStudioCompareText:
         self._compare_candidate_source = "ai_preview"
         self._compare_snapshot_version_id = None
         self._pending_ai_accept_action_id = action_id
+        self._loaded_proposal_sha = version_storage.content_sha256(self._compare_editor.value or "")
         self._hide_prompt_footer(footer)
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)
