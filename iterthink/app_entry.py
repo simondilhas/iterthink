@@ -13,6 +13,8 @@ from iterthink.studio import MarkdownStudio
 
 async def main(page: ft.Page) -> None:
     page.title = "Iterthink — Markdown"
+    if page.web:
+        await page.browser_context_menu.disable()
     if not page.web:
         sym = config.APP_SYMBOL_PNG
         if sym.is_file():
@@ -52,9 +54,15 @@ async def main(page: ft.Page) -> None:
         page.window.title_bar_hidden = True
         page.update()
 
+    async def _save_on_boundary() -> None:
+        if studio.current_path and studio._is_dirty():
+            await studio.save_file(silent=True, snapshot_reason="pre_switch")
+
     def on_window_event(e: ft.WindowEvent) -> None:
         if e.type == ft.WindowEventType.RESIZED:
             studio.reflow_columns()
+        elif e.type in (ft.WindowEventType.BLUR, ft.WindowEventType.CLOSE):
+            page.run_task(_save_on_boundary)
 
     page.window.on_event = on_window_event
 

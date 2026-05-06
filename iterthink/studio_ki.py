@@ -22,6 +22,8 @@ from iterthink.studio_constants import (
     KI_TAB_PAGE_PAD_V_PX,
     SIDEBAR_EXPANDED_WIDTH_PX,
     COLLAPSED_RAIL_WIDTH_PX,
+    TAB_HISTORY,
+    TAB_FUTURE,
 )
 from iterthink.studio_util import KI_TIERS, ctrl_on_page as _ctrl_on_page, normalize_ki_tier
 
@@ -32,6 +34,28 @@ class MarkdownStudioKi:
             self._ki_topic_index = int(e.data)
         except (TypeError, ValueError):
             self._ki_topic_index = int(self._ki_topic_tabs.selected_index)
+        self._sync_ki_topic_mode_buttons()
+
+    def _sync_ki_topic_mode_buttons(self) -> None:
+        ix = self._ki_topic_index
+        u_w = 1.5
+        for i, b in enumerate(self._ki_topic_mode_buttons):
+            want = i == ix
+            col = config.FEDORA_BLUE if want else ft.Colors.GREY_400
+            if getattr(b, "icon_color", None) != col:
+                b.icon_color = col
+                if _ctrl_on_page(b):
+                    b.update()
+        for i, c in enumerate(getattr(self, "_ki_topic_mode_cells", [])):
+            want = i == ix
+            c.border = ft.border.only(
+                bottom=ft.BorderSide(
+                    u_w if want else 0.0,
+                    config.FEDORA_BLUE if want else ft.Colors.TRANSPARENT,
+                )
+            )
+            if _ctrl_on_page(c):
+                c.update()
 
     def _set_ki_topic(self, index: int) -> None:
         ix = max(0, min(2, int(index)))
@@ -40,6 +64,7 @@ class MarkdownStudioKi:
             self._ki_topic_tabs.selected_index = ix
         if _ctrl_on_page(self._ki_topic_tabs):
             self._ki_topic_tabs.update()
+        self._sync_ki_topic_mode_buttons()
 
     def _on_ki_pill_row_size_discuss(self, e: ft.LayoutSizeChangeEvent) -> None:
         self._ki_tab_body_heights[0] = max(float(e.height), 28.0)
@@ -72,44 +97,6 @@ class MarkdownStudioKi:
         await asyncio.sleep(0.06)
         self._apply_ki_tab_bar_view_height()
 
-    def toggle_right(self, _e: ft.ControlEvent | None = None) -> None:
-        self.right_open = not self.right_open
-        self.right_panel.content = self._build_right_column()
-        self.reflow_columns()
-        if _ctrl_on_page(self.right_panel):
-            self.right_panel.update()
-
-    def _ki_rail_collapse_strip(self) -> ft.Control:
-        """Left edge of KI card: thin hairline + hover pill; tap collapses."""
-        return self._pane_split_handle(
-            tooltip="Collapse KI panel",
-            on_toggle=self.toggle_right,
-            hairline_after=True,
-        )
-
-    def _build_right_column(self) -> ft.Control:
-        if not self.right_open:
-            return ft.Row(
-                [
-                    self._pane_split_handle(
-                        tooltip="Show KI panel",
-                        on_toggle=self.toggle_right,
-                        hairline_after=False,
-                        compact_rail=True,
-                    ),
-                ],
-                expand=True,
-                vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-            )
-        return ft.Row(
-            [
-                self._ki_rail_collapse_strip(),
-                ft.Container(content=self._right_ki_column, expand=True, padding=ft.padding.only(left=4)),
-            ],
-            expand=True,
-            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-        )
-
     def _rebuild_topic_pills(self) -> None:
         def fill_row(row: ft.Row, topic: str) -> None:
             row.controls.clear()
@@ -129,7 +116,9 @@ class MarkdownStudioKi:
                             visual_density=ft.VisualDensity.COMPACT,
                             padding=ft.padding.symmetric(horizontal=6, vertical=3),
                         ),
-                        on_click=lambda e, action_id=aid: self.page.run_task(self._quick_margin_action, action_id),
+                        on_click=lambda e, action_id=aid: self.page.run_task(
+                            self._quick_margin_action, action_id
+                        ),
                     )
                 )
 
@@ -140,6 +129,9 @@ class MarkdownStudioKi:
         for row in (self._pill_row_discuss, self._pill_row_change, self._pill_row_analyse):
             if _ctrl_on_page(row):
                 row.update()
+
+        if hasattr(self, "_refresh_editor_ctx_menu_items"):
+            self._refresh_editor_ctx_menu_items()
 
         self.page.run_task(self._defer_sync_ki_tab_height)
 
@@ -154,11 +146,35 @@ class MarkdownStudioKi:
             return
         self.toggle_right()
 
-    def _append_chat_line(self, role: str, text: str) -> None:
+    def _append_chat_line(self, role: str, text: str, *, quote: str | None = None) -> None:
         bg = ft.Colors.with_opacity(0.35, ft.Colors.GREY_900) if role == "user" else ft.Colors.with_opacity(0.25, config.FEDORA_BLUE)
         align = ft.Alignment.CENTER_RIGHT if role == "user" else ft.Alignment.CENTER_LEFT
+        header = ft.Text(
+            text,
+            size=12,
+            selectable=True,
+            color=ft.Colors.GREY_100,
+            weight=ft.FontWeight.W_600 if quote else ft.FontWeight.NORMAL,
+        )
+        body: ft.Control
+        if quote:
+            quote_text = ft.Text(
+                quote,
+                size=12,
+                selectable=True,
+                italic=True,
+                color=ft.Colors.GREY_400,
+            )
+            quote_box = ft.Container(
+                content=quote_text,
+                padding=ft.padding.only(left=8, top=2, bottom=2),
+                border=ft.border.only(left=ft.BorderSide(2, config.FEDORA_BLUE)),
+            )
+            body = ft.Column([header, quote_box], tight=True, spacing=4)
+        else:
+            body = header
         bubble = ft.Container(
-            content=ft.Text(text, size=12, selectable=True, color=ft.Colors.GREY_100),
+            content=body,
             padding=ft.padding.symmetric(horizontal=10, vertical=8),
             bgcolor=bg,
             border_radius=10,
@@ -256,25 +272,6 @@ class MarkdownStudioKi:
         self._chat_api_messages.append({"role": "user", "content": raw})
         self._chat_api_messages.append({"role": "assistant", "content": acc})
 
-    def _sync_side_panel_chrome(self) -> None:
-        """Expanded = rounded sidebar card; collapsed = square transparent rail (hairline from handle)."""
-        if self.left_open:
-            self.left_panel.border_radius = 15
-            self.left_panel.padding = 8
-            self.left_panel.bgcolor = config.SIDEBAR_SURFACE
-        else:
-            self.left_panel.border_radius = 0
-            self.left_panel.padding = 0
-            self.left_panel.bgcolor = ft.Colors.TRANSPARENT
-        if self.right_open:
-            self.right_panel.border_radius = 15
-            self.right_panel.padding = 8
-            self.right_panel.bgcolor = config.SIDEBAR_SURFACE
-        else:
-            self.right_panel.border_radius = 0
-            self.right_panel.padding = 0
-            self.right_panel.bgcolor = ft.Colors.TRANSPARENT
-
     def reflow_columns(self, _e: ft.ControlEvent | None = None) -> None:
         left_w = SIDEBAR_EXPANDED_WIDTH_PX if self.left_open else COLLAPSED_RAIL_WIDTH_PX
         right_w = SIDEBAR_EXPANDED_WIDTH_PX if self.right_open else COLLAPSED_RAIL_WIDTH_PX
@@ -283,7 +280,7 @@ class MarkdownStudioKi:
         self._sync_side_panel_chrome()
         self._margin_gen += 1
         self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)
-        if self._main_tab_index == 1:
+        if self._main_tab_index in (TAB_HISTORY, TAB_FUTURE):
             self._compare_diff_gen += 1
             self.page.run_task(self._debounced_compare_diff, self._compare_diff_gen)
         self.page.update()

@@ -18,23 +18,28 @@ def build_ki_tier_tabs(
     on_change: Callable[[ft.ControlEvent], Any],
     icon_size: int,
     tab_bar_height: float,
+    tab_texts: tuple[str, str, str] | None = None,
 ) -> ft.Tabs:
     """Underline + divider like KI topic tabs; outlined icons, compact size, start-aligned cluster."""
+    t0, t1, t2 = tab_texts if tab_texts else ("", "", "")
     tier_tab_bar = ft.TabBar(
         tabs=[
             ft.Tab(
                 icon=ft.Icon(ft.Icons.MONITOR_OUTLINED, size=icon_size),
-                tooltip="Private: we use a local model on this machine (Ollama).",
+                label=t0 or None,
+                tooltip="Home: local model on this machine (Ollama).",
                 height=tab_bar_height,
             ),
             ft.Tab(
                 icon=ft.Icon(ft.Icons.HOME_OUTLINED, size=icon_size),
-                tooltip="Work: the model is shared with the approved LLM provider (OpenAI-compatible endpoint).",
+                label=t1 or None,
+                tooltip="Office: organisation OpenAI-compatible API.",
                 height=tab_bar_height,
             ),
             ft.Tab(
                 icon=ft.Icon(ft.Icons.CLOUD_OUTLINED, size=icon_size),
-                tooltip="Cloud: chat is sent to the selected vendor API using vault credentials.",
+                label=t2 or None,
+                tooltip="Cloud: selected vendor API using encrypted vault credentials.",
                 height=tab_bar_height,
             ),
         ],
@@ -42,7 +47,7 @@ def build_ki_tier_tabs(
         secondary=True,
         tab_alignment=ft.TabAlignment.START,
         indicator_color=config.FEDORA_BLUE,
-        divider_color=ft.Colors.with_opacity(0.2, ft.Colors.GREY_700),
+        divider_color=ft.Colors.with_opacity(0.14, ft.Colors.WHITE),
         label_padding=ft.padding.symmetric(horizontal=6, vertical=0),
         indicator_thickness=1.5,
         height=tab_bar_height,

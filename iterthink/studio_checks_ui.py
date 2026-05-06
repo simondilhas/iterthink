@@ -17,6 +17,7 @@ from iterthink.studio_constants import (
     COMPARE_EVAL_COL_W,
     KI_PILL_TEXT_SIZE,
     RESULT_CARD_HIDE_DELAY_SEC,
+    TAB_HISTORY,
 )
 from iterthink.studio_util import ctrl_on_page as _ctrl_on_page
 
@@ -110,12 +111,12 @@ class MarkdownStudioChecksUi:
         if check is None:
             self._snack(f"Check '{check_id}' is not configured.")
             return
-        # Make sure Compare tab is selected so user sees results.
-        if self._main_tab_index != 1:
-            self._main_tabs.selected_index = 1
+        # Make sure History tab is selected so user sees results.
+        if self._main_tab_index != TAB_HISTORY:
+            self._main_tabs.selected_index = TAB_HISTORY
             if _ctrl_on_page(self._main_tabs):
                 self._main_tabs.update()
-            self._main_tab_index = 1
+            self._main_tab_index = TAB_HISTORY
         # Need a candidate to analyse against the baseline.
         if not self._compare_right_fields:
             self._rebuild_compare_paragraph_ui()

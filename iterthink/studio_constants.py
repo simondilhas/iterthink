@@ -27,13 +27,22 @@ COMPARE_EVAL_COL_W = 56
 # Floating Analyse result card timing
 RESULT_CARD_HIDE_DELAY_SEC = 0.18
 
-# Autosave debounce
-AUTOSAVE_IDLE_SEC = 6.0
+# Autosave: disk flush (no DB row) vs snapshot row (idle checkpoint)
+AUTOSAVE_DISK_IDLE_SEC = 30.0
+AUTOSAVE_SNAPSHOT_IDLE_SEC = 300.0
 
 # Side rails
 COLLAPSED_RAIL_WIDTH_PX = 36
 SIDEBAR_EXPANDED_WIDTH_PX = 280
 SIDEBAR_TOOLBAR_ROW_H_PX = 36
+# Inner well (explorer tree + KI topic/chat) inside SIDEBAR_SURFACE card
+SIDEBAR_INNER_BORDER_RADIUS_PX = 8
+SIDEBAR_INNER_PAD_PX = 4
+
+# Pane split handle: same width collapsed/expanded; pill + bar height (~2 cm @ 96dpi); strip = hit pad
+PANE_HANDLE_HEIGHT_PX = 76
+PANE_HANDLE_WIDTH_PX = 10
+PANE_HANDLE_STRIP_W_PX = 12
 
 KI_TAB_BODY_MIN_HEIGHT_PX = 96
 KI_TAB_PAGE_PAD_V_PX = 8
@@ -48,6 +57,12 @@ COMPOSE_READING_WIDTH_FRAC = 0.92
 DIFF_SPAN_CHAR_CAP = 120_000
 
 COMPARE_COL_LINE_HEIGHT = 1.6
+# Compose main editor: line height for rail Y math (must match TextField text_style size × height).
+COMPOSE_EDITOR_LINE_HEIGHT_PX = float(COMPARE_COL_FONT_SIZE * COMPARE_COL_LINE_HEIGHT)
+# Compose main editor content insets (keep in sync with studio.py TextField content_padding).
+COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX = 4
+COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX = 4
+COMPOSE_EDITOR_CONTENT_PAD_TOP_PX = 0
 COMPOSE_MARGIN_COL_W = 104
 COMPARE_PILL_COL_W = 100
 
@@ -63,7 +78,10 @@ COMPARE_ACTION_COL_W = COMPARE_ACTION_INNER_W + 2 * COMPARE_ACTION_H_PAD
 PROJECT_PAGE_URL = "https://www.yourcompanyos.io"
 PROJECT_PAGE_TOOLTIP = "Start workflow on {yourcompany}os."
 
-COMPARE_KEY_DRAFT = "__draft__"
-COMPARE_KEY_AI = "__ai_preview__"
-COMPARE_KEY_PDF_ORIGINAL = "__pdf_original__"
-COMPARE_KEY_DOCX_ORIGINAL = "__docx_original__"
+COMPARE_KEY_CURRENT = "__current__"
+COMPARE_KEY_CANDIDATE = "__candidate__"
+
+# Main tab indices
+TAB_HISTORY = 0
+TAB_PRESENT = 1
+TAB_FUTURE = 2

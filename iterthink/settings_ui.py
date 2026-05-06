@@ -21,7 +21,17 @@ from iterthink.ollama_models import classify_installed_models
 from iterthink.ollama_util import ollama_error_message
 from iterthink.studio_constants import KI_TIER_TAB_ICON_PX, SIDEBAR_TOOLBAR_ROW_H_PX
 from iterthink.studio_llm import build_ki_tier_tabs
-from iterthink.studio_util import KI_TIERS, normalize_cloud_vendor, normalize_ki_tier
+from iterthink.studio_util import (
+    CLOUD_VENDOR_ANTHROPIC,
+    CLOUD_VENDOR_GOOGLE,
+    CLOUD_VENDOR_OPENAI,
+    KI_TIER_CLOUD,
+    KI_TIER_COMPANY,
+    KI_TIER_LOCAL,
+    KI_TIERS,
+    normalize_cloud_vendor,
+    normalize_ki_tier,
+)
 
 
 def _apply_paths_and_theme(studio: Any, *, store_changed: bool) -> None:
@@ -142,8 +152,6 @@ async def open_settings_dialog(studio: Any) -> None:
             return
         studio.cloud_vendor = normalize_cloud_vendor(sel[0])
         store_db.settings_set(studio._db, store_db.SETTINGS_CLOUD_VENDOR, studio.cloud_vendor)
-
-    cloud_vendor_seg.on_change = _on_cloud_vendor_change
 
     def _model_dd_options(ids: list[str], *, current: str) -> list[ft.dropdown.Option]:
         cur = (current or "").strip()
@@ -310,7 +318,7 @@ async def open_settings_dialog(studio: Any) -> None:
             studio._snack("Enter the encryption passphrase first.")
             return
         if not vault_store.vault_exists():
-            studio._snack("Save API keys first (company or cloud) before storing a passphrase.")
+            studio._snack("Save API keys first (office or cloud) before storing a passphrase.")
             return
         ok, msg = studio.try_unlock_credential_vault(phrase)
         if not ok:
@@ -344,7 +352,7 @@ async def open_settings_dialog(studio: Any) -> None:
         if key:
             phrase = (crypto_passphrase_tf.value or "").strip()
             if not phrase:
-                studio._snack("Enter the encryption passphrase to save the company API key.")
+                studio._snack("Enter the encryption passphrase to save the office API key.")
                 crypto_feedback_txt.value = "Passphrase required to encrypt the API key."
                 crypto_feedback_txt.color = ft.Colors.ORANGE_400
                 if _ctrl_on_page(crypto_feedback_txt):
@@ -360,7 +368,7 @@ async def open_settings_dialog(studio: Any) -> None:
         crypto_feedback_txt.value = ""
         if _ctrl_on_page(crypto_feedback_txt):
             crypto_feedback_txt.update()
-        studio._snack("Company settings saved (base URL and model).")
+        studio._snack("Office settings saved (base URL and model).")
 
     async def save_cloud_settings(_e: ft.ControlEvent | None = None) -> None:
         sel = list(getattr(cloud_vendor_seg, "selected", []) or [])
@@ -703,29 +711,16 @@ async def open_settings_dialog(studio: Any) -> None:
         if hasattr(studio, "_sync_chat_model_ui"):
             studio._sync_chat_model_ui()
 
-    _settings_tier_ix = KI_TIERS.index(normalize_ki_tier(studio.ki_tier))
-    settings_ki_tier_tabs = build_ki_tier_tabs(
-        selected_index=_settings_tier_ix,
-        on_change=_on_settings_ki_tier_tabs_change,
-        icon_size=KI_TIER_TAB_ICON_PX,
-        tab_bar_height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-    )
+    _models_tier_k = normalize_ki_tier(studio.ki_tier)
+    _cv0 = normalize_cloud_vendor(studio.cloud_vendor)
 
-    tab_models = ft.Container(
-        padding=8,
+    wrap_home = ft.Container(
+        visible=_models_tier_k == KI_TIER_LOCAL,
         content=ft.Column(
             [
-                ft.Text("Default KI tier", weight=ft.FontWeight.W_600, size=14),
-                ft.Text(
-                    "Matches the KI panel toggle. Work = organisation OpenAI-compatible API; Cloud = vendor below.",
-                    size=11,
-                    color=ft.Colors.GREY_500,
-                ),
-                settings_ki_tier_tabs,
-                ft.Divider(height=12),
                 ft.Text("Local (Ollama)", weight=ft.FontWeight.W_600, size=14),
                 ft.Text(
-                    "Chat routing uses Local when the KI panel tier is Local. Embeddings always use Ollama here.",
+                    "Used when Home is selected in the KI panel. Embeddings always use Ollama.",
                     size=11,
                     color=ft.Colors.GREY_500,
                 ),
@@ -737,13 +732,21 @@ async def open_settings_dialog(studio: Any) -> None:
                     alignment=ft.MainAxisAlignment.START,
                 ),
                 ft.FilledButton("Save local models", on_click=lambda e: page.run_task(save_local_models, e)),
-                ft.Divider(height=16),
-                ft.Text("Encryption passphrase", weight=ft.FontWeight.W_600, size=14),
+            ],
+            tight=True,
+            spacing=12,
+        ),
+    )
+
+    wrap_crypto = ft.Container(
+        visible=_models_tier_k in (KI_TIER_COMPANY, KI_TIER_CLOUD),
+        content=ft.Column(
+            [
+                ft.Text("Encryption", weight=ft.FontWeight.W_600, size=14),
                 ft.Text(
-                    "Used only to encrypt API keys in the database. Not stored as plaintext. "
-                    "Required when you type a new key and press Save company or Save cloud. "
-                    "Optionally store this passphrase in the OS keyring (Linux Secret Service, "
-                    "Windows Credential Manager, macOS Keychain) so the app can unlock the vault on startup.",
+                    "API keys are stored encrypted in the database, not as plaintext. "
+                    "Enter this passphrase when saving new keys (Save office / Save cloud). "
+                    "Optionally store it in the OS keyring so the app can unlock the vault on startup.",
                     size=11,
                     color=ft.Colors.GREY_500,
                 ),
@@ -764,10 +767,19 @@ async def open_settings_dialog(studio: Any) -> None:
                     wrap=True,
                 ),
                 crypto_feedback_txt,
-                ft.Divider(height=16),
-                ft.Text("Company (OpenAI-compatible)", weight=ft.FontWeight.W_600, size=14),
+            ],
+            tight=True,
+            spacing=12,
+        ),
+    )
+
+    wrap_office = ft.Container(
+        visible=_models_tier_k == KI_TIER_COMPANY,
+        content=ft.Column(
+            [
+                ft.Text("Office (OpenAI-compatible)", weight=ft.FontWeight.W_600, size=14),
                 ft.Text(
-                    "Use the full API URL your IT docs show for OpenAI-compatible access (not only the hostname).",
+                    "Use the full API URL from your organisation (not only the hostname).",
                     size=11,
                     color=ft.Colors.GREY_500,
                 ),
@@ -775,13 +787,19 @@ async def open_settings_dialog(studio: Any) -> None:
                 company_base_tf,
                 company_model_tf,
                 ft.Row(
-                    [ft.FilledButton("Save company", on_click=lambda e: page.run_task(save_company_settings, e))],
+                    [ft.FilledButton("Save office", on_click=lambda e: page.run_task(save_company_settings, e))],
                     alignment=ft.MainAxisAlignment.START,
                 ),
-                ft.Divider(height=16),
-                ft.Text("Cloud", weight=ft.FontWeight.W_600, size=14),
-                ft.Text("Vendor for the Cloud tier (KI panel):", size=11, color=ft.Colors.GREY_500),
-                cloud_vendor_seg,
+            ],
+            tight=True,
+            spacing=12,
+        ),
+    )
+
+    cloud_anthropic_wrap = ft.Container(
+        visible=_cv0 == CLOUD_VENDOR_ANTHROPIC,
+        content=ft.Column(
+            [
                 cloud_anthropic_key_tf,
                 ft.Row(
                     [
@@ -794,6 +812,15 @@ async def open_settings_dialog(studio: Any) -> None:
                     spacing=8,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
+            ],
+            tight=True,
+            spacing=12,
+        ),
+    )
+    cloud_openai_wrap = ft.Container(
+        visible=_cv0 == CLOUD_VENDOR_OPENAI,
+        content=ft.Column(
+            [
                 cloud_openai_key_tf,
                 ft.Row(
                     [
@@ -806,6 +833,15 @@ async def open_settings_dialog(studio: Any) -> None:
                     spacing=8,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
+            ],
+            tight=True,
+            spacing=12,
+        ),
+    )
+    cloud_google_wrap = ft.Container(
+        visible=_cv0 == CLOUD_VENDOR_GOOGLE,
+        content=ft.Column(
+            [
                 cloud_google_key_tf,
                 ft.Row(
                     [
@@ -818,6 +854,22 @@ async def open_settings_dialog(studio: Any) -> None:
                     spacing=8,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
+            ],
+            tight=True,
+            spacing=12,
+        ),
+    )
+
+    wrap_cloud = ft.Container(
+        visible=_models_tier_k == KI_TIER_CLOUD,
+        content=ft.Column(
+            [
+                ft.Text("Cloud vendor", weight=ft.FontWeight.W_600, size=14),
+                ft.Text("Provider when Cloud is selected in the KI panel.", size=11, color=ft.Colors.GREY_500),
+                cloud_vendor_seg,
+                cloud_anthropic_wrap,
+                cloud_openai_wrap,
+                cloud_google_wrap,
                 ft.Row(
                     [ft.FilledButton("Save cloud", on_click=lambda e: page.run_task(save_cloud_settings, e))],
                     alignment=ft.MainAxisAlignment.START,
@@ -825,9 +877,76 @@ async def open_settings_dialog(studio: Any) -> None:
             ],
             tight=True,
             spacing=12,
-            scroll=ft.ScrollMode.AUTO,
         ),
     )
+
+    def _sync_cloud_vendor_panel() -> None:
+        v = normalize_cloud_vendor(studio.cloud_vendor)
+        cloud_anthropic_wrap.visible = v == CLOUD_VENDOR_ANTHROPIC
+        cloud_openai_wrap.visible = v == CLOUD_VENDOR_OPENAI
+        cloud_google_wrap.visible = v == CLOUD_VENDOR_GOOGLE
+        for c in (cloud_anthropic_wrap, cloud_openai_wrap, cloud_google_wrap):
+            if _ctrl_on_page(c):
+                c.update()
+
+    def _sync_settings_models_tier_panels() -> None:
+        t = normalize_ki_tier(studio.ki_tier)
+        wrap_home.visible = t == KI_TIER_LOCAL
+        wrap_crypto.visible = t in (KI_TIER_COMPANY, KI_TIER_CLOUD)
+        wrap_office.visible = t == KI_TIER_COMPANY
+        wrap_cloud.visible = t == KI_TIER_CLOUD
+        if t == KI_TIER_CLOUD:
+            _sync_cloud_vendor_panel()
+        for w in (wrap_home, wrap_crypto, wrap_office, wrap_cloud):
+            if _ctrl_on_page(w):
+                w.update()
+
+    def _on_settings_ki_tier_tabs_wrapped(e: ft.ControlEvent) -> None:
+        _on_settings_ki_tier_tabs_change(e)
+        _sync_settings_models_tier_panels()
+
+    def _on_cloud_vendor_ui(e: ft.ControlEvent) -> None:
+        _on_cloud_vendor_change(e)
+        _sync_cloud_vendor_panel()
+
+    cloud_vendor_seg.on_change = _on_cloud_vendor_ui
+
+    _settings_tier_ix = KI_TIERS.index(normalize_ki_tier(studio.ki_tier))
+    settings_ki_tier_tabs = build_ki_tier_tabs(
+        selected_index=_settings_tier_ix,
+        on_change=_on_settings_ki_tier_tabs_wrapped,
+        icon_size=KI_TIER_TAB_ICON_PX,
+        tab_bar_height=max(float(SIDEBAR_TOOLBAR_ROW_H_PX), 40.0),
+        tab_texts=("Home", "Office", "Cloud"),
+    )
+
+    models_models_column = ft.Column(
+        [
+            ft.Text("Models", size=18, weight=ft.FontWeight.W_600),
+            ft.Text(
+                "Default KI tier matches the KI panel (Home · Office · Cloud). Only the section for the selected tier is shown.",
+                size=11,
+                color=ft.Colors.GREY_500,
+            ),
+            settings_ki_tier_tabs,
+            ft.Divider(height=12),
+            wrap_home,
+            wrap_crypto,
+            wrap_office,
+            wrap_cloud,
+        ],
+        tight=True,
+        spacing=12,
+        scroll=ft.ScrollMode.AUTO,
+    )
+
+    tab_models = ft.Container(
+        padding=8,
+        content=models_models_column,
+    )
+
+    _sync_settings_models_tier_panels()
+    _sync_cloud_vendor_panel()
 
     tab_paths = ft.Container(
         padding=8,

@@ -18,7 +18,9 @@ from sqlalchemy.orm import Session
 from iterthink import config
 from iterthink.db.models import Document, DocumentVersion
 
-SnapshotReason = Literal["manual", "autosave", "pre_switch", "ai_apply", "ai_staged", "before_apply"]
+SnapshotReason = Literal["manual", "autosave", "pre_switch", "ai_apply", "ai_staged", "before_apply", "import"]
+
+SnapshotBucket = Literal["history", "import"]
 
 
 def path_key_for(resolved: Path) -> str:
@@ -97,12 +99,24 @@ class SnapshotInfo:
     pdf_profile: str | None = None
 
 
-def snapshot_display_text(sn: SnapshotInfo) -> str:
-    """Label for UI selectors (tab Comparison, menus)."""
-    if sn.display_label and sn.display_label.strip():
-        return sn.display_label.strip()
+def snapshot_bucket(sn: SnapshotInfo) -> SnapshotBucket:
+    """Bucket the snapshot into 'import' (file came from outside) or 'history' (everything else)."""
+    if sn.reason == "import":
+        return "import"
+    return "history"
+
+
+def snapshot_dropdown_text(sn: SnapshotInfo) -> str:
+    """Visible label for dropdown rows: 'YYYY-MM-DD HH:MM' plus optional display_label.
+
+    The bucket prefix (History / Import) is added by the caller so the same row text
+    works under either heading.
+    """
     ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(sn.created_at))
-    return f"{ts}  ({sn.reason})"
+    label = (sn.display_label or "").strip()
+    if label:
+        return f"{ts} - {label}"
+    return ts
 
 
 def update_document_path_after_rename(
@@ -280,6 +294,18 @@ def list_snapshots(session: Session, resolved_doc: Path) -> list[SnapshotInfo]:
             )
         )
     return out
+
+
+def second_newest_history_autosave_version_id(snaps: list[SnapshotInfo]) -> int | None:
+    """From ``list_snapshots`` (newest first): second history ``autosave`` row.
+
+    The newest autosave usually matches the current draft; the next row is a useful
+    default compare target when opening History.
+    """
+    autos = [s for s in snaps if s.reason == "autosave" and snapshot_bucket(s) == "history"]
+    if len(autos) < 2:
+        return None
+    return autos[1].version_id
 
 
 def get_version_pdf_relpath(session: Session, version_id: int) -> str | None:

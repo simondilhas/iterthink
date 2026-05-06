@@ -14,7 +14,11 @@ from flet.controls.types import PagePlatform
 from iterthink import config
 from iterthink import licensing
 from iterthink import settings_ui
-from iterthink.studio_constants import SIDEBAR_TOOLBAR_ROW_H_PX
+from iterthink.studio_constants import (
+    PANE_HANDLE_HEIGHT_PX,
+    PANE_HANDLE_STRIP_W_PX,
+    PANE_HANDLE_WIDTH_PX,
+)
 from iterthink.studio_util import ctrl_on_page as _ctrl_on_page
 
 _HELP_MD_PATH = Path(__file__).resolve().parent / "help.md"
@@ -91,12 +95,6 @@ class MarkdownStudioShell:
         elif self._header_menu_open == 0:
             self._schedule_header_hide()
 
-    def toggle_left(self, _e: ft.ControlEvent | None = None) -> None:
-        self.left_open = not self.left_open
-        self.left_panel.content = self._build_left_column()
-        self.reflow_columns()
-        self.left_panel.update()
-
     def _use_csd(self) -> bool:
         if self.page.web:
             return False
@@ -144,18 +142,20 @@ class MarkdownStudioShell:
         )
 
     def _build_license_banner(self) -> ft.Control:
-        licensed = licensing.is_licensed()
-        label = "Licensed" if licensed else "Free for personal use — Get Commercial License"
-        color = ft.Colors.GREY_400 if licensed else config.FEDORA_BLUE
-        txt = ft.Text(label, size=12, weight=ft.FontWeight.W_500, color=color)
+        if licensing.is_licensed():
+            return ft.Container()
+        txt = ft.Text(
+            "Free for personal use — Get Commercial License",
+            size=12,
+            weight=ft.FontWeight.W_500,
+            color=config.FEDORA_BLUE,
+        )
         inner = ft.Container(
             content=txt,
             padding=ft.padding.symmetric(horizontal=10, vertical=4),
             border_radius=12,
-            bgcolor=ft.Colors.with_opacity(0.10 if not licensed else 0.05, color),
+            bgcolor=ft.Colors.with_opacity(0.10, config.FEDORA_BLUE),
         )
-        if licensed:
-            return inner
         return ft.GestureDetector(
             mouse_cursor=ft.MouseCursor.CLICK,
             on_tap=lambda _e: self.page.launch_url(licensing.PRICING_URL),
@@ -391,105 +391,56 @@ class MarkdownStudioShell:
         *,
         tooltip: str,
         on_toggle: Callable[[ft.ControlEvent | None], None],
-        hairline_after: bool,
         compact_rail: bool = False,
+        strip_margin: ft.Margin | None = None,
     ) -> ft.Control:
-        """Hairline + centered pill. Expanded card: narrow strip, pill on hover only.
-        Collapsed rail: strip fills width, pill always visible for affordance + easier taps."""
-        hair = ft.BorderSide(1, ft.Colors.with_opacity(0.1, ft.Colors.WHITE))
-        edge_border = ft.border.only(right=hair) if hairline_after else ft.border.only(left=hair)
-        pill_idle = ft.Colors.with_opacity(0.24, ft.Colors.WHITE) if compact_rail else ft.Colors.TRANSPARENT
-        pill = ft.Container(
-            width=6 if compact_rail else 4,
-            height=52 if compact_rail else 40,
-            border_radius=3 if compact_rail else 2,
-            bgcolor=pill_idle,
-        )
+        """Collapsed rail: wide strip + light pill. Expanded: SURFACE bar, blue on hover."""
+        if compact_rail:
+            pill_idle = ft.Colors.with_opacity(0.24, ft.Colors.WHITE)
+            pill = ft.Container(
+                width=float(PANE_HANDLE_WIDTH_PX),
+                height=float(PANE_HANDLE_HEIGHT_PX),
+                bgcolor=pill_idle,
+            )
 
-        def _on_strip_hover(e: ft.ControlEvent) -> None:
-            if e.data:
-                pill.bgcolor = config.FEDORA_BLUE
-            else:
-                pill.bgcolor = pill_idle
-            if _ctrl_on_page(pill):
-                pill.update()
+            def _on_strip_hover(e: ft.ControlEvent) -> None:
+                pill.bgcolor = config.FEDORA_BLUE if e.data else pill_idle
+                if _ctrl_on_page(pill):
+                    pill.update()
 
-        strip = ft.Container(
-            **(
-                {"expand": True}
-                if compact_rail
-                else {"width": 10, "expand": True}
-            ),
-            alignment=ft.Alignment.CENTER,
-            border=edge_border,
-            tooltip=tooltip,
-            content=pill,
-            on_hover=_on_strip_hover,
-        )
+            strip = ft.Container(
+                expand=True,
+                alignment=ft.Alignment.CENTER,
+                tooltip=tooltip,
+                content=pill,
+                on_hover=_on_strip_hover,
+            )
+        else:
+            bar = ft.Container(
+                width=float(PANE_HANDLE_WIDTH_PX),
+                height=float(PANE_HANDLE_HEIGHT_PX),
+                bgcolor=config.SURFACE,
+            )
+
+            def _on_strip_hover_exp(e: ft.ControlEvent) -> None:
+                bar.bgcolor = config.FEDORA_BLUE if e.data else config.SURFACE
+                if _ctrl_on_page(bar):
+                    bar.update()
+
+            strip = ft.Container(
+                width=float(PANE_HANDLE_STRIP_W_PX),
+                expand=True,
+                alignment=ft.Alignment.CENTER,
+                tooltip=tooltip,
+                margin=strip_margin,
+                content=bar,
+                on_hover=_on_strip_hover_exp,
+            )
         return ft.GestureDetector(
             mouse_cursor=ft.MouseCursor.CLICK,
             on_tap=lambda _e: on_toggle(None),
             content=strip,
             expand=compact_rail,
-        )
-
-    def _explorer_collapse_handle_strip(self) -> ft.Control:
-        """Right edge of tree card: thin hairline + hover pill; tap collapses."""
-        return self._pane_split_handle(
-            tooltip="Collapse explorer",
-            on_toggle=self.toggle_left,
-            hairline_after=False,
-        )
-
-    def _build_left_column(self) -> ft.Control:
-        if not self.left_open:
-            return ft.Row(
-                [
-                    self._pane_split_handle(
-                        tooltip="Show explorer",
-                        on_toggle=self.toggle_left,
-                        hairline_after=True,
-                        compact_rail=True,
-                    ),
-                ],
-                expand=True,
-                vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-            )
-        return ft.Column(
-            [
-                ft.Container(
-                    height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-                    content=ft.Row(
-                        [
-                            self._tree_search_bar,
-                            self._tree_import_btn,
-                            self._tree_add_menu,
-                        ],
-                        expand=True,
-                        spacing=8,
-                        height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                ),
-                ft.Row(
-                    [
-                        ft.Container(
-                            content=self.tree_column,
-                            expand=True,
-                            padding=4,
-                            border_radius=8,
-                            bgcolor=config.SURFACE,
-                            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-                        ),
-                        self._explorer_collapse_handle_strip(),
-                    ],
-                    expand=True,
-                    vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-                    spacing=0,
-                ),
-            ],
-            expand=True,
-            spacing=8,
         )
 
     def build(self) -> ft.Control:

@@ -15,17 +15,22 @@ from iterthink import store_db, vault_store, version_storage
 from iterthink.db.session import session_scope
 from iterthink.studio_asset_compare import MarkdownStudioAssetCompare
 from iterthink.studio_checks_ui import MarkdownStudioChecksUi
-from iterthink.studio_compare_text import MarkdownStudioCompareText
-from iterthink.studio_compose import MarkdownStudioCompose
+from iterthink.studio_history import MarkdownStudioCompareText
+from iterthink.studio_focus_area import MarkdownStudioCompose
 from iterthink.studio_explorer import MarkdownStudioExplorer
 from iterthink.studio_ki import MarkdownStudioKi
 from iterthink.studio_llm import MarkdownStudioLlm, build_ki_tier_tabs
 from iterthink.studio_shell import MarkdownStudioShell
+from iterthink.studio_sidebars import MarkdownStudioSidebars
 from iterthink.studio_constants import (
-    COMPOSE_MARGIN_COL_W,
+    COMPARE_COL_FONT_SIZE,
+    COMPARE_COL_LINE_HEIGHT,
     COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE,
     COMPARE_EVAL_COL_W,
-    COMPARE_KEY_DRAFT as _COMPARE_KEY_DRAFT,
+    COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX,
+    COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX,
+    COMPOSE_EDITOR_CONTENT_PAD_TOP_PX,
+    COMPARE_KEY_CURRENT as _COMPARE_KEY_CURRENT,
     KI_TAB_BAR_TO_PILLS_GAP_PX,
     KI_TAB_BODY_MIN_HEIGHT_PX,
     KI_TAB_ICON_PX,
@@ -33,7 +38,12 @@ from iterthink.studio_constants import (
     KI_TIER_TAB_ICON_PX,
     RESULT_CARD_W as _RESULT_CARD_W,
     SIDEBAR_EXPANDED_WIDTH_PX,
+    SIDEBAR_INNER_BORDER_RADIUS_PX,
+    SIDEBAR_INNER_PAD_PX,
     SIDEBAR_TOOLBAR_ROW_H_PX,
+    TAB_HISTORY,
+    TAB_PRESENT,
+    TAB_FUTURE,
 )
 from iterthink.studio_util import (
     KI_TIERS,
@@ -41,7 +51,7 @@ from iterthink.studio_util import (
     normalize_cloud_vendor,
     normalize_ki_tier,
 )
-# Typing idle before autosave. Compare: left = latest Compose; right = draft / snapshot / AI. ✓/✗ refresh rows.
+# Autosave: disk idle vs snapshot idle (see studio_constants). Compare: left = latest Compose; right = draft / snapshot / AI.
 # Layout literals: iterthink.studio_constants
 
 CompareCandidateSource = Literal["draft", "ai_preview", "snapshot", "pdf_original", "docx_original"]
@@ -51,6 +61,7 @@ class MarkdownStudio(
     MarkdownStudioShell,
     MarkdownStudioCompose,
     MarkdownStudioCompareText,
+    MarkdownStudioSidebars,
     MarkdownStudioKi,
     MarkdownStudioExplorer,
     MarkdownStudioChecksUi,
@@ -94,22 +105,34 @@ class MarkdownStudio(
         self.current_path: Path | None = None
         self.last_saved_text: str = ""
         self.last_selection: str = ""
+        # Compose sparkle: snapshot (text, start) before PopupMenuButton steals focus/clears selection.
+        self._compose_margin_menu_snap: tuple[str, int] | None = None
+        # Last non-collapsed compose selection (code-unit offsets); survives blur until caret leaves range or buffer edits.
+        self._compose_sel_span: tuple[int, int] | None = None
+        # Right-click context menu wrapping the editor; items rebuilt when prompts.yaml reloads.
+        self._editor_ctx_menu: ft.ContextMenu | None = None
         self.left_open: bool = True
 
-        self._last_editor_h: float = 480.0
-        self._last_editor_content_w: float = 520.0
         self._margin_gen: int = 0
         self._compare_diff_gen: int = 0
-        self._main_tab_index: int = 0
+        self._main_tab_index: int = TAB_PRESENT
+        self._compare_tab_bar_hover_index1: bool = False
+        self._compare_dropdown_hover: bool = False
         self._compare_candidate_source: CompareCandidateSource = "draft"
         self._compare_snapshot_version_id: int | None = None
         self._pending_ai_accept_action_id: str | None = None
+        # History tab: right column = current draft (editable)
         self._compare_right_fields: list[ft.TextField] = []
         self._compare_left_diff_texts: list[ft.Text] = []
         self._compare_row_pill_hosts: list[ft.Container] = []
         self._compare_row_stable_texts: list[str] = []
         self._compare_pill_gen: int = 0
         self._compare_refine_gen: int = 0
+        # Future tab: left column = current draft (editable), right column = AI proposal (read-only)
+        self._future_left_fields: list[ft.TextField] = []
+        self._future_right_diff_texts: list[ft.Text] = []
+        self._future_row_pill_hosts: list[ft.Container] = []
+        self._future_row_stable_texts: list[str] = []
         # Compose text frozen when opening Compare (draft); left column diffs vs this, not live editor drift.
         self._compare_baseline_snapshot: str = ""
         self._compose_tab_inline_rename_active: bool = False
@@ -139,13 +162,23 @@ class MarkdownStudio(
             border=ft.InputBorder.NONE,
             filled=False,
             hint_text="Write…",
-            text_style=ft.TextStyle(font_family="monospace", size=14, height=1.6, color=ft.Colors.GREY_100),
+            content_padding=ft.padding.only(
+                left=COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX,
+                right=COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX,
+                top=COMPOSE_EDITOR_CONTENT_PAD_TOP_PX,
+                bottom=0,
+            ),
+            text_style=ft.TextStyle(
+                font_family="monospace",
+                size=COMPARE_COL_FONT_SIZE,
+                height=COMPARE_COL_LINE_HEIGHT,
+                color=ft.Colors.GREY_100,
+            ),
             cursor_color=config.FEDORA_BLUE,
             selection_color=config.SELECTION_OVERLAY,
             enable_interactive_selection=True,
             on_change=self._on_editor_change,
             on_selection_change=self._on_selection_change,
-            on_size_change=self._on_editor_size_change,
         )
         self._compare_editor = ft.TextField(
             multiline=True,
@@ -161,33 +194,45 @@ class MarkdownStudio(
             selection_color=config.SELECTION_OVERLAY,
         )
 
-        # Horizontal flex like Compare paragraph fields: Column.expand is vertical only;
-        # a Row + Container(expand) gives the TextField the full width up to the sparkle column.
+        # items=… is what programmatic ContextMenu.open() shows. secondary_trigger is
+        # longPress so the built-in Listener does not handle right-button down (that
+        # still reaches the TextField on desktop; web: browser menu disabled in app_entry).
+        self._editor_ctx_menu = ft.ContextMenu(
+            content=self.editor,
+            items=self._build_editor_ctx_menu_items(),
+            secondary_trigger=ft.ContextMenuTrigger.LONG_PRESS,
+            tertiary_trigger=ft.ContextMenuTrigger.LONG_PRESS,
+        )
         self._editor_shell = ft.Container(
             expand=True,
             content=ft.Row(
-                [ft.Container(content=self.editor, expand=True)],
+                [ft.Container(content=self._editor_ctx_menu, expand=True)],
                 expand=True,
                 vertical_alignment=ft.CrossAxisAlignment.START,
             ),
         )
 
-        self._compose_sparkle_column = ft.Column(spacing=0, tight=True, width=COMPOSE_MARGIN_COL_W)
-        self._compose_sparkle_roots: list[ft.Container] = []
-
         self._compose_plan_host = ft.Container(expand=True, visible=False)
-        self._compose_editor_shell_wrapped = ft.Container(content=self._editor_shell, expand=True)
-        self._compose_reading_inner = ft.Row(
+        self._compose_editor_area_gesture = ft.GestureDetector(
+            content=self._editor_shell,
+            on_secondary_tap_down=self._on_compose_editor_area_secondary_down,
+            expand=True,
+        )
+        self._compose_editor_and_actions_stack = ft.Container(
+            expand=True,
+            content=self._compose_editor_area_gesture,
+        )
+        self._compose_editor_shell_wrapped = ft.Container(
+            content=self._compose_editor_and_actions_stack,
+            expand=True,
+        )
+        self._compose_reading_inner = ft.Column(
             [
-                ft.Column(
-                    [self._compose_plan_host, self._compose_editor_shell_wrapped],
-                    expand=True,
-                    spacing=8,
-                ),
-                ft.Container(content=self._compose_sparkle_column, width=COMPOSE_MARGIN_COL_W),
+                self._compose_plan_host,
+                self._compose_editor_shell_wrapped,
             ],
             expand=True,
-            vertical_alignment=ft.CrossAxisAlignment.START,
+            spacing=8,
         )
         self._compose_reading_card = ft.Container(
             width=400,
@@ -204,42 +249,69 @@ class MarkdownStudio(
             vertical_alignment=ft.CrossAxisAlignment.START,
             on_size_change=self._on_compose_reading_wrap_size,
         )
-        self._compose_tab_body = ft.Container(
+        self._compose_tab_body_stack = ft.Container(
             expand=True,
-            padding=ft.padding.only(top=4, bottom=12),
             content=ft.Column(
                 [self._compose_centered_row],
                 expand=True,
                 scroll=ft.ScrollMode.AUTO,
             ),
         )
+        self._compose_tab_body = ft.Container(
+            expand=True,
+            padding=ft.padding.only(top=4, bottom=12),
+            content=self._compose_tab_body_stack,
+        )
 
+        _dd_menu_style = ft.MenuStyle(
+            bgcolor=config.SURFACE,
+            elevation=12,
+            shadow_color=ft.Colors.with_opacity(0.45, ft.Colors.BLACK),
+            visual_density=ft.VisualDensity.COMPACT,
+        )
+        # Dense toolbar dropdown: line height 1.0 keeps label vertically aligned with the
+        # trailing chevron; the tab strip below must be tall enough for Material input (~36px+).
+        _tb_dd_text_style = ft.TextStyle(size=12, height=1.0, color=ft.Colors.GREY_200)
         self._compare_candidate_dropdown = ft.Dropdown(
-            width=260,
+            expand=True,
             dense=True,
-            text_size=14,
-            color=ft.Colors.GREY_200,
+            text_style=_tb_dd_text_style,
             filled=True,
-            fill_color=config.SURFACE_VARIANT,
+            fill_color=config.SURFACE,
             border=ft.InputBorder.NONE,
             border_width=0,
-            content_padding=ft.padding.only(left=2, right=8, top=0, bottom=0),
-            menu_style=ft.MenuStyle(
-                bgcolor=config.SURFACE,
-                elevation=12,
-                shadow_color=ft.Colors.with_opacity(0.45, ft.Colors.BLACK),
-                visual_density=ft.VisualDensity.COMPACT,
-            ),
+            content_padding=ft.padding.symmetric(horizontal=4, vertical=0),
+            menu_style=_dd_menu_style,
             options=[
                 ft.dropdown.Option(
-                    key=_COMPARE_KEY_DRAFT,
-                    text="Draft",
+                    key=_COMPARE_KEY_CURRENT,
+                    text="Current",
                     style=COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE,
                 )
             ],
-            value=_COMPARE_KEY_DRAFT,
+            value=_COMPARE_KEY_CURRENT,
             disabled=True,
-            tooltip="Draft, snapshot, or AI preview for the right column (left = latest Compose).",
+            tooltip="Pick a version snapshot to compare against the current draft.",
+            on_select=lambda e: self.page.run_task(self._on_compare_candidate_change_async, e),
+        )
+        self._compare_dropdown_hover_wrap = ft.Container(
+            content=self._compare_candidate_dropdown,
+            on_hover=self._on_compare_dropdown_container_hover,
+            expand=True,
+        )
+        self._review_candidate_dropdown = ft.Dropdown(
+            expand=True,
+            dense=True,
+            text_style=_tb_dd_text_style,
+            filled=True,
+            fill_color=config.SURFACE,
+            border=ft.InputBorder.NONE,
+            border_width=0,
+            content_padding=ft.padding.symmetric(horizontal=4, vertical=0),
+            menu_style=_dd_menu_style,
+            options=[],
+            disabled=True,
+            tooltip="Pick an AI proposal or import to review against the current draft.",
             on_select=lambda e: self.page.run_task(self._on_compare_candidate_change_async, e),
         )
         _compare_bulk_icon_style = ft.ButtonStyle(
@@ -264,35 +336,11 @@ class MarkdownStudio(
             visible=False,
             on_click=lambda _e: self.page.run_task(self._compare_decline_all_async),
         )
-        self._compare_tab_label_row = ft.Row(
-            [
-                ft.Row(
-                    [
-                        ft.Text("Compare: ", size=14, color=ft.Colors.GREY_400),
-                        self._compare_candidate_dropdown,
-                    ],
-                    tight=True,
-                    spacing=0,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                ft.Row(
-                    [
-                        self._compare_approve_all_btn,
-                        self._compare_decline_all_btn,
-                    ],
-                    tight=True,
-                    spacing=0,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-            ],
-            expand=True,
-            spacing=8,
-            alignment=ft.MainAxisAlignment.CENTER,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
+        # History tab label: simple text (dropdown lives in the tab body toolbar)
         self._compare_tab_label_host = ft.Container(
-            content=self._compare_tab_label_row,
+            content=ft.Text("History", size=14, color=ft.Colors.GREY_400),
             expand=True,
+            alignment=ft.Alignment.CENTER,
         )
         self._compare_rows_listview = ft.ListView(
             expand=True,
@@ -344,8 +392,7 @@ class MarkdownStudio(
         )
         self._compare_pdf_layer = ft.Container(content=self._compare_pdf_split_row, expand=True, visible=False)
         self._compare_editor_holder = ft.Container(content=self._compare_editor, visible=False, height=0)
-        # Floating card shown on hover over an Analyse symbol in a row's eval cell.
-        # Sits inside the Stack overlaying the listview so it can be positioned per row.
+        # Floating card shown on hover over an Analyse symbol in a History row's eval cell.
         self._result_card_overlay = ft.Container(
             visible=False,
             width=_RESULT_CARD_W,
@@ -360,7 +407,7 @@ class MarkdownStudio(
                 offset=ft.Offset(0, 6),
             ),
             top=0,
-            left=COMPARE_EVAL_COL_W + 2,
+            left=4,
             on_hover=self._on_result_card_hover,
             content=ft.Column([], tight=True, spacing=6),
         )
@@ -372,6 +419,7 @@ class MarkdownStudio(
             ],
             expand=True,
         )
+        # History tab body
         self._compare_tab_body = ft.Column(
             [
                 self._plan_compare.host,
@@ -380,6 +428,27 @@ class MarkdownStudio(
                     expand=True,
                 ),
                 self._compare_editor_holder,
+            ],
+            expand=True,
+            spacing=0,
+        )
+        # Future tab: separate listview and body
+        self._future_rows_listview = ft.ListView(
+            expand=True,
+            spacing=0,
+            padding=ft.padding.symmetric(horizontal=4, vertical=2),
+        )
+        self._future_paragraph_layer = ft.Container(content=self._future_rows_listview, expand=True)
+        self._future_body_stack = ft.Stack(
+            controls=[self._future_paragraph_layer],
+            expand=True,
+        )
+        self._future_tab_body = ft.Column(
+            [
+                ft.Row(
+                    [self._future_body_stack],
+                    expand=True,
+                ),
             ],
             expand=True,
             spacing=0,
@@ -421,24 +490,149 @@ class MarkdownStudio(
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
+        # ── Tab-specific toolbar (below tab bar) ─────────────────────────────
+        _tb_text_style = ft.TextStyle(size=12, color=ft.Colors.GREY_500)
+        _tb_icon_color = ft.Colors.GREY_600
+        _tb_icon_size = 14
+        _tb_pad = ft.padding.symmetric(horizontal=12, vertical=4)
+
+        _tb_label_style = ft.TextStyle(size=12, color=ft.Colors.GREY_600)
+        _tb_col_label = lambda t: ft.Text(t, style=_tb_label_style)  # noqa: E731
+
+        # History: left = "Old Version:" + snapshot dropdown  |  right = "Draft"
+        self._toolbar_history = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(
+                        content=ft.Row(
+                            [
+                                ft.Text("Old Version:", style=_tb_label_style),
+                                self._compare_dropdown_hover_wrap,
+                            ],
+                            spacing=6,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            expand=True,
+                        ),
+                        expand=1,
+                    ),
+                    ft.Container(
+                        content=ft.Text("Draft", style=_tb_label_style),
+                        expand=1,
+                        alignment=ft.Alignment(0, 0),
+                    ),
+                ],
+                spacing=0,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                expand=True,
+            ),
+            padding=_tb_pad,
+            expand=True,
+            visible=False,
+        )
+
+        # Focus Area: filename + inline rename, horizontally centered in the toolbar strip
+        self._toolbar_focus_area = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(expand=True),
+                    self._compose_tab_filename_row,
+                    ft.Container(expand=True),
+                ],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                expand=True,
+            ),
+            padding=_tb_pad,
+            expand=True,
+            visible=True,
+        )
+
+        # Review: left = "Draft"  |  right = proposal/import selector + bulk accept/decline
+        self._toolbar_review = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(
+                        content=ft.Text("Draft", style=_tb_label_style),
+                        expand=1,
+                        alignment=ft.Alignment(0, 0),
+                    ),
+                    ft.Container(
+                        content=ft.Row(
+                            [
+                                self._review_candidate_dropdown,
+                                self._compare_approve_all_btn,
+                                self._compare_decline_all_btn,
+                            ],
+                            spacing=4,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            expand=True,
+                        ),
+                        expand=1,
+                    ),
+                ],
+                spacing=0,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                expand=True,
+            ),
+            padding=_tb_pad,
+            expand=True,
+            visible=False,
+        )
+
+        self._tab_toolbar = ft.Container(
+            bgcolor=config.SURFACE,
+            content=ft.Column(
+                [
+                    ft.Stack(
+                        [self._toolbar_history, self._toolbar_focus_area, self._toolbar_review],
+                        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                        height=44,
+                    ),
+                    ft.Divider(
+                        height=1,
+                        thickness=1,
+                        color=ft.Colors.with_opacity(0.12, ft.Colors.GREY_600),
+                    ),
+                ],
+                spacing=0,
+                tight=True,
+            ),
+        )
+        # ─────────────────────────────────────────────────────────────────────
+
         self._compose_tab_label_row = ft.Row(
-            [
-                ft.Text("Compose: ", size=14, color=ft.Colors.GREY_400),
-                self._compose_tab_filename_row,
-            ],
+            [ft.Text("Focus Area", size=14, color=ft.Colors.GREY_400)],
             tight=True,
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
+        # Future tab label: "Future" + bulk approve/decline buttons
+        _future_tab_label_row = ft.Row(
+            [ft.Text("Review", size=14, color=ft.Colors.GREY_400)],
+            tight=True,
+            spacing=4,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._future_tab_label_host = ft.Container(
+            content=_future_tab_label_row,
+            expand=True,
+            alignment=ft.Alignment.CENTER,
+        )
         self._main_tab_bar = ft.TabBar(
-            tabs=[ft.Tab(label=self._compose_tab_label_row), ft.Tab(label=self._compare_tab_label_host)],
+            tabs=[
+                ft.Tab(label=self._compare_tab_label_host),
+                ft.Tab(label=self._compose_tab_label_row),
+                ft.Tab(label=self._future_tab_label_host),
+            ],
             scrollable=False,
             tab_alignment=ft.TabAlignment.FILL,
+            indicator_size=ft.TabBarIndicatorSize.TAB,
+            label_padding=ft.padding.only(bottom=8),
             indicator_color=config.FEDORA_BLUE,
             divider_color=ft.Colors.with_opacity(0.2, ft.Colors.GREY_700),
+            on_hover=self._on_main_tab_bar_hover,
         )
         self._tab_bar_view = ft.TabBarView(
-            controls=[self._compose_tab_body, self._compare_tab_body],
+            controls=[self._compare_tab_body, self._compose_tab_body, self._future_tab_body],
             expand=True,
         )
         self._sticky_tab_header = ft.Container(
@@ -447,15 +641,15 @@ class MarkdownStudio(
             content=self._main_tab_bar,
         )
         self._tabs_inner_column = ft.Column(
-            [self._sticky_tab_header, self._tab_bar_view],
+            [self._sticky_tab_header, self._tab_toolbar, self._tab_bar_view],
             expand=True,
             spacing=0,
         )
         self._main_tabs = ft.Tabs(
             content=self._tabs_inner_column,
-            length=2,
+            length=3,
             expand=True,
-            selected_index=0,
+            selected_index=TAB_PRESENT,
             on_change=self._on_main_tabs_change,
         )
 
@@ -494,19 +688,38 @@ class MarkdownStudio(
             ),
             tooltip="",
         )
-        self._autosave_gen: int = 0
+        self._disk_autosave_gen: int = 0
+        self._snapshot_autosave_gen: int = 0
 
         self.tree_column = ft.Column(spacing=0, tight=True, scroll=ft.ScrollMode.AUTO, expand=True)
-        self._tree_import_btn = ft.IconButton(
-            ft.Icons.FILE_UPLOAD_OUTLINED,
+        self._tree_sort_mode = "name_az"
+        self._tree_explorer_overflow_btn = ft.PopupMenuButton(
+            icon=ft.Icons.MORE_VERT,
             icon_size=KI_TAB_ICON_PX,
-            icon_color=config.FEDORA_BLUE,
-            tooltip="Import…",
-            visual_density=ft.VisualDensity.COMPACT,
+            icon_color=ft.Colors.GREY_400,
+            tooltip="Sort tree",
             style=ft.ButtonStyle(padding=ft.padding.all(2)),
             height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
             width=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-            on_click=lambda _e: self.page.run_task(self._tree_import_new_clicked),
+            menu_position=ft.PopupMenuPosition.UNDER,
+            items=[
+                ft.PopupMenuItem(
+                    content=ft.Text("Date (newest first)", size=13),
+                    on_click=lambda _e: self._on_tree_sort_selected("mtime_newest"),
+                ),
+                ft.PopupMenuItem(
+                    content=ft.Text("Date (oldest first)", size=13),
+                    on_click=lambda _e: self._on_tree_sort_selected("mtime_oldest"),
+                ),
+                ft.PopupMenuItem(
+                    content=ft.Text("Name A–Z", size=13),
+                    on_click=lambda _e: self._on_tree_sort_selected("name_az"),
+                ),
+                ft.PopupMenuItem(
+                    content=ft.Text("Name Z–A", size=13),
+                    on_click=lambda _e: self._on_tree_sort_selected("name_za"),
+                ),
+            ],
         )
 
         self.tree_search_field = ft.TextField(
@@ -525,7 +738,7 @@ class MarkdownStudio(
             expand=True,
             height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
             bgcolor=config.SURFACE,
-            border_radius=8,
+            border_radius=float(SIDEBAR_INNER_BORDER_RADIUS_PX),
             border=ft.Border.all(1, ft.Colors.GREY_700),
             alignment=ft.Alignment.CENTER_LEFT,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
@@ -547,7 +760,7 @@ class MarkdownStudio(
             icon=ft.Icons.ADD,
             icon_size=KI_TAB_ICON_PX,
             icon_color=config.FEDORA_BLUE,
-            tooltip="New…",
+            tooltip="New, import…",
             style=ft.ButtonStyle(padding=ft.padding.all(2)),
             height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
             width=float(SIDEBAR_TOOLBAR_ROW_H_PX),
@@ -560,6 +773,10 @@ class MarkdownStudio(
                 ft.PopupMenuItem(
                     content=ft.Text("Folder", size=13),
                     on_click=lambda e: self.page.run_task(self.new_folder, e),
+                ),
+                ft.PopupMenuItem(
+                    content=ft.Text("Import…", size=13),
+                    on_click=lambda _e: self.page.run_task(self._tree_import_new_clicked),
                 ),
             ],
         )
@@ -610,33 +827,6 @@ class MarkdownStudio(
             float(KI_TAB_BODY_MIN_HEIGHT_PX),
         ]
 
-        self._ki_tab_bar = ft.TabBar(
-            tabs=[
-                ft.Tab(
-                    icon=ft.Icon(ft.Icons.CHAT_BUBBLE, size=KI_TAB_ICON_PX),
-                    tooltip="Discuss",
-                    height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-                ),
-                ft.Tab(
-                    icon=ft.Icon(ft.Icons.MODE_EDIT, size=KI_TAB_ICON_PX),
-                    tooltip="Change",
-                    height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-                ),
-                ft.Tab(
-                    icon=ft.Icon(ft.Icons.INSIGHTS, size=KI_TAB_ICON_PX),
-                    tooltip="Analyse",
-                    height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-                ),
-            ],
-            scrollable=False,
-            secondary=True,
-            tab_alignment=ft.TabAlignment.FILL,
-            indicator_color=config.FEDORA_BLUE,
-            divider_color=ft.Colors.with_opacity(0.2, ft.Colors.GREY_700),
-            label_padding=ft.padding.symmetric(horizontal=6, vertical=0),
-            indicator_thickness=1.5,
-            height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-        )
         self._ki_tab_bar_view = ft.TabBarView(
             controls=[
                 ft.Container(
@@ -663,27 +853,66 @@ class MarkdownStudio(
             ],
             height=float(KI_TAB_BODY_MIN_HEIGHT_PX + 2 * KI_TAB_PAGE_PAD_V_PX),
         )
-        self._ki_sticky_tab_header = ft.Container(
+        _ki_mode_btn_style = ft.ButtonStyle(
             bgcolor=ft.Colors.TRANSPARENT,
-            padding=ft.padding.all(0),
-            content=self._ki_tab_bar,
+            overlay_color=ft.Colors.with_opacity(0.08, ft.Colors.WHITE),
+            padding=ft.padding.all(2),
         )
-        self._ki_tabs_inner_column = ft.Column(
-            [self._ki_sticky_tab_header, self._ki_tab_bar_view],
-            spacing=KI_TAB_BAR_TO_PILLS_GAP_PX,
+        _ki_tab_under = 1.5
+        self._ki_topic_mode_buttons: list[ft.IconButton] = []
+        self._ki_topic_mode_cells: list[ft.Container] = []
+        for i, (ic, tip) in enumerate(
+            [
+                (ft.Icons.CHAT_BUBBLE, "Discuss"),
+                (ft.Icons.MODE_EDIT, "Change"),
+                (ft.Icons.INSIGHTS, "Analyse"),
+            ]
+        ):
+            sel = i == 0
+            ib = ft.IconButton(
+                icon=ic,
+                tooltip=tip,
+                icon_size=KI_TAB_ICON_PX,
+                icon_color=config.FEDORA_BLUE if sel else ft.Colors.GREY_400,
+                style=_ki_mode_btn_style,
+                on_click=lambda e, ix=i: self._set_ki_topic(ix),
+            )
+            self._ki_topic_mode_buttons.append(ib)
+            cell = ft.Container(
+                expand=True,
+                height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+                alignment=ft.Alignment.CENTER,
+                border=ft.border.only(
+                    bottom=ft.BorderSide(
+                        _ki_tab_under if sel else 0.0,
+                        config.FEDORA_BLUE if sel else ft.Colors.TRANSPARENT,
+                    )
+                ),
+                content=ib,
+            )
+            self._ki_topic_mode_cells.append(cell)
+        self._ki_topic_top_strip = ft.Row(
+            self._ki_topic_mode_cells,
+            expand=True,
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._ki_topic_top_bar = ft.Container(
+            height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+            bgcolor=config.SIDEBAR_SURFACE,
+            border_radius=float(SIDEBAR_INNER_BORDER_RADIUS_PX),
+            alignment=ft.Alignment.CENTER,
+            padding=ft.padding.symmetric(horizontal=4, vertical=0),
+            content=self._ki_topic_top_strip,
         )
         self._ki_topic_tabs = ft.Tabs(
-            content=self._ki_tabs_inner_column,
+            content=ft.Container(
+                padding=ft.padding.only(top=float(KI_TAB_BAR_TO_PILLS_GAP_PX)),
+                content=self._ki_tab_bar_view,
+            ),
             length=3,
             selected_index=0,
             on_change=self._on_ki_tabs_change,
-        )
-        self._ki_topic_shell = ft.Container(
-            bgcolor=config.SURFACE,
-            border_radius=8,
-            padding=ft.padding.all(10),
-            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-            content=self._ki_topic_tabs,
         )
 
         self._chat_history = ft.ListView(
@@ -726,10 +955,8 @@ class MarkdownStudio(
         )
         self._chat_model_options: list[str] = []
         self._chat_composer = ft.Container(
-            padding=ft.padding.all(8),
-            border_radius=16,
-            bgcolor=ft.Colors.with_opacity(0.35, ft.Colors.BLACK),
-            border=ft.border.all(1, ft.Colors.with_opacity(0.45, ft.Colors.GREY_700)),
+            padding=ft.padding.symmetric(horizontal=0, vertical=6),
+            bgcolor=ft.Colors.TRANSPARENT,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
             content=ft.Column(
                 [
@@ -746,9 +973,6 @@ class MarkdownStudio(
         )
         self._right_chat_section = ft.Container(
             expand=True,
-            bgcolor=ft.Colors.with_opacity(0.22, ft.Colors.BLACK),
-            border_radius=10,
-            padding=ft.padding.all(6),
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
             content=ft.Column(
                 [
@@ -759,15 +983,22 @@ class MarkdownStudio(
                 spacing=8,
             ),
         )
-
-        self._right_ki_column = ft.Column(
-            [
-                self._ki_topic_shell,
-                self._right_chat_section,
-            ],
+        self._ki_sidebar_well = ft.Container(
             expand=True,
-            spacing=8,
+            bgcolor=config.SURFACE,
+            border_radius=float(SIDEBAR_INNER_BORDER_RADIUS_PX),
+            padding=float(SIDEBAR_INNER_PAD_PX),
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            content=ft.Column(
+                [
+                    self._ki_topic_tabs,
+                    self._right_chat_section,
+                ],
+                expand=True,
+                spacing=4,
+            ),
         )
+        self._right_ki_column = self._ki_sidebar_well
 
         self._pill_row_discuss.on_size_change = self._on_ki_pill_row_size_discuss
         self._pill_row_change.on_size_change = self._on_ki_pill_row_size_change
@@ -827,8 +1058,9 @@ class MarkdownStudio(
         self._sync_side_panel_chrome()
         self.center_panel.bgcolor = config.SURFACE
         self._sticky_tab_header.bgcolor = config.SURFACE
-        self._ki_sticky_tab_header.bgcolor = ft.Colors.TRANSPARENT
-        self._ki_topic_shell.bgcolor = config.SURFACE
+        self._apply_compare_candidate_dropdown_tab_chrome()
+        self._ki_topic_top_bar.bgcolor = config.SIDEBAR_SURFACE
+        self._ki_sidebar_well.bgcolor = config.SURFACE
         if self._header_shell:
             self._header_shell.bgcolor = config.SURFACE_VARIANT
         if self._menu_bar:
@@ -920,6 +1152,7 @@ class MarkdownStudio(
         silent: bool = False,
         snapshot_reason: version_storage.SnapshotReason | None = None,
         version_display_label: str | None = None,
+        persist_snapshot: bool = True,
     ) -> None:
         if not self.current_path:
             if not silent:
@@ -933,25 +1166,26 @@ class MarkdownStudio(
             self._snack(f"Save failed: {ex}")
             return
         self.last_saved_text = buf
-        try:
-            with session_scope() as s:
-                if version_display_label:
-                    version_storage.persist_version_snapshot(
-                        s,
-                        self.current_path.resolve(),
-                        buf,
-                        "ai_apply",
-                        display_label=version_display_label,
-                    )
-                else:
-                    version_storage.persist_version_snapshot(s, self.current_path.resolve(), buf, reason)
-        except BaseException:
-            pass
+        if persist_snapshot:
+            try:
+                with session_scope() as s:
+                    if version_display_label:
+                        version_storage.persist_version_snapshot(
+                            s,
+                            self.current_path.resolve(),
+                            buf,
+                            "ai_apply",
+                            display_label=version_display_label,
+                        )
+                    else:
+                        version_storage.persist_version_snapshot(s, self.current_path.resolve(), buf, reason)
+            except BaseException:
+                pass
         self._refresh_compare_tab_candidate_ui()
         if _ctrl_on_page(self._compare_candidate_dropdown):
             self._compare_candidate_dropdown.update()
         self._margin_gen += 1
-        if self._main_tab_index == 0:
+        if self._main_tab_index == TAB_PRESENT:
             self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)
         else:
             self._refresh_compare_diff_immediate()

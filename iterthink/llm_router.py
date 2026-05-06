@@ -97,10 +97,11 @@ async def _openai_nonstream(
     model: str,
     messages: list[dict[str, str]],
     json_mode: bool,
+    strict_response_format: bool = False,
 ) -> dict[str, Any]:
     msgs = _openai_messages_json_hint(messages) if json_mode else messages
     payload: dict[str, Any] = {"model": model, "messages": msgs}
-    if json_mode:
+    if json_mode and strict_response_format:
         payload["response_format"] = {"type": "json_object"}
     r = await client.post(
         url,
@@ -126,10 +127,11 @@ async def _openai_stream_iter(
     model: str,
     messages: list[dict[str, str]],
     json_mode: bool,
+    strict_response_format: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     msgs = _openai_messages_json_hint(messages) if json_mode else messages
     payload: dict[str, Any] = {"model": model, "messages": msgs, "stream": True}
-    if json_mode:
+    if json_mode and strict_response_format:
         payload["response_format"] = {"type": "json_object"}
     async with client.stream(
         "POST",
@@ -165,10 +167,17 @@ async def _openai_stream_full(
     model: str,
     messages: list[dict[str, str]],
     json_mode: bool,
+    strict_response_format: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     async with httpx.AsyncClient() as client:
         async for part in _openai_stream_iter(
-            client, url=url, api_key=api_key, model=model, messages=messages, json_mode=json_mode
+            client,
+            url=url,
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            json_mode=json_mode,
+            strict_response_format=strict_response_format,
         ):
             yield part
 
@@ -430,13 +439,27 @@ class LlmChatBackend:
         if self._tier == "company":
             key = self._require_secret(SECRET_COMPANY_OPENAI)
             url = _openai_chat_url(self._company_base)
+            # Do not use OpenAI response_format json_object here: many Work gateways reject it;
+            # Analyse checks still get JSON via _openai_messages_json_hint + checks_runner coercion.
+            strict_rf = False
             if stream:
                 return _openai_stream_full(
-                    url=url, api_key=key, model=m, messages=messages, json_mode=json_mode
+                    url=url,
+                    api_key=key,
+                    model=m,
+                    messages=messages,
+                    json_mode=json_mode,
+                    strict_response_format=strict_rf,
                 )
             async with httpx.AsyncClient() as client:
                 return await _openai_nonstream(
-                    client, url=url, api_key=key, model=m, messages=messages, json_mode=json_mode
+                    client,
+                    url=url,
+                    api_key=key,
+                    model=m,
+                    messages=messages,
+                    json_mode=json_mode,
+                    strict_response_format=strict_rf,
                 )
 
         if self._tier == "cloud":
@@ -462,13 +485,25 @@ class LlmChatBackend:
                     )
             key = self._require_secret(SECRET_CLOUD_OPENAI)
             url = _openai_chat_url(DEFAULT_COMPANY_OPENAI_BASE)
+            strict_rf = False  # same rationale as company tier (OpenAI-compatible HTTP)
             if stream:
                 return _openai_stream_full(
-                    url=url, api_key=key, model=m, messages=messages, json_mode=json_mode
+                    url=url,
+                    api_key=key,
+                    model=m,
+                    messages=messages,
+                    json_mode=json_mode,
+                    strict_response_format=strict_rf,
                 )
             async with httpx.AsyncClient() as client:
                 return await _openai_nonstream(
-                    client, url=url, api_key=key, model=m, messages=messages, json_mode=json_mode
+                    client,
+                    url=url,
+                    api_key=key,
+                    model=m,
+                    messages=messages,
+                    json_mode=json_mode,
+                    strict_response_format=strict_rf,
                 )
 
         kwargs: dict[str, Any] = {"model": m, "messages": messages, "stream": stream}

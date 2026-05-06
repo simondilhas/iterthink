@@ -165,6 +165,33 @@ def paragraph_index_at_offset(text: str, offset: int) -> int:
     return len(parts) - 1
 
 
+def visual_line_count_for_paragraph_prefix(
+    text: str,
+    paragraph_index: int,
+    offset_in_buffer: int,
+    content_width: float,
+) -> int:
+    """
+    Estimated display lines from the start of ``paragraph_index`` up to ``offset_in_buffer``.
+
+    Uses the same buffer spans as ``split_paragraphs`` / ``paragraph_index_at_offset`` and
+    ``wrapped_line_count`` for soft-wrapped lines (explicit ``\\n`` splits logical lines).
+    """
+    _, spans = _paragraph_strings_and_spans(text)
+    if not spans or paragraph_index < 0 or paragraph_index >= len(spans):
+        return 0
+    a, b = spans[paragraph_index]
+    off = max(0, min(int(offset_in_buffer), len(text)))
+    end = max(a, min(off, b))
+    prefix = text[a:end]
+    if not prefix:
+        return 0
+    total = 0
+    for seg in prefix.split("\n"):
+        total += max(1, wrapped_line_count(seg, content_width))
+    return total
+
+
 def wrapped_line_count(paragraph: str, content_width: float, char_px: float = 8.15) -> int:
     """Rough wrapped line count for monospace-like text in the editor."""
     cpl = max(12, int(max(40.0, content_width - 16.0) / char_px))

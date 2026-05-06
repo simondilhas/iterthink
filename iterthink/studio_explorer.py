@@ -9,17 +9,56 @@ import flet as ft
 
 from iterthink import config, document_import
 from iterthink.db.session import session_scope
-from iterthink.studio_constants import (
-    COMPARE_KEY_DOCX_ORIGINAL as _COMPARE_KEY_DOCX_ORIGINAL,
-    COMPARE_KEY_PDF_ORIGINAL as _COMPARE_KEY_PDF_ORIGINAL,
-)
+from iterthink.studio_constants import TAB_HISTORY, TAB_PRESENT
 from iterthink.studio_util import ctrl_on_page as _ctrl_on_page
 from iterthink import version_storage
 from iterthink.tree import build_md_tree, filter_md_tree
 
+ExplorerTreeSortMode = Literal["name_az", "name_za", "mtime_newest", "mtime_oldest"]
+
+
+def _safe_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _sorted_dirnames(node: dict[str, Any], parent_path: Path, mode: str) -> list[str]:
+    names = [k for k in node if k != "_files"]
+    if mode == "name_az":
+        return sorted(names, key=str.lower)
+    if mode == "name_za":
+        return sorted(names, key=str.lower, reverse=True)
+    if mode == "mtime_newest":
+        return sorted(names, key=lambda n: (-_safe_mtime(parent_path / n), n.lower()))
+    if mode == "mtime_oldest":
+        return sorted(names, key=lambda n: (_safe_mtime(parent_path / n), n.lower()))
+    return sorted(names, key=str.lower)
+
+
+def _sorted_file_entries(
+    entries: list[tuple[str, Path]], mode: str
+) -> list[tuple[str, Path]]:
+    if mode == "name_az":
+        return sorted(entries, key=lambda x: x[0].lower())
+    if mode == "name_za":
+        return sorted(entries, key=lambda x: x[0].lower(), reverse=True)
+    if mode == "mtime_newest":
+        return sorted(entries, key=lambda x: (-_safe_mtime(x[1]), x[0].lower()))
+    if mode == "mtime_oldest":
+        return sorted(entries, key=lambda x: (_safe_mtime(x[1]), x[0].lower()))
+    return sorted(entries, key=lambda x: x[0].lower())
+
 
 class MarkdownStudioExplorer:
     def _on_tree_search_change(self, _e: ft.ControlEvent | None = None) -> None:
+        self._rebuild_tree_ui()
+        if _ctrl_on_page(self.tree_column):
+            self.tree_column.update()
+
+    def _on_tree_sort_selected(self, mode: ExplorerTreeSortMode, _e: ft.ControlEvent | None = None) -> None:
+        self._tree_sort_mode = mode
         self._rebuild_tree_ui()
         if _ctrl_on_page(self.tree_column):
             self.tree_column.update()
@@ -257,13 +296,14 @@ class MarkdownStudioExplorer:
         pdf_prof: version_storage.PdfProfile | None = None
         if pdf_src is not None:
             pdf_prof = "plan" if pdf_plan_first else document_import.classify_pdf_profile(src)
+        new_vid: int | None = None
         try:
             with session_scope() as s:
-                version_storage.persist_version_snapshot(
+                new_vid = version_storage.persist_version_snapshot(
                     s,
                     dest.resolve(),
                     md,
-                    "manual",
+                    "import",
                     skip_if_unchanged_sha=False,
                     pdf_source_path=pdf_src,
                     docx_source_path=docx_src,
@@ -275,8 +315,8 @@ class MarkdownStudioExplorer:
         self._rebuild_tree_ui()
         if _ctrl_on_page(self.tree_column):
             self.tree_column.update()
-        imp = ext if ext in ("pdf", "docx") else None
-        await self.open_file(dest, after_import=imp)
+        select_vid = new_vid if ext in ("pdf", "docx") else None
+        await self.open_file(dest, after_import_vid=select_vid)
         self._snack("Imported.")
 
     def _on_tree_file_row_hover(self, e: ft.ControlEvent, menu_wrap: ft.Container) -> None:
@@ -342,9 +382,11 @@ class MarkdownStudioExplorer:
                 )
                 return
 
+        sort_mode = getattr(self, "_tree_sort_mode", "name_az")
+
         def render_level(node: dict[str, Any], parent_path: Path, depth: int = 0) -> list[ft.Control]:
             ctrls: list[ft.Control] = []
-            for dirname in sorted(k for k in node if k != "_files"):
+            for dirname in _sorted_dirnames(node, parent_path, sort_mode):
                 sub = node[dirname]
                 folder_path = parent_path / dirname
                 inner = render_level(sub, folder_path, depth + 1)
@@ -369,7 +411,8 @@ class MarkdownStudioExplorer:
                         collapsed_icon_color=ft.Colors.GREY_500,
                     )
                 )
-            for fname, fpath in sorted(node.get("_files", []), key=lambda x: x[0].lower()):
+            files = node.get("_files", [])
+            for fname, fpath in _sorted_file_entries(list(files), sort_mode):
                 ctrls.append(self._make_tree_file_row(fname, fpath))
             return ctrls
 
@@ -379,7 +422,7 @@ class MarkdownStudioExplorer:
         self,
         path: Path,
         *,
-        after_import: Literal["pdf", "docx"] | None = None,
+        after_import_vid: int | None = None,
     ) -> None:
         if self.current_path and path != self.current_path and self._is_dirty():
             await self.save_file(silent=True, snapshot_reason="pre_switch")
@@ -404,33 +447,19 @@ class MarkdownStudioExplorer:
         if _ctrl_on_page(self._compare_editor):
             self._compare_editor.update()
 
-        if after_import == "pdf":
-            self._main_tabs.selected_index = 1
-            self._main_tab_index = 1
-            self._compare_candidate_source = "pdf_original"
-            self._compare_pdf_peer_snapshot_id = None
+        if after_import_vid is not None:
+            self._main_tabs.selected_index = TAB_HISTORY
+            self._main_tab_index = TAB_HISTORY
+            self._select_snapshot_as_candidate(after_import_vid)
             self._refresh_compare_tab_candidate_ui()
-            self._compare_candidate_dropdown.value = _COMPARE_KEY_PDF_ORIGINAL
-            if _ctrl_on_page(self._compare_candidate_dropdown):
-                self._compare_candidate_dropdown.update()
-            if _ctrl_on_page(self._main_tabs):
-                self._main_tabs.update()
-            self._refresh_compare_diff_immediate()
-        elif after_import == "docx":
-            self._main_tabs.selected_index = 1
-            self._main_tab_index = 1
-            self._compare_candidate_source = "docx_original"
-            self._compare_pdf_peer_snapshot_id = None
-            self._refresh_compare_tab_candidate_ui()
-            self._compare_candidate_dropdown.value = _COMPARE_KEY_DOCX_ORIGINAL
             if _ctrl_on_page(self._compare_candidate_dropdown):
                 self._compare_candidate_dropdown.update()
             if _ctrl_on_page(self._main_tabs):
                 self._main_tabs.update()
             self._refresh_compare_diff_immediate()
         else:
-            self._main_tabs.selected_index = 0
-            self._main_tab_index = 0
+            self._main_tabs.selected_index = TAB_PRESENT
+            self._main_tab_index = TAB_PRESENT
             if _ctrl_on_page(self._main_tabs):
                 self._main_tabs.update()
             self._margin_gen += 1
