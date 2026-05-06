@@ -16,7 +16,7 @@ from iterthink.paragraph_align import (
 )
 from iterthink.paragraph_semantics import embed_texts
 
-SlotKind = Literal["unchanged", "minor", "major", "rewritten", "new", "deleted", "moved"]
+SlotKind = Literal["unchanged", "minor", "major", "rewritten", "new", "deleted"]
 
 # Cosine between paragraph embeddings (old vs new); outside bands use LLM.
 _COSINE_MAJOR_SURFACE = 0.82
@@ -222,13 +222,6 @@ def _base_kind_from_diff(d: DiffParagraph) -> SlotKind:
             return "major"
         return "minor"
     o, p = d.old_text or "", d.new_text or ""
-    if (
-        d.old_index >= 0
-        and d.new_index >= 0
-        and d.old_index != d.new_index
-        and (d.status == "stable" or compute_hash(o) == compute_hash(p))
-    ):
-        return "moved"
     if compute_hash(o) == compute_hash(p):
         return "unchanged"
     if d.status == "stable":
@@ -252,6 +245,25 @@ def _aligned_left_texts_from_diffs(diffs: list[DiffParagraph], n: int) -> list[s
     return out
 
 
+def slot_index_displacements_from_by_new(
+    by_new: dict[int, DiffParagraph], n_new: int
+) -> list[int | None]:
+    """
+    Per candidate slot ``i``: baseline index minus candidate index when aligned (``old_index - new_index``).
+    Positive ⇒ baseline paragraph originated lower in the file (show ↑). Negative ⇒ ↓. ``None`` if
+    not applicable (e.g. new slot with no baseline match).
+    """
+    out: list[int | None] = []
+    for i in range(n_new):
+        d = by_new.get(i)
+        if d is None or d.old_index < 0 or d.new_index < 0:
+            out.append(None)
+            continue
+        delta = d.old_index - d.new_index
+        out.append(None if delta == 0 else delta)
+    return out
+
+
 async def classify_slots_async(
     embed_client: Any,
     llm_chat: Any,
@@ -260,15 +272,15 @@ async def classify_slots_async(
     embed_model: str,
     baseline_text: str,
     new_text: str,
-) -> tuple[list[SlotKind], list[str]]:
+) -> tuple[list[SlotKind], list[str], list[int | None]]:
     """
-    Return one ``SlotKind`` per **new** paragraph slot, and aligned baseline left text per slot
-    (same length; used to refresh Compare inline diff after duplicate-hash refinement).
+    Return one ``SlotKind`` per **new** paragraph slot, aligned baseline left text per slot, and
+    index displacements (``old_index - new_index``) for the small arrow column in Compare.
     """
     new_paras = split_paragraphs(new_text)
     n = len(new_paras)
     if n == 0:
-        return [], []
+        return [], [], []
 
     old_paras = split_paragraphs(baseline_text)
     diffs = compute_alignment(baseline_text, new_text)
@@ -281,6 +293,7 @@ async def classify_slots_async(
 
     by_new = _diff_by_new_index(diffs, n)
     aligned_lefts = _aligned_left_texts_from_diffs(diffs, n)
+    displacements = slot_index_displacements_from_by_new(by_new, n)
 
     out: list[SlotKind] = []
     major_work: list[tuple[int, str, str]] = []
@@ -302,7 +315,7 @@ async def classify_slots_async(
             out.append(kind)
 
     if not major_work:
-        return out, aligned_lefts
+        return out, aligned_lefts, displacements
 
     olds = [o for _, o, _ in major_work]
     news = [p for _, _, p in major_work]
@@ -313,7 +326,7 @@ async def classify_slots_async(
         for _j, (slot_i, o, p) in enumerate(major_work):
             verdict = await judge_rewritten_vs_major(llm_chat, chat_model, o, p)
             out[slot_i] = "rewritten" if verdict == "rewritten" else "major"
-        return out, aligned_lefts
+        return out, aligned_lefts, displacements
 
     for j_idx, (slot_i, o, p) in enumerate(major_work):
         vo = emb_old[j_idx] if j_idx < len(emb_old) else []
@@ -331,7 +344,7 @@ async def classify_slots_async(
             verdict = await judge_rewritten_vs_major(llm_chat, chat_model, o, p)
             out[slot_i] = "rewritten" if verdict == "rewritten" else "major"
 
-    return out, aligned_lefts
+    return out, aligned_lefts, displacements
 
 
 def slot_kind_label(kind: SlotKind) -> str:
@@ -342,16 +355,15 @@ def slot_kind_label(kind: SlotKind) -> str:
         "rewritten": "rewritten",
         "new": "new",
         "deleted": "deleted",
-        "moved": "moved",
     }[kind]
 
 
-def slot_kinds_heuristic(baseline: str, candidate: str) -> list[SlotKind]:
-    """Fast slot labels from alignment only (before embedding / LLM refinement)."""
+def compare_slots_heuristic(baseline: str, candidate: str) -> tuple[list[SlotKind], list[int | None]]:
+    """Slot kinds and index displacements from alignment only (before embedding / LLM refinement)."""
     new_paras = split_paragraphs(candidate)
     n = len(new_paras)
     if n == 0:
-        return []
+        return [], []
     diffs = compute_alignment(baseline, candidate)
     by_new = _diff_by_new_index(diffs, n)
     out: list[SlotKind] = []
@@ -361,4 +373,11 @@ def slot_kinds_heuristic(baseline: str, candidate: str) -> list[SlotKind]:
             out.append("unchanged")
             continue
         out.append(_base_kind_from_diff(d))
-    return out
+    disps = slot_index_displacements_from_by_new(by_new, n)
+    return out, disps
+
+
+def slot_kinds_heuristic(baseline: str, candidate: str) -> list[SlotKind]:
+    """Fast slot labels only; prefer ``compare_slots_heuristic`` when displacements are needed."""
+    kinds, _ = compare_slots_heuristic(baseline, candidate)
+    return kinds

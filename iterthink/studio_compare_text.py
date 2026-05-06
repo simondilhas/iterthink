@@ -39,6 +39,7 @@ from iterthink.studio_constants import (
     COMPARE_ACTION_H_PAD,
     COMPARE_ACTION_INNER_W,
     COMPARE_ACTION_V_PAD,
+    COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE,
     COMPARE_COL_FONT_SIZE,
     COMPARE_COL_LINE_HEIGHT,
     COMPARE_KEY_AI as _COMPARE_KEY_AI,
@@ -103,11 +104,14 @@ class MarkdownStudioCompareText:
             return version_storage.document_has_any_docx(s, rp)
 
     def _refresh_compare_tab_candidate_ui(self) -> None:
-        opts: list[ft.dropdown.Option] = [ft.dropdown.Option(key=_COMPARE_KEY_DRAFT, text="Draft")]
+        _st = COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE
+        opts: list[ft.dropdown.Option] = [
+            ft.dropdown.Option(key=_COMPARE_KEY_DRAFT, text="Draft", style=_st)
+        ]
         if self._compare_candidate_source == "ai_preview" and self._pending_ai_accept_action_id:
             act = prompts.get_margin_action(self._pending_ai_accept_action_id)
             ai_text = f"{act.label} · preview" if act else "AI · preview"
-            opts.append(ft.dropdown.Option(key=_COMPARE_KEY_AI, text=ai_text))
+            opts.append(ft.dropdown.Option(key=_COMPARE_KEY_AI, text=ai_text, style=_st))
         if self.current_path:
             with session_scope() as s:
                 snaps = version_storage.list_snapshots(s, self.current_path.resolve())
@@ -116,12 +120,13 @@ class MarkdownStudioCompareText:
                     ft.dropdown.Option(
                         key=str(sn.version_id),
                         text=version_storage.snapshot_display_text(sn),
+                        style=_st,
                     )
                 )
         if self._compare_should_offer_pdf_original():
-            opts.append(ft.dropdown.Option(key=_COMPARE_KEY_PDF_ORIGINAL, text="Original PDF"))
+            opts.append(ft.dropdown.Option(key=_COMPARE_KEY_PDF_ORIGINAL, text="Original PDF", style=_st))
         if self._compare_should_offer_docx_original():
-            opts.append(ft.dropdown.Option(key=_COMPARE_KEY_DOCX_ORIGINAL, text="Original Word"))
+            opts.append(ft.dropdown.Option(key=_COMPARE_KEY_DOCX_ORIGINAL, text="Original Word", style=_st))
         self._compare_candidate_dropdown.options = opts
         keys_ok = {o.key for o in opts}
         if self._compare_candidate_source == "draft":
@@ -304,9 +309,15 @@ class MarkdownStudioCompareText:
             "rewritten": (ft.Colors.with_opacity(0.28, ft.Colors.PURPLE_400), ft.Colors.PURPLE_100),
             "new": (ft.Colors.with_opacity(0.28, ft.Colors.GREEN_400), ft.Colors.GREEN_100),
             "deleted": (ft.Colors.with_opacity(0.28, ft.Colors.RED_400), ft.Colors.RED_100),
-            "moved": (ft.Colors.with_opacity(0.28, ft.Colors.TEAL_400), ft.Colors.TEAL_100),
         }
         return m.get(kind, (ft.Colors.with_opacity(0.2, ft.Colors.GREY_600), ft.Colors.GREY_200))
+
+    @staticmethod
+    def _compare_displacement_arrow_text(displacement: int | None) -> str:
+        if displacement is None or displacement == 0:
+            return ""
+        n = abs(displacement)
+        return f"↑{n}" if displacement > 0 else f"↓{n}"
 
     def _make_compare_pill(self, kind: paragraph_compare.SlotKind) -> ft.Container:
         label = paragraph_compare.slot_kind_label(kind)
@@ -325,6 +336,30 @@ class MarkdownStudioCompareText:
             padding=ft.padding.symmetric(horizontal=5, vertical=3),
             border_radius=10,
             alignment=ft.Alignment.CENTER,
+        )
+
+    def _make_compare_pill_row(
+        self, kind: paragraph_compare.SlotKind, displacement: int | None
+    ) -> ft.Row:
+        arrow = self._compare_displacement_arrow_text(displacement)
+        arrow_ctrl = ft.Container(
+            content=ft.Text(
+                arrow,
+                size=11,
+                weight=ft.FontWeight.W_500,
+                color=ft.Colors.GREY_500,
+                font_family="monospace",
+                text_align=ft.TextAlign.CENTER,
+            ),
+            width=34,
+            alignment=ft.Alignment.CENTER,
+            padding=ft.padding.only(top=2),
+        )
+        return ft.Row(
+            [arrow_ctrl, self._make_compare_pill(kind)],
+            spacing=2,
+            tight=True,
+            vertical_alignment=ft.CrossAxisAlignment.START,
         )
 
     def _sync_compare_buffer_from_fields(self) -> None:
@@ -429,7 +464,7 @@ class MarkdownStudioCompareText:
         self._compare_row_stable_texts = [
             base_paras[i] if i < len(base_paras) else "" for i in range(len(pairs))
         ]
-        kinds_h = paragraph_compare.slot_kinds_heuristic(baseline, candidate)
+        kinds_h, disps_h = paragraph_compare.compare_slots_heuristic(baseline, candidate)
 
         self._compare_rows_listview.controls.clear()
         self._compare_right_fields.clear()
@@ -470,9 +505,9 @@ class MarkdownStudioCompareText:
         )
         for i, (left_txt, right_txt) in enumerate(pairs):
             kind = kinds_h[i] if i < len(kinds_h) else "unchanged"
-            pill = self._make_compare_pill(kind)
+            disp = disps_h[i] if i < len(disps_h) else None
             pill_host = ft.Container(
-                content=pill,
+                content=self._make_compare_pill_row(kind, disp),
                 width=COMPARE_PILL_COL_W,
                 alignment=ft.Alignment.TOP_CENTER,
                 padding=ft.padding.only(top=4),
@@ -668,10 +703,11 @@ class MarkdownStudioCompareText:
             return
         baseline = self._compare_latest_baseline_text()
         candidate = self._compare_editor.value or ""
-        kinds = paragraph_compare.slot_kinds_heuristic(baseline, candidate)
+        kinds, disps = paragraph_compare.compare_slots_heuristic(baseline, candidate)
         for i, host in enumerate(self._compare_row_pill_hosts):
             k = kinds[i] if i < len(kinds) else "unchanged"
-            host.content = self._make_compare_pill(k)
+            d = disps[i] if i < len(disps) else None
+            host.content = self._make_compare_pill_row(k, d)
             if _ctrl_on_page(host):
                 host.update()
 
@@ -686,7 +722,7 @@ class MarkdownStudioCompareText:
         if not baseline.strip() and not candidate.strip():
             return
         try:
-            refined, aligned_lefts = await paragraph_compare.classify_slots_async(
+            refined, aligned_lefts, disps_ref = await paragraph_compare.classify_slots_async(
                 self.ollama,
                 self._make_llm_backend(),
                 chat_model=self.chat_model_for_requests(),
@@ -700,7 +736,8 @@ class MarkdownStudioCompareText:
             return
         for i, host in enumerate(self._compare_row_pill_hosts):
             k = refined[i] if i < len(refined) else "unchanged"
-            host.content = self._make_compare_pill(k)
+            d = disps_ref[i] if i < len(disps_ref) else None
+            host.content = self._make_compare_pill_row(k, d)
             if _ctrl_on_page(host):
                 host.update()
         if (

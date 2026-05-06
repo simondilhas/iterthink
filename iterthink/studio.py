@@ -23,6 +23,7 @@ from iterthink.studio_llm import MarkdownStudioLlm, build_ki_tier_tabs
 from iterthink.studio_shell import MarkdownStudioShell
 from iterthink.studio_constants import (
     COMPOSE_MARGIN_COL_W,
+    COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE,
     COMPARE_EVAL_COL_W,
     COMPARE_KEY_DRAFT as _COMPARE_KEY_DRAFT,
     KI_TAB_BAR_TO_PILLS_GAP_PX,
@@ -218,18 +219,24 @@ class MarkdownStudio(
             dense=True,
             text_size=14,
             color=ft.Colors.GREY_200,
-            bgcolor=ft.Colors.TRANSPARENT,
-            filled=False,
+            filled=True,
+            fill_color=config.SURFACE_VARIANT,
             border=ft.InputBorder.NONE,
             border_width=0,
             content_padding=ft.padding.only(left=2, right=8, top=0, bottom=0),
             menu_style=ft.MenuStyle(
-                bgcolor=config.SURFACE_VARIANT,
+                bgcolor=config.SURFACE,
                 elevation=12,
                 shadow_color=ft.Colors.with_opacity(0.45, ft.Colors.BLACK),
                 visual_density=ft.VisualDensity.COMPACT,
             ),
-            options=[ft.dropdown.Option(key=_COMPARE_KEY_DRAFT, text="Draft")],
+            options=[
+                ft.dropdown.Option(
+                    key=_COMPARE_KEY_DRAFT,
+                    text="Draft",
+                    style=COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE,
+                )
+            ],
             value=_COMPARE_KEY_DRAFT,
             disabled=True,
             tooltip="Draft, snapshot, or AI preview for the right column (left = latest Compose).",

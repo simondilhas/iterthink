@@ -1,6 +1,22 @@
 """Shared UI constants for studio modules."""
 
+import flet as ft
+
 COMPARE_COL_FONT_SIZE = 14
+
+# Compare-tab version dropdown: dark menu rows, inverted selected row (light chip + dark text).
+COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE = ft.ButtonStyle(
+    color={
+        ft.ControlState.DEFAULT: ft.Colors.GREY_300,
+        ft.ControlState.HOVERED: ft.Colors.WHITE,
+        ft.ControlState.SELECTED: ft.Colors.BLACK,
+    },
+    bgcolor={
+        ft.ControlState.DEFAULT: ft.Colors.TRANSPARENT,
+        ft.ControlState.SELECTED: ft.Colors.GREY_400,
+    },
+    overlay_color=ft.Colors.with_opacity(0.10, ft.Colors.WHITE),
+)
 
 # KI sidebar / analyse pills
 KI_PILL_TEXT_SIZE = 10
@@ -33,7 +49,7 @@ DIFF_SPAN_CHAR_CAP = 120_000
 
 COMPARE_COL_LINE_HEIGHT = 1.6
 COMPOSE_MARGIN_COL_W = 104
-COMPARE_PILL_COL_W = 72
+COMPARE_PILL_COL_W = 100
 
 RESULT_CARD_W = 380
 RESULT_CARD_MAX_H = 360
