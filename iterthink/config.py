@@ -117,7 +117,7 @@ def refresh() -> None:
         v = merged.get(k, fallback)
         return v if isinstance(v, str) and v else fallback
 
-    FEDORA_BLUE = _str_key("fedora_blue", "#007BFF")
+    FEDORA_BLUE = _str_key("higlight_color", "#007BFF")
     SURFACE = _str_key("surface", "#1E1E1E")
     SURFACE_VARIANT = _str_key("surface_variant", "#2D2D2D")
     SIDEBAR_SURFACE = _str_key("sidebar_surface", "#2A2D32")

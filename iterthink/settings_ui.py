@@ -512,7 +512,7 @@ async def open_settings_dialog(studio: Any) -> None:
         dense=True,
     )
 
-    fedora_blue_tf = ft.TextField(label="Accent (fedora_blue)", value=_s("fedora_blue", "#007BFF"), dense=True, expand=True)
+    higlight_color_tf = ft.TextField(label="Accent (higlight_color)", value=_s("higlight_color", "#007BFF"), dense=True, expand=True)
     surface_tf = ft.TextField(label="Surface", value=_s("surface", "#1E1E1E"), dense=True, expand=True)
     surface_variant_tf = ft.TextField(label="Surface variant", value=_s("surface_variant", "#2D2D2D"), dense=True, expand=True)
     sidebar_surface_tf = ft.TextField(label="Sidebar surface", value=_s("sidebar_surface", "#2A2D32"), dense=True, expand=True)
@@ -540,7 +540,7 @@ async def open_settings_dialog(studio: Any) -> None:
             return
         host_raw = (ollama_host_tf.value or "").strip()
         data["ollama_host"] = host_raw if host_raw else None
-        data["fedora_blue"] = (fedora_blue_tf.value or "").strip() or "#007BFF"
+        data["higlight_color"] = (higlight_color_tf.value or "").strip() or "#007BFF"
         data["surface"] = (surface_tf.value or "").strip() or "#1E1E1E"
         data["surface_variant"] = (surface_variant_tf.value or "").strip() or "#2D2D2D"
         data["sidebar_surface"] = (sidebar_surface_tf.value or "").strip() or "#2A2D32"
@@ -983,7 +983,7 @@ async def open_settings_dialog(studio: Any) -> None:
                 ),
                 ollama_host_tf,
                 ft.Text("Theme", weight=ft.FontWeight.W_500, size=13),
-                fedora_blue_tf,
+                higlight_color_tf,
                 ft.Row([surface_tf, surface_variant_tf], spacing=8, expand=True),
                 ft.Row([sidebar_surface_tf, selection_overlay_tf], spacing=8, expand=True),
                 chat_system_tf,

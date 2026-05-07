@@ -9,10 +9,10 @@ default_ollama_embed_model: nomic-embed-text-v2-moe
 # Optional; use OLLAMA_HOST env to override. Empty/null = default client host.
 ollama_host: null
 
-fedora_blue: "#007BFF"
+higlight_color: "#B38FC1"
 surface: "#1E1E1E"
-surface_variant: "#2D2D2D"
+surface_variant: "#B8CEE8"
 sidebar_surface: "#2A2D32"
-selection_overlay: "#59007BFF"
+selection_overlay: "#B8CEE8"
 
 chat_system: "You are a prose editor focusing on intent and clarity."

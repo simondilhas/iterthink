@@ -215,6 +215,8 @@ class MarkdownStudioCompareText:
                 vid = int(v)
             except (TypeError, ValueError):
                 return
+            # Persist edits to the currently-loaded proposal before swapping it out.
+            self._flush_review_edits_if_changed()
             with session_scope() as s:
                 row = version_storage.get_version_row(s, vid)
             if row is not None and row.reason == "ai_proposal":
@@ -289,6 +291,49 @@ class MarkdownStudioCompareText:
         self._loaded_proposal_sha = version_storage.content_sha256(body)
         if _ctrl_on_page(self._compare_editor):
             self._compare_editor.update()
+
+    def _flush_review_edits_if_changed(self) -> None:
+        """Persist edits to the loaded ai_proposal as a new snapshot when the user leaves it.
+
+        SHA-dedup against the snapshot we loaded; no row is written for unchanged sessions.
+        Updates _latest_ai_proposal_vid + _ai_proposal_action_ids + _compare_snapshot_version_id
+        + _loaded_proposal_sha so dropdown / accept paths point at the new row.
+        """
+        if not self.current_path:
+            return
+        if self._compare_candidate_source != "ai_preview":
+            return
+        if self._loaded_proposal_sha is None:
+            return
+        body = self._compare_editor.value or ""
+        new_sha = version_storage.content_sha256(body)
+        if new_sha == self._loaded_proposal_sha:
+            return
+        aid = self._pending_ai_accept_action_id or ""
+        act = prompts.get_margin_action(aid) if aid else None
+        base_label = act.label if act else (aid or "AI proposal")
+        label = f"{base_label} - edited"
+        try:
+            with session_scope() as s:
+                new_vid = version_storage.persist_version_snapshot(
+                    s,
+                    self.current_path.resolve(),
+                    body,
+                    "ai_proposal",
+                    display_label=label,
+                )
+        except BaseException:
+            return
+        if new_vid is None:
+            # Most-recent doc snapshot already had this sha; treat as already saved.
+            self._loaded_proposal_sha = new_sha
+            return
+        if aid:
+            self._ai_proposal_action_ids[new_vid] = aid
+        self._latest_ai_proposal_vid = new_vid
+        self._compare_snapshot_version_id = new_vid
+        self._loaded_proposal_sha = new_sha
+        self._refresh_compare_tab_candidate_ui()
 
     def _select_snapshot_as_candidate(self, vid: int) -> None:
         """Pick a snapshot row (History or Import). Auto-route to PDF/DOCX side-by-side when assets exist."""
@@ -367,6 +412,9 @@ class MarkdownStudioCompareText:
         self._cancel_autosave_timers()
         if self.current_path and self._is_dirty():
             await self.save_file(silent=True, snapshot_reason="pre_switch")
+        # Persist any in-flight Review proposal edits before switching away from Future.
+        if prev == TAB_FUTURE:
+            self._flush_review_edits_if_changed()
 
         # Leaving Present: nothing to flush (editor is the source of truth).
         # Leaving History: right fields are read-only carriers; current draft is editor.value.
@@ -1410,6 +1458,7 @@ class MarkdownStudioCompareText:
         self._compare_candidate_source = "ai_preview"
         self._compare_snapshot_version_id = None
         self._pending_ai_accept_action_id = action_id
+        self._loaded_proposal_sha = version_storage.content_sha256(self._compare_editor.value or "")
         self._hide_prompt_footer(footer)
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)
@@ -1417,6 +1466,8 @@ class MarkdownStudioCompareText:
         # the staged proposal immediately and doesn't reset _compare_editor.
         self._main_tab_index = TAB_FUTURE
         self._main_tabs.selected_index = TAB_FUTURE
+        if _ctrl_on_page(self._main_tabs):
+            self._main_tabs.update()
         self._rebuild_future_paragraph_ui()
         self._refresh_tab_toolbar()
         self._refresh_compare_tab_candidate_ui()

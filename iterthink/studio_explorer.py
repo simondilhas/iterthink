@@ -426,6 +426,9 @@ class MarkdownStudioExplorer:
     ) -> None:
         if self.current_path and path != self.current_path and self._is_dirty():
             await self.save_file(silent=True, snapshot_reason="pre_switch")
+        # Persist any in-flight Review proposal edits for the previous file before switching.
+        if self.current_path and path != self.current_path:
+            self._flush_review_edits_if_changed()
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as ex:
