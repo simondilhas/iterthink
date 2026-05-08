@@ -12,7 +12,7 @@ from iterthink import config
 from iterthink.ai.ollama_util import chat_response_text
 
 SemanticKind = Literal["STABLE", "NEW"]
-RewriteVsMajor = Literal["rewritten", "major"]
+RewriteVsMajor = Literal["rephrased", "modified"]
 
 # Ghost-preview highlights (ARGB ~14%): added stays light green, removed is light red + strikethrough.
 _BG_NEW = "#252ECC71"
@@ -265,9 +265,9 @@ async def judge_rewritten_vs_major(chat: Any, model: str, original: str, revised
         raw = (chat_response_text(resp) or "").strip().lower()
         for token in raw.replace(",", " ").split():
             if "rewritten" in token:
-                return "rewritten"
+                return "rephrased"
             if token == "major" or token.startswith("major"):
-                return "major"
+                return "modified"
     except BaseException:
         pass
-    return "major"
+    return "modified"

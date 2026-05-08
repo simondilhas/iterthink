@@ -45,6 +45,7 @@ from .constants import (
     COMPARE_ACTION_GRID_CELL,
     COMPARE_COL_FONT_SIZE,
     COMPARE_COL_LINE_HEIGHT,
+    COMPARE_EVAL_COL_W_WIDE,
     COMPARE_KEY_CURRENT as _COMPARE_KEY_CURRENT,
     COMPARE_PILL_COL_W,
     DIFF_SPAN_CHAR_CAP as _DIFF_SPAN_CHAR_CAP,
@@ -256,9 +257,13 @@ class MarkdownStudioCompareText:
                     snaps_all = version_storage.list_snapshots(s, self.current_path.resolve())
             filt = self._history_compare_snapshots(snaps_all)
 
-            newer_opts: list[ft.dropdown.Option] = [
-                ft.dropdown.Option(key=_COMPARE_KEY_CURRENT, text="Current draft", style=_st)
-            ]
+            newer_opts: list[ft.dropdown.Option] = []
+            # Only offer "Current draft" when the editor has unsaved changes; if it is
+            # identical to the last-saved snapshot it would be a duplicate entry.
+            if self._is_dirty():
+                newer_opts.append(
+                    ft.dropdown.Option(key=_COMPARE_KEY_CURRENT, text="Current draft", style=_st)
+                )
             newer_opts.extend(snapshot_option_rows(filt))
             self._compare_newer_dropdown.options = newer_opts
             newer_keys = {o.key for o in newer_opts}
@@ -269,9 +274,26 @@ class MarkdownStudioCompareText:
                 else:
                     self._compare_newer_version_id = None
                     self._compare_newer_cached_body = ""
+                    # Fall through to default selection below.
+            if self._compare_newer_version_id is None:
+                if _COMPARE_KEY_CURRENT in newer_keys:
                     self._compare_newer_dropdown.value = _COMPARE_KEY_CURRENT
-            else:
-                self._compare_newer_dropdown.value = _COMPARE_KEY_CURRENT
+                elif newer_opts:
+                    # Draft is clean — default to the most recent snapshot.
+                    first_snap = newer_opts[0]
+                    self._compare_newer_dropdown.value = first_snap.key
+                    try:
+                        vid = int(first_snap.key)
+                        self._compare_newer_version_id = vid
+                        with session_scope() as s:
+                            self._compare_newer_cached_body = version_storage.load_version_body(
+                                s, vid
+                            )
+                    except (TypeError, ValueError, BaseException):
+                        self._compare_newer_version_id = None
+                        self._compare_newer_cached_body = ""
+                else:
+                    self._compare_newer_dropdown.value = None
 
             if self._compare_newer_version_id is not None:
                 try:
@@ -707,14 +729,12 @@ class MarkdownStudioCompareText:
     def _apply_compare_candidate_dropdown_tab_chrome(self) -> None:
         """Outline around the version dropdown (tree search style): grey at rest, blue on hover/focus."""
         selected = self._main_tab_index == TAB_HISTORY
-        union_hover = (
-            self._compare_tab_bar_hover_index1
-            or self._compare_dropdown_hover
-            or self._compare_newer_dropdown_hover
-        )
-        accent = selected and (union_hover or self._compare_version_dd_focused)
-        rim = config.PRIMARY_COLOR if accent else ui_theme.outline_muted()
-        for wrap in (self._compare_dropdown_hover_wrap, self._compare_newer_dropdown_hover_wrap):
+        for wrap, own_hover in (
+            (self._compare_dropdown_hover_wrap, self._compare_dropdown_hover),
+            (self._compare_newer_dropdown_hover_wrap, self._compare_newer_dropdown_hover),
+        ):
+            accent = selected and (own_hover or self._compare_version_dd_focused)
+            rim = config.PRIMARY_COLOR if accent else ui_theme.outline_muted()
             wrap.border = ft.Border.all(1, rim)
         if self._main_tab_index == TAB_HISTORY:
             if _ctrl_on_page(self._compare_dropdown_hover_wrap):
@@ -728,7 +748,6 @@ class MarkdownStudioCompareText:
 
     def _on_main_tab_bar_hover(self, e: ft.TabBarHoverEvent) -> None:
         self._compare_tab_bar_hover_index1 = e.index == TAB_HISTORY and e.hovering
-        self._apply_compare_candidate_dropdown_tab_chrome()
 
     def _on_compare_dropdown_container_hover(self, e: ft.ControlEvent) -> None:
         self._compare_dropdown_hover = str(e.data).lower() == "true"
@@ -848,15 +867,15 @@ class MarkdownStudioCompareText:
             else (ft.Colors.with_opacity(0.28, ft.Colors.GREEN_400), ft.Colors.GREEN_100)
         )
         m: dict[str, tuple[str, str]] = {
-            "unchanged": (
+            "stable": (
                 ft.Colors.with_opacity(0.18, config.OUTLINE),
                 config.ON_SURFACE_VARIANT,
             ),
-            "minor": (ft.Colors.with_opacity(0.28, ft.Colors.BLUE_400), ft.Colors.BLUE_100),
-            "major": (ft.Colors.with_opacity(0.28, ft.Colors.ORANGE_400), ft.Colors.ORANGE_100),
-            "rewritten": (ft.Colors.with_opacity(0.28, ft.Colors.PURPLE_400), ft.Colors.PURPLE_100),
-            "new": new_pill,
-            "deleted": (ft.Colors.with_opacity(0.28, ft.Colors.RED_400), ft.Colors.RED_100),
+            "refined":   (ft.Colors.with_opacity(0.28, ft.Colors.BLUE_400), ft.Colors.BLUE_100),
+            "modified":  (ft.Colors.with_opacity(0.28, ft.Colors.ORANGE_400), ft.Colors.ORANGE_100),
+            "rephrased": (ft.Colors.with_opacity(0.28, ft.Colors.PURPLE_400), ft.Colors.PURPLE_100),
+            "added":     new_pill,
+            "removed":   (ft.Colors.with_opacity(0.28, ft.Colors.RED_400), ft.Colors.RED_100),
         }
         return m.get(
             kind,
@@ -889,8 +908,31 @@ class MarkdownStudioCompareText:
             alignment=ft.Alignment.CENTER,
         )
 
+    def _make_moved_pill(self) -> ft.Container:
+        bg = ft.Colors.with_opacity(0.28, ft.Colors.TEAL_400)
+        fg = ft.Colors.TEAL_100
+        return ft.Container(
+            content=ft.Text(
+                "Moved",
+                size=10,
+                weight=ft.FontWeight.W_600,
+                color=fg,
+                max_lines=1,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            bgcolor=bg,
+            padding=ft.padding.symmetric(horizontal=5, vertical=3),
+            border_radius=10,
+            alignment=ft.Alignment.CENTER,
+        )
+
     def _make_compare_pill_row(
-        self, kind: paragraph_compare.SlotKind, displacement: int | None
+        self,
+        kind: paragraph_compare.SlotKind,
+        displacement: int | None,
+        *,
+        show_moved_badge: bool = True,
     ) -> ft.Row:
         arrow = self._compare_displacement_arrow_text(displacement)
         arrow_ctrl = ft.Container(
@@ -906,8 +948,18 @@ class MarkdownStudioCompareText:
             alignment=ft.Alignment.CENTER,
             padding=ft.padding.only(top=2),
         )
+        is_moved = displacement is not None and displacement != 0
+        change_pill = self._make_compare_pill(kind) if kind != "stable" else ft.Container()
+        if is_moved and show_moved_badge:
+            pills = ft.Column(
+                [change_pill, self._make_moved_pill()],
+                spacing=3,
+                tight=True,
+            )
+        else:
+            pills = change_pill
         return ft.Row(
-            [arrow_ctrl, self._make_compare_pill(kind)],
+            [arrow_ctrl, pills],
             spacing=2,
             tight=True,
             vertical_alignment=ft.CrossAxisAlignment.START,
@@ -1108,7 +1160,16 @@ class MarkdownStudioCompareText:
         return wrap_workspace_action_chrome(actions_inner, persistent=persistent)
 
     def _rebuild_compare_paragraph_ui(self) -> None:
-        """History tab: eval | old(deletions) | pill | new(insertions) — diff columns read-only ft.Text."""
+        """History tab: eval | old | pill | new — with ghost rows at old positions of moved content.
+
+        Ghost rows ("ghost_moved", "removed") appear at the original old-document position:
+          left = struck-through old text, right = empty gap, pill = Moved / Removed.
+        Comparison rows appear at the new-document position:
+          left = old-aligned text (greyed if moved), right = new text, pill = change kind.
+
+        Only comparison rows populate the tracking lists (_compare_right_fields, etc.) so
+        all index-based logic (pill refresh, span refresh, hash checks) stays unchanged.
+        """
         self._compare_pill_gen += 1
         older_text = self._compare_editor.value or ""
         newer_text = self._history_newer_side_text()
@@ -1116,12 +1177,10 @@ class MarkdownStudioCompareText:
             half = _DIFF_SPAN_CHAR_CAP // 2
             older_text = older_text[:half] + "\n…"
             newer_text = newer_text[:half] + "\n…"
-        pairs = pair_paragraphs_for_compare(older_text, newer_text)
-        newer_paras = split_paragraphs(newer_text)
-        self._compare_row_stable_texts = [
-            newer_paras[i] if i < len(newer_paras) else "" for i in range(len(pairs))
-        ]
-        kinds_h, disps_h = paragraph_compare.compare_slots_heuristic(older_text, newer_text)
+
+        display_rows = paragraph_compare.build_history_display_rows(older_text, newer_text)
+        comparison_rows = [r for r in display_rows if r.row_type == "comparison"]
+        n_comp = len(comparison_rows)
 
         self._compare_rows_listview.controls.clear()
         self._compare_right_fields.clear()
@@ -1129,78 +1188,125 @@ class MarkdownStudioCompareText:
         self._compare_left_diff_texts.clear()
         self._compare_right_diff_texts.clear()
         self._compare_eval_hosts.clear()
-        # Hide any active result-card overlay; row layout is being rebuilt.
         self._hide_all_result_card_overlays()
-        # Refresh paragraph hash list against the current text; resize results buffers.
-        self._check_para_hashes = [compute_hash(new) for _, new in pairs]
+
+        self._compare_row_stable_texts = [r.new_text for r in comparison_rows]
+        self._check_para_hashes = [compute_hash(r.new_text) for r in comparison_rows]
         for cid in list(self._check_results.keys()):
             results = self._check_results.get(cid) or []
-            if len(results) != len(pairs):
-                self._check_results[cid] = (results + [None] * len(pairs))[: len(pairs)]
+            if len(results) != n_comp:
+                self._check_results[cid] = (results + [None] * n_comp)[:n_comp]
 
+        _MOVED_OPACITY = 0.55
         para_style = self._compare_para_text_style()
-        for i, (old_txt, cur_txt) in enumerate(pairs):
-            kind = kinds_h[i] if i < len(kinds_h) else "unchanged"
-            disp = disps_h[i] if i < len(disps_h) else None
+        # Ghost rows use the same ON_SURFACE colour + opacity as moved comparison rows
+        # so both sides of a moved paragraph read at the same grey level.
+        ghost_text_style = ft.TextStyle(
+            font_family="monospace",
+            size=COMPARE_COL_FONT_SIZE,
+            height=COMPARE_COL_LINE_HEIGHT,
+            color=config.ON_SURFACE,
+            decoration=ft.TextDecoration.LINE_THROUGH,
+            decoration_color=config.ON_SURFACE,
+        )
+        comp_idx = 0
+
+        for row in display_rows:
+            is_ghost = row.row_type in ("ghost_moved", "removed")
+            # Ghost rows (true movers at old position): show Moved badge + arrow.
+            # True-mover comparison rows: ghost already communicates, suppress displacement.
+            # Passive-shift comparison rows: show arrow only (no Moved badge).
+            if is_ghost:
+                pill_disp = row.displacement
+                pill_badge = True
+            elif row.is_true_mover:
+                pill_disp = None
+                pill_badge = False
+            else:
+                pill_disp = row.displacement  # passive: ↑n/↓n arrow, no badge
+                pill_badge = False
             pill_host = ft.Container(
-                content=self._make_compare_pill_row(kind, disp),
+                content=self._make_compare_pill_row(
+                    row.slot_kind, pill_disp, show_moved_badge=pill_badge
+                ),
                 width=COMPARE_PILL_COL_W,
-                alignment=ft.Alignment.TOP_CENTER,
+                alignment=ft.Alignment.TOP_LEFT,
                 padding=ft.padding.only(top=4),
             )
-            # Left: snapshot, deletions only.
-            left_diff = ft.Text(
-                spans=self._compare_old_side_spans(old_txt, cur_txt),
-                style=para_style,
-                selectable=True,
-                expand=True,
-                no_wrap=False,
-            )
-            self._compare_left_diff_texts.append(left_diff)
-            left_cell = ft.Container(
-                content=left_diff,
-                expand=1,
-                padding=_COMPARE_HISTORY_CELL_PAD,
-            )
-            # Right: draft, insertions only (read-only).
-            right_diff = ft.Text(
-                spans=self._compare_new_side_spans(old_txt, cur_txt),
-                style=para_style,
-                selectable=True,
-                expand=True,
-                no_wrap=False,
-            )
-            self._compare_right_diff_texts.append(right_diff)
-            right_cell = ft.Container(
-                content=right_diff,
-                expand=1,
-                padding=_COMPARE_HISTORY_CELL_PAD,
-            )
-            # Hidden carrier so length-based code (hash invalidation, bulk-apply checks) stays unchanged.
-            right_carrier = ft.TextField(
-                value=cur_txt,
-                visible=False,
-                height=0,
-                width=0,
-            )
 
-            eval_host = self._build_eval_cell(i)
+            if is_ghost:
+                # Ghost row: struck-through old text on left, empty gap on right.
+                # eval column is a fixed-width spacer to keep column alignment.
+                ghost_left = ft.Text(
+                    row.old_text,
+                    style=ghost_text_style,
+                    selectable=True,
+                    expand=True,
+                    no_wrap=False,
+                )
+                left_cell = ft.Container(
+                    content=ghost_left,
+                    expand=1,
+                    padding=_COMPARE_HISTORY_CELL_PAD,
+                    opacity=_MOVED_OPACITY,
+                )
+                right_cell = ft.Container(expand=1, padding=_COMPARE_HISTORY_CELL_PAD)
+                eval_spacer = ft.Container(width=36)
+                row_ctrl = ft.Row(
+                    [eval_spacer, left_cell, pill_host, right_cell],
+                    spacing=4,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                )
+                self._compare_rows_listview.controls.append(row_ctrl)
 
-            # History row: eval | old(deletions) | pill | new(insertions)
-            row_inner = ft.Row(
-                [
-                    eval_host,
-                    left_cell,
-                    pill_host,
-                    right_cell,
-                ],
-                spacing=4,
-                vertical_alignment=ft.CrossAxisAlignment.START,
-            )
-            self._compare_rows_listview.controls.append(row_inner)
-            self._compare_right_fields.append(right_carrier)
-            self._compare_row_pill_hosts.append(pill_host)
-            self._compare_eval_hosts.append(eval_host)
+            else:
+                # Comparison row: old-aligned left, new right.
+                old_txt = row.old_text
+                cur_txt = row.new_text
+                left_diff = ft.Text(
+                    spans=self._compare_old_side_spans(old_txt, cur_txt),
+                    style=para_style,
+                    selectable=True,
+                    expand=True,
+                    no_wrap=False,
+                )
+                self._compare_left_diff_texts.append(left_diff)
+                left_cell = ft.Container(
+                    content=left_diff,
+                    expand=1,
+                    padding=_COMPARE_HISTORY_CELL_PAD,
+                    opacity=_MOVED_OPACITY if row.is_moved else 1.0,
+                )
+                right_diff = ft.Text(
+                    spans=self._compare_new_side_spans(old_txt, cur_txt),
+                    style=para_style,
+                    selectable=True,
+                    expand=True,
+                    no_wrap=False,
+                )
+                self._compare_right_diff_texts.append(right_diff)
+                right_cell = ft.Container(
+                    content=right_diff,
+                    expand=1,
+                    padding=_COMPARE_HISTORY_CELL_PAD,
+                )
+                right_carrier = ft.TextField(
+                    value=cur_txt,
+                    visible=False,
+                    height=0,
+                    width=0,
+                )
+                eval_host = self._build_eval_cell(comp_idx)
+                self._compare_eval_hosts.append(eval_host)
+                self._compare_row_pill_hosts.append(pill_host)
+                self._compare_right_fields.append(right_carrier)
+                row_ctrl = ft.Row(
+                    [eval_host, left_cell, pill_host, right_cell],
+                    spacing=4,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                )
+                self._compare_rows_listview.controls.append(row_ctrl)
+                comp_idx += 1
 
         if _ctrl_on_page(self._compare_rows_listview):
             self._compare_rows_listview.update()
@@ -1263,7 +1369,7 @@ class MarkdownStudioCompareText:
             self._future_row_stable_texts.append(row_spec.old_text)
 
             if row_spec.kind == "delete":
-                pill_kind: paragraph_compare.SlotKind = "deleted"
+                pill_kind: paragraph_compare.SlotKind = "removed"
                 disp: int | None = None
             elif row_spec.cand_idx is not None and row_spec.cand_idx < len(kinds_h):
                 pill_kind = kinds_h[row_spec.cand_idx]
@@ -1273,12 +1379,12 @@ class MarkdownStudioCompareText:
                     else None
                 )
             else:
-                pill_kind = "new" if row_spec.kind == "insert" else "unchanged"
+                pill_kind = "added" if row_spec.kind == "insert" else "stable"
                 disp = None
             pill_host = ft.Container(
                 content=self._make_compare_pill_row(pill_kind, disp),
                 width=COMPARE_PILL_COL_W,
-                alignment=ft.Alignment.TOP_CENTER,
+                alignment=ft.Alignment.TOP_LEFT,
                 padding=ft.padding.only(top=4),
             )
 
@@ -1305,6 +1411,7 @@ class MarkdownStudioCompareText:
                 content=left_diff,
                 expand=1,
                 padding=_COMPARE_HISTORY_CELL_PAD,
+                opacity=0.55 if (disp is not None and disp != 0) else 1.0,
             )
 
             # Right cell: editable AI proposal for replace/insert/equal; empty placeholder
@@ -1429,10 +1536,11 @@ class MarkdownStudioCompareText:
             return
         buffers = self._active_compare_buffers()
         kinds, disps = paragraph_compare.compare_slots_heuristic(buffers.baseline, buffers.candidate)
+        on_history = self._main_tab_index == TAB_HISTORY
         for i, host in enumerate(self._active_pill_hosts()):
-            k = kinds[i] if i < len(kinds) else "unchanged"
+            k = kinds[i] if i < len(kinds) else "stable"
             d = disps[i] if i < len(disps) else None
-            host.content = self._make_compare_pill_row(k, d)
+            host.content = self._make_compare_pill_row(k, d, show_moved_badge=not on_history)
             if _ctrl_on_page(host):
                 host.update()
 
@@ -1458,10 +1566,11 @@ class MarkdownStudioCompareText:
             return
         if gen != self._compare_refine_gen:
             return
+        on_history = self._main_tab_index == TAB_HISTORY
         for i, host in enumerate(self._active_pill_hosts()):
-            k = refined[i] if i < len(refined) else "unchanged"
+            k = refined[i] if i < len(refined) else "stable"
             d = disps_ref[i] if i < len(disps_ref) else None
-            host.content = self._make_compare_pill_row(k, d)
+            host.content = self._make_compare_pill_row(k, d, show_moved_badge=not on_history)
             if _ctrl_on_page(host):
                 host.update()
         # Update diff spans in both History columns after AI refinement.

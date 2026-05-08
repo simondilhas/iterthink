@@ -153,12 +153,7 @@ class MarkdownStudioChecksUi:
                 self._refresh_analyse_button_state()
                 self._refresh_all_eval_cells()
                 if run_ok:
-                    results = self._check_results.get(check_id) or []
-                    doc_summary = self._build_document_check_summary_text(check, results)
-                    self._append_chat_line("assistant", doc_summary)
-                    self._chat_api_messages.append(
-                        {"role": "assistant", "content": doc_summary}
-                    )
+                    pass
 
     # ------------------------------------------------------------------
     # Eval cell (leftmost cell in compare rows)
@@ -166,8 +161,9 @@ class MarkdownStudioChecksUi:
 
     def _build_eval_cell(self, idx: int) -> ft.Container:
         cid = self._active_check_id
+        col_w = 36 if self._main_tab_index == TAB_HISTORY else COMPARE_EVAL_COL_W_WIDE
         host = ft.Container(
-            width=COMPARE_EVAL_COL_W_WIDE,
+            width=col_w,
             alignment=ft.Alignment.TOP_CENTER,
             padding=ft.padding.only(top=4, right=2),
             content=self._build_eval_cell_inner(idx, cid),
@@ -188,8 +184,10 @@ class MarkdownStudioChecksUi:
         return arr[ui_idx]
 
     def _build_eval_cell_inner(self, idx: int, check_id: str | None) -> ft.Control:
+        on_history = self._main_tab_index == TAB_HISTORY
         if check_id is None:
-            return ft.Container(width=18, height=18)
+            # History: show nothing when no check is active.
+            return ft.Container(width=0, height=0) if on_history else ft.Container(width=18, height=18)
         cand_idx = self._eval_cand_idx(idx)
         if cand_idx is None:
             return ft.Container(width=18, height=18)
@@ -206,6 +204,9 @@ class MarkdownStudioChecksUi:
                     ),
                     alignment=ft.Alignment.TOP_CENTER,
                 )
+            # History: no placeholder dot — show nothing until results arrive.
+            if on_history:
+                return ft.Container(width=0, height=0)
             return ft.Container(
                 content=ft.Text("·", size=14, color=config.OUTLINE),
                 alignment=ft.Alignment.TOP_CENTER,
@@ -216,8 +217,8 @@ class MarkdownStudioChecksUi:
         tip: str | None = None
         if summary_raw:
             tip = summary_raw if len(summary_raw) <= 220 else summary_raw[:217] + "…"
-        # Review (Future): bare symbol only — no pill chrome, no summary subtext.
-        if self._main_tab_index == TAB_FUTURE:
+        # History + Review (Future): bare symbol only — no pill chrome, no summary subtext.
+        if self._main_tab_index in (TAB_FUTURE, TAB_HISTORY):
             return ft.Container(
                 content=ft.Text(
                     symbol,

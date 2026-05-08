@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from .diff_card import judge_rewritten_vs_major
 from .margin import split_paragraphs
@@ -17,7 +17,7 @@ from .paragraph_align import (
 )
 from .paragraph_semantics import embed_texts_cached
 
-SlotKind = Literal["unchanged", "minor", "major", "rewritten", "new", "deleted"]
+SlotKind = Literal["stable", "refined", "modified", "rephrased", "added", "removed"]
 
 # Cosine between paragraph embeddings (old vs new); outside bands use LLM.
 _COSINE_MAJOR_SURFACE = 0.82
@@ -208,30 +208,30 @@ async def refine_alignment_diffs_duplicate_hash_async(
 
 def _base_kind_from_diff(d: DiffParagraph) -> SlotKind:
     if d.status == "new":
-        return "new"
+        return "added"
     if d.status == "deleted":
-        return "deleted"
+        return "removed"
     if d.label in ("merged", "split"):
         o, p = d.old_text or "", d.new_text or ""
         if compute_hash(o) == compute_hash(p):
-            return "unchanged"
+            return "stable"
         if d.status == "stable":
-            return "unchanged"
+            return "stable"
         if d.status == "minor":
-            return "minor"
+            return "refined"
         if d.status == "major":
-            return "major"
-        return "minor"
+            return "modified"
+        return "refined"
     o, p = d.old_text or "", d.new_text or ""
     if compute_hash(o) == compute_hash(p):
-        return "unchanged"
+        return "stable"
     if d.status == "stable":
-        return "unchanged"
+        return "stable"
     if d.status == "minor":
-        return "minor"
+        return "refined"
     if d.status == "major":
-        return "major"
-    return "minor"
+        return "modified"
+    return "refined"
 
 
 def _aligned_left_texts_from_diffs(diffs: list[DiffParagraph], n: int) -> list[str]:
@@ -302,16 +302,16 @@ async def classify_slots_async(
     for i in range(n):
         d = by_new.get(i)
         if d is None:
-            out.append("unchanged")
+            out.append("stable")
             continue
         kind = _base_kind_from_diff(d)
-        if kind == "major":
+        if kind == "modified":
             o, p = d.old_text or "", d.new_text or ""
             if o.strip() and p.strip():
                 major_work.append((i, o, p))
-                out.append("major")
+                out.append("modified")
             else:
-                out.append("major")
+                out.append("modified")
         else:
             out.append(kind)
 
@@ -326,7 +326,7 @@ async def classify_slots_async(
     except BaseException:
         for _j, (slot_i, o, p) in enumerate(major_work):
             verdict = await judge_rewritten_vs_major(llm_chat, chat_model, o, p)
-            out[slot_i] = "rewritten" if verdict == "rewritten" else "major"
+            out[slot_i] = "rephrased" if verdict == "rephrased" else "modified"
         return out, aligned_lefts, displacements
 
     for j_idx, (slot_i, o, p) in enumerate(major_work):
@@ -334,28 +334,28 @@ async def classify_slots_async(
         vn = emb_new[j_idx] if j_idx < len(emb_new) else []
         if not vo or not vn:
             verdict = await judge_rewritten_vs_major(llm_chat, chat_model, o, p)
-            out[slot_i] = "rewritten" if verdict == "rewritten" else "major"
+            out[slot_i] = "rephrased" if verdict == "rephrased" else "modified"
             continue
         c = _cosine([float(x) for x in vo], [float(x) for x in vn])
         if c <= _COSINE_REWRITTEN:
-            out[slot_i] = "rewritten"
+            out[slot_i] = "rephrased"
         elif c >= _COSINE_MAJOR_SURFACE:
-            out[slot_i] = "major"
+            out[slot_i] = "modified"
         else:
             verdict = await judge_rewritten_vs_major(llm_chat, chat_model, o, p)
-            out[slot_i] = "rewritten" if verdict == "rewritten" else "major"
+            out[slot_i] = "rephrased" if verdict == "rephrased" else "modified"
 
     return out, aligned_lefts, displacements
 
 
 def slot_kind_label(kind: SlotKind) -> str:
     return {
-        "unchanged": "—",
-        "minor": "minor",
-        "major": "major",
-        "rewritten": "rewritten",
-        "new": "new",
-        "deleted": "deleted",
+        "stable":    "—",
+        "refined":   "Refined",
+        "modified":  "Modified",
+        "rephrased": "Rephrased",
+        "added":     "Added",
+        "removed":   "Removed",
     }[kind]
 
 
@@ -371,7 +371,7 @@ def compare_slots_heuristic(baseline: str, candidate: str) -> tuple[list[SlotKin
     for i in range(n):
         d = by_new.get(i)
         if d is None:
-            out.append("unchanged")
+            out.append("stable")
             continue
         out.append(_base_kind_from_diff(d))
     disps = slot_index_displacements_from_by_new(by_new, n)
@@ -382,3 +382,140 @@ def slot_kinds_heuristic(baseline: str, candidate: str) -> list[SlotKind]:
     """Fast slot labels only; prefer ``compare_slots_heuristic`` when displacements are needed."""
     kinds, _ = compare_slots_heuristic(baseline, candidate)
     return kinds
+
+
+class HistoryRow(NamedTuple):
+    """One display row for the History compare tab.
+
+    row_type:
+        "comparison"  — new-paragraph row (left = old-aligned text, right = new text).
+        "ghost_moved" — ghost at the old position of a true-mover paragraph
+                        (left = struck-through old text, right = empty gap).
+        "removed"     — deleted paragraph with no new match
+                        (left = struck-through old text, right = empty gap).
+    displacement:
+        old_index - new_index for moved rows; None otherwise.
+    is_moved:
+        True on "comparison" rows whose content arrived from a different position
+        (covers both true movers and passive shifts).
+    is_true_mover:
+        True when this paragraph broke relative order with at least one other paragraph
+        (LIS-based). False for paragraphs that merely shifted because a true mover
+        crossed them ("passive shifts"). Ghost rows always have is_true_mover=True.
+    """
+
+    row_type: str
+    old_text: str
+    new_text: str
+    slot_kind: str  # SlotKind
+    displacement: int | None
+    is_moved: bool
+    is_true_mover: bool
+
+
+def _lis_passive_old_indices(matched: list[tuple[int, int]]) -> set[int]:
+    """Return old_indices of matched pairs that lie in the Longest Increasing Subsequence.
+
+    Pairs are sorted by new_index; a paragraph whose old_index maintains the increasing
+    order of old_indices (i.e. is in the LIS) kept its relative position — it is a
+    passive shifter.  Any old_index NOT returned here is a true mover.
+    """
+    if len(matched) < 2:
+        return {t[0] for t in matched}
+    by_new = sorted(matched, key=lambda t: t[1])
+    old_seq = [t[0] for t in by_new]
+    n = len(old_seq)
+    dp = [1] * n
+    parent = [-1] * n
+    for i in range(1, n):
+        for j in range(i):
+            if old_seq[j] < old_seq[i] and dp[j] + 1 > dp[i]:
+                dp[i] = dp[j] + 1
+                parent[i] = j
+    end = max(range(n), key=lambda i: dp[i])
+    passive: set[int] = set()
+    k = end
+    while k >= 0:
+        passive.add(old_seq[k])
+        k = parent[k]
+    return passive
+
+
+def build_history_display_rows(baseline: str, candidate: str) -> list[HistoryRow]:
+    """Return rows for the History tab in display order, including ghost rows.
+
+    Ghost rows ("ghost_moved") appear only for *true movers* — paragraphs whose relative
+    order with at least one other paragraph changed (LIS criterion).  Paragraphs that
+    merely shifted line numbers to accommodate a true mover ("passive shifts") get no
+    ghost row; their comparison row carries the displacement arrow instead.
+
+    Sort key: ghost/removed rows → (old_index, 0); comparison/added → (new_index, 1).
+    """
+    old_paras = split_paragraphs(baseline)
+    new_paras = split_paragraphs(candidate)
+    n_old = len(old_paras)
+    n_new = len(new_paras)
+
+    if n_old == 0 and n_new == 0:
+        return []
+
+    diffs = compute_alignment(baseline, candidate)
+
+    by_new: dict[int, DiffParagraph] = {}
+    by_old: dict[int, DiffParagraph] = {}
+    for d in diffs:
+        if d.new_index >= 0 and d.new_index not in by_new:
+            by_new[d.new_index] = d
+        if d.old_index >= 0 and d.old_index not in by_old:
+            by_old[d.old_index] = d
+
+    matched_pairs = [
+        (d.old_index, d.new_index)
+        for d in diffs
+        if d.old_index >= 0 and d.new_index >= 0
+    ]
+    passive_olds = _lis_passive_old_indices(matched_pairs)
+
+    keyed: list[tuple[tuple, HistoryRow]] = []
+
+    # Ghost and removed rows (old positions).
+    for old_idx in range(n_old):
+        d = by_old.get(old_idx)
+        old_text = old_paras[old_idx]
+        if d is None or d.new_index < 0:
+            # Deleted paragraph — always a ghost.
+            keyed.append((
+                (old_idx, 0),
+                HistoryRow("removed", old_text, "", "removed", None, False, True),
+            ))
+        elif d.new_index != old_idx and old_idx not in passive_olds:
+            # True mover — ghost at old position.
+            disp = old_idx - d.new_index
+            keyed.append((
+                (old_idx, 0),
+                HistoryRow("ghost_moved", old_text, "", "stable", disp, True, True),
+            ))
+        # Passive shifts and in-place matches: no ghost row.
+
+    # Comparison rows (new positions).
+    for new_idx in range(n_new):
+        d = by_new.get(new_idx)
+        new_text = new_paras[new_idx]
+        if d is None:
+            keyed.append((
+                (new_idx, 1),
+                HistoryRow("comparison", "", new_text, "added", None, False, False),
+            ))
+        else:
+            old_text = d.old_text or (old_paras[d.old_index] if 0 <= d.old_index < n_old else "")
+            is_moved = d.old_index >= 0 and d.new_index != d.old_index
+            disp = (d.old_index - d.new_index) if is_moved else None
+            is_true_mover = is_moved and d.old_index not in passive_olds
+            kind = _base_kind_from_diff(d)
+            keyed.append((
+                (new_idx, 1),
+                HistoryRow("comparison", old_text, new_text, kind, disp, is_moved, is_true_mover),
+            ))
+
+    keyed.sort(key=lambda t: t[0])
+    return [r for _, r in keyed]
