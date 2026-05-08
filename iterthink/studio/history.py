@@ -121,25 +121,6 @@ class MarkdownStudioCompareText:
             return pick
         return older_slice[0].version_id
 
-    # ------------------------------------------------------------------
-    # Tab-state primitives
-    # ------------------------------------------------------------------
-
-    def _activate_tab(self, tab_index: int) -> None:
-        """Set the active tab and sync all associated toolbar chrome.
-
-        Use this for programmatic tab jumps that bypass the full save/flush
-        pipeline of ``_sync_tab_switch_async`` (e.g. after state is already
-        prepared before the jump). Never assign ``_main_tab_index`` or
-        ``_main_tabs.selected_index`` directly outside of this method and
-        ``_sync_tab_switch_async``.
-        """
-        self._main_tab_index = tab_index
-        self._main_tabs.selected_index = tab_index
-        if _ctrl_on_page(self._main_tabs):
-            self._main_tabs.update()
-        self._refresh_tab_toolbar()
-
     def _reset_compare_state(self) -> None:
         """Clear all compare-side state before loading a new document.
 
@@ -509,10 +490,7 @@ class MarkdownStudioCompareText:
             return
         self._select_snapshot_as_candidate(vid)
         if self._main_tab_index != TAB_HISTORY:
-            self._main_tabs.selected_index = TAB_HISTORY
-            if _ctrl_on_page(self._main_tabs):
-                self._main_tabs.update()
-            await self._sync_tab_switch_async(TAB_HISTORY)
+            await self._request_tab_switch_async(TAB_HISTORY)
         self._refresh_compare_diff_immediate()
         self._refresh_compare_bulk_buttons()
         self._refresh_title_bar()
@@ -618,110 +596,6 @@ class MarkdownStudioCompareText:
             self._compare_pdf_peer_snapshot_id = None
         self._rebuild_compare_view()
 
-    def _on_main_tabs_change(self, e: ft.ControlEvent) -> None:
-        try:
-            new_ix = int(e.data)
-        except (TypeError, ValueError):
-            new_ix = int(self._main_tabs.selected_index)
-        self.page.run_task(self._sync_tab_switch_async, new_ix)
-
-    def _build_review_subtab_button(self, label: str, idx: int) -> ft.Container:
-        """Segmented Change/Impact button styled like a TabBar tab.
-
-        Active tab gets the highlight underline; click swaps the panel + refreshes
-        the toolbar so the Review chrome only shows on the Change subtab.
-        """
-        is_active = getattr(self, "_review_subtab_index", 0) == idx
-        return ft.Container(
-            content=ft.Text(
-                label,
-                size=13,
-                weight=ft.FontWeight.W_500,
-                color=config.ON_SURFACE if is_active else config.ON_SURFACE_VARIANT,
-            ),
-            expand=1,
-            height=36,
-            alignment=ft.Alignment.CENTER,
-            on_click=lambda _e, i=idx: self._select_review_subtab(i),
-            border=ft.border.only(
-                bottom=ft.BorderSide(
-                    2,
-                    config.HIGHLIGHT if is_active else ft.Colors.TRANSPARENT,
-                )
-            ),
-        )
-
-    def _select_review_subtab(self, idx: int) -> None:
-        if idx == self._review_subtab_index:
-            return
-        self._review_subtab_index = idx
-        self._review_change_panel.visible = idx == 0
-        self._review_impact_panel.visible = idx == 1
-        if _ctrl_on_page(self._review_change_panel):
-            self._review_change_panel.update()
-        if _ctrl_on_page(self._review_impact_panel):
-            self._review_impact_panel.update()
-        self._refresh_review_subtab_strip()
-        self._refresh_tab_toolbar()
-
-    def _refresh_review_subtab_strip(self) -> None:
-        """Sync visibility of the strip with the main tab + restyle active button."""
-        on_review = self._main_tab_index == TAB_FUTURE
-        self._review_subtab_strip.visible = on_review
-        for idx, btn in (
-            (0, self._review_subtab_change_btn),
-            (1, self._review_subtab_impact_btn),
-        ):
-            is_active = idx == self._review_subtab_index
-            text = btn.content
-            if isinstance(text, ft.Text):
-                text.color = (
-                    config.ON_SURFACE if is_active else config.ON_SURFACE_VARIANT
-                )
-            btn.border = ft.border.only(
-                bottom=ft.BorderSide(
-                    2,
-                    config.HIGHLIGHT if is_active else ft.Colors.TRANSPARENT,
-                )
-            )
-            if _ctrl_on_page(btn):
-                btn.update()
-        if _ctrl_on_page(self._review_subtab_strip):
-            self._review_subtab_strip.update()
-
-    def _refresh_tab_toolbar(self) -> None:
-        """Switch toolbar slot visibility."""
-        on_history = self._main_tab_index == TAB_HISTORY
-        on_review = (
-            self._main_tab_index == TAB_FUTURE
-            and getattr(self, "_review_subtab_index", 0) == 0
-        )
-        self._refresh_review_subtab_strip()
-        self._toolbar_history.visible = on_history
-        self._toolbar_focus_area.visible = self._main_tab_index == TAB_PRESENT
-        self._toolbar_review.visible = on_review
-        # Dropdown menus render in Flet's overlay layer, outside the toolbar Stack. Hide and
-        # disable the inactive dropdown itself so a History menu cannot linger over Review.
-        self._compare_candidate_dropdown.visible = on_history
-        self._compare_newer_dropdown.visible = on_history
-        lack_older = on_history and not bool(self._compare_candidate_dropdown.options)
-        self._compare_candidate_dropdown.disabled = (
-            (not on_history) or self.current_path is None or lack_older
-        )
-        self._compare_newer_dropdown.disabled = (not on_history) or self.current_path is None
-        self._review_candidate_dropdown.visible = on_review
-        self._review_candidate_dropdown.disabled = (not on_review) or not bool(
-            self._review_candidate_dropdown.options
-        )
-        if _ctrl_on_page(self._compare_candidate_dropdown):
-            self._compare_candidate_dropdown.update()
-        if _ctrl_on_page(self._compare_newer_dropdown):
-            self._compare_newer_dropdown.update()
-        if _ctrl_on_page(self._review_candidate_dropdown):
-            self._review_candidate_dropdown.update()
-        if _ctrl_on_page(self._tab_toolbar):
-            self._tab_toolbar.update()
-
     def _set_compare_version_dd_focused(self, focused: bool) -> None:
         self._compare_version_dd_focused = focused
         self._apply_compare_candidate_dropdown_tab_chrome()
@@ -746,9 +620,6 @@ class MarkdownStudioCompareText:
             if _ctrl_on_page(self._compare_newer_dropdown):
                 self._compare_newer_dropdown.update()
 
-    def _on_main_tab_bar_hover(self, e: ft.TabBarHoverEvent) -> None:
-        self._compare_tab_bar_hover_index1 = e.index == TAB_HISTORY and e.hovering
-
     def _on_compare_dropdown_container_hover(self, e: ft.ControlEvent) -> None:
         self._compare_dropdown_hover = str(e.data).lower() == "true"
         self._apply_compare_candidate_dropdown_tab_chrome()
@@ -756,95 +627,6 @@ class MarkdownStudioCompareText:
     def _on_compare_newer_dropdown_container_hover(self, e: ft.ControlEvent) -> None:
         self._compare_newer_dropdown_hover = str(e.data).lower() == "true"
         self._apply_compare_candidate_dropdown_tab_chrome()
-
-    async def _sync_tab_switch_async(self, new_ix: int) -> None:
-        prev = self._main_tab_index
-        if new_ix == prev:
-            return
-
-        self._cancel_autosave_timers()
-        if self.current_path and self._is_dirty():
-            await self.save_file(silent=True, snapshot_reason="pre_switch")
-        # Persist any in-flight Review proposal edits before switching away from Future.
-        if prev == TAB_FUTURE:
-            self._flush_review_edits_if_changed()
-
-        # Leaving Present: nothing to flush (editor is the source of truth).
-        # Leaving History: right fields are read-only carriers; current draft is editor.value.
-        # Leaving Future: right fields are the AI proposal candidate, kept in _compare_editor.value
-        #   in-memory; nothing to persist until Accept.
-
-        # Entering History (TAB_HISTORY): prefer 2nd-newest history autosave (newest ≈ draft), else rebuild.
-        if new_ix == TAB_HISTORY:
-            if prev != TAB_HISTORY:
-                self._compare_newer_version_id = None
-                self._compare_newer_cached_body = ""
-            pick_vid: int | None = None
-            if self.current_path and prev != TAB_HISTORY:
-                with session_scope() as s:
-                    snaps = version_storage.list_snapshots(s, self.current_path.resolve())
-                pick_vid = version_storage.second_newest_history_autosave_version_id(snaps)
-
-            if pick_vid is not None:
-                self._select_snapshot_as_candidate(pick_vid)
-                self._capture_compare_baseline_snapshot()
-            else:
-                if self._compare_candidate_source not in ("snapshot", "pdf_original", "docx_original", "ifc_original"):
-                    # No snapshot selected yet; prime left from draft until user picks a version.
-                    self._compare_candidate_source = "snapshot"
-                    self._compare_editor.value = self.editor.value or ""
-                    self._capture_compare_baseline_snapshot()
-                self._rebuild_compare_view()
-
-        # Entering Present (TAB_PRESENT)
-        elif new_ix == TAB_PRESENT:
-            self._margin_gen += 1
-            # editor.value is authoritative; rebuild margin sparkle
-            await self._debounced_compose_rebuild(self._margin_gen)
-
-        # Entering Future (TAB_FUTURE): auto-load the most recent ai_proposal / legacy ai_staged when nothing is staged.
-        elif new_ix == TAB_FUTURE:
-            already_staged = (
-                self._compare_candidate_source == "ai_preview"
-                and self._pending_ai_accept_action_id
-                and self._compare_snapshot_version_id is not None
-            )
-            if not already_staged:
-                target_vid = self._latest_ai_proposal_vid
-                if target_vid is None and self.current_path:
-                    with session_scope() as s:
-                        snaps = version_storage.list_snapshots(s, self.current_path.resolve())
-                    for sn in snaps:  # newest first
-                        if sn.reason in ("ai_proposal", "ai_staged"):
-                            target_vid = sn.version_id
-                            break
-                if target_vid is not None:
-                    self._select_proposal_as_review_candidate(target_vid)
-                    self._latest_ai_proposal_vid = target_vid
-                else:
-                    # No proposals yet: prime with current draft so Review shows current vs current.
-                    self._compare_candidate_source = "ai_preview"
-                    if not self._compare_editor.value:
-                        self._compare_editor.value = self.editor.value or ""
-                    self._loaded_proposal_sha = version_storage.content_sha256(
-                        self._compare_editor.value or ""
-                    )
-            self._rebuild_future_paragraph_ui()
-
-        self._main_tab_index = new_ix
-        self._hide_all_result_card_overlays()
-        if new_ix != TAB_HISTORY:
-            self._compare_version_dd_focused = False
-            self._compare_dropdown_hover = False
-            self._compare_newer_dropdown_hover = False
-        if new_ix == TAB_PRESENT:
-            self._compare_tab_bar_hover_index1 = False
-        self._apply_compare_candidate_dropdown_tab_chrome()
-        self._refresh_compare_tab_candidate_ui()
-        if new_ix == TAB_HISTORY:
-            self._refresh_plan_compare_bar()
-        self._refresh_tab_toolbar()
-        self._refresh_title_bar()
 
     def _compare_para_text_style(self) -> ft.TextStyle:
         return ft.TextStyle(
@@ -2009,13 +1791,7 @@ class MarkdownStudioCompareText:
         self._hide_prompt_footer(footer)
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)
-        # Activate Future tab before rebuilding so _rebuild_future_paragraph_ui
-        # and _refresh_compare_tab_candidate_ui see the correct _main_tab_index.
-        # State (_compare_editor, source, vid) is already prepared above, so we
-        # bypass _sync_tab_switch_async intentionally.
-        self._activate_tab(TAB_FUTURE)
-        self._rebuild_future_paragraph_ui()
-        self._refresh_compare_tab_candidate_ui()
+        await self._request_tab_switch_async(TAB_FUTURE)
         if _ctrl_on_page(self._compare_editor):
             self._compare_editor.update()
         self._refresh_compare_diff_immediate()

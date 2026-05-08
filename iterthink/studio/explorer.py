@@ -1188,13 +1188,15 @@ class MarkdownStudioExplorer:
             # Jump straight to the History tab showing the imported version.
             self._select_snapshot_as_candidate(after_import_vid)
             self._refresh_compare_tab_candidate_ui()
-            self._activate_tab(TAB_HISTORY)
+            await self._request_tab_switch_async(TAB_HISTORY)
             self._refresh_compare_diff_immediate()
         else:
             # Normal open: land on the Compose (Present) tab.
-            self._activate_tab(TAB_PRESENT)
-            self._margin_gen += 1
-            await self._debounced_compose_rebuild(self._margin_gen)
+            was_present = self._main_tab_index == TAB_PRESENT
+            await self._request_tab_switch_async(TAB_PRESENT)
+            if was_present:
+                self._margin_gen += 1
+                await self._debounced_compose_rebuild(self._margin_gen)
             self._refresh_compare_diff_immediate()
 
         self._refresh_compare_bulk_buttons()

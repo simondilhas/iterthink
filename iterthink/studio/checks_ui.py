@@ -15,7 +15,7 @@ from iterthink.compare.layout import aligned_compare_pairs
 from iterthink.ai.ollama_util import ollama_error_message
 from iterthink.compare.paragraph_align import compute_hash
 from .constants import (
-    COMPARE_EVAL_COL_W_WIDE,
+    COMPARE_EVAL_COL_W,
     KI_PILL_TEXT_SIZE,
     RESULT_CARD_HIDE_DELAY_SEC,
     TAB_FUTURE,
@@ -104,7 +104,7 @@ class MarkdownStudioChecksUi:
         # Stay put if user is already on a tab with eval cells (History or Review);
         # otherwise jump to History so the symbols are visible.
         if self._main_tab_index not in (TAB_HISTORY, TAB_FUTURE):
-            self._activate_tab(TAB_HISTORY)
+            await self._request_tab_switch_async(TAB_HISTORY)
         # Need a candidate to analyse against the baseline.
         if not self._compare_right_fields:
             self._rebuild_compare_paragraph_ui()
@@ -131,6 +131,8 @@ class MarkdownStudioChecksUi:
                 return
             if 0 <= idx < len(self._check_results.get(check_id, [])):
                 self._check_results[check_id][idx] = payload
+            if self._main_tab_index not in (TAB_HISTORY, TAB_FUTURE):
+                return
             self._refresh_eval_cell(idx)
             self._refresh_analyse_button_state()
 
@@ -151,9 +153,12 @@ class MarkdownStudioChecksUi:
             if my_gen == self._check_run_gen.get(check_id):
                 self._check_running[check_id] = False
                 self._refresh_analyse_button_state()
-                self._refresh_all_eval_cells()
+                if self._main_tab_index in (TAB_HISTORY, TAB_FUTURE):
+                    self._refresh_all_eval_cells()
                 if run_ok:
-                    pass
+                    results = self._check_results.get(check_id) or []
+                    summary = self._build_document_check_summary_text(check, results)
+                    self._append_chat_line("assistant", summary)
 
     # ------------------------------------------------------------------
     # Eval cell (leftmost cell in compare rows)
@@ -161,7 +166,7 @@ class MarkdownStudioChecksUi:
 
     def _build_eval_cell(self, idx: int) -> ft.Container:
         cid = self._active_check_id
-        col_w = 36 if self._main_tab_index == TAB_HISTORY else COMPARE_EVAL_COL_W_WIDE
+        col_w = 36 if self._main_tab_index == TAB_HISTORY else COMPARE_EVAL_COL_W
         host = ft.Container(
             width=col_w,
             alignment=ft.Alignment.TOP_CENTER,

@@ -51,6 +51,7 @@ from .focus_area import MarkdownStudioCompose
 from .history import MarkdownStudioCompareText
 from .ki_sidebar import MarkdownStudioKiSidebar
 from .llm_backend import MarkdownStudioLlmBackend, build_llm_tier_tabs
+from .main_workspace_tabs import MainWorkspaceTabsMixin
 from .shell import MarkdownStudioShell
 from .sidebars import MarkdownStudioSidebars
 from .util import (
@@ -76,6 +77,7 @@ class MarkdownStudio(
     MarkdownStudioShell,
     MarkdownStudioCompose,
     MarkdownStudioCompareText,
+    MainWorkspaceTabsMixin,
     MarkdownStudioSidebars,
     MarkdownStudioKiSidebar,
     MarkdownStudioExplorer,
@@ -128,10 +130,8 @@ class MarkdownStudio(
 
         self._margin_gen: int = 0
         self._compare_diff_gen: int = 0
-        self._main_tab_index: int = TAB_PRESENT
+        self._init_main_workspace_tab_fields()
         self._file_drift_dialog_open: bool = False
-        self._review_subtab_index: int = 0
-        self._compare_tab_bar_hover_index1: bool = False
         self._compare_dropdown_hover: bool = False
         self._compare_version_dd_focused: bool = False
         self._compare_candidate_source: CompareCandidateSource = "draft"
@@ -526,6 +526,29 @@ class MarkdownStudio(
             expand=True,
             spacing=0,
         )
+        # Review Difference | Impact strip — lives inside the Review TabBarView page (below filename band).
+        self._review_subtab_change_btn = self._build_review_subtab_button("Difference", 0)
+        self._review_subtab_impact_btn = self._build_review_subtab_button("Impact", 1)
+        self._review_subtab_strip = ft.Container(
+            bgcolor=config.SURFACE,
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [self._review_subtab_change_btn, self._review_subtab_impact_btn],
+                        spacing=0,
+                        expand=True,
+                    ),
+                    ft.Divider(
+                        height=1,
+                        thickness=1,
+                        color=ui_theme.outline_muted(alpha=0.22),
+                    ),
+                ],
+                spacing=0,
+                tight=True,
+            ),
+        )
+
         # Future tab: separate listview and body
         self._future_rows_listview = ft.ListView(
             expand=True,
@@ -556,13 +579,6 @@ class MarkdownStudio(
                 "Impact analysis coming soon",
                 size=13,
                 color=config.ON_SURFACE_VARIANT,
-            ),
-        )
-        self._future_tab_body = ft.Container(
-            expand=True,
-            content=ft.Stack(
-                [self._review_change_panel, self._review_impact_panel],
-                expand=True,
             ),
         )
 
@@ -615,14 +631,35 @@ class MarkdownStudio(
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
+        # Under main History | Focus | Review tabs on every mode (rename targets this row).
+        self._workspace_filename_band = ft.Container(
+            bgcolor=config.SURFACE,
+            padding=ft.padding.symmetric(horizontal=12, vertical=6),
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Container(expand=True),
+                            self._compose_tab_filename_row,
+                            ft.Container(expand=True),
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        expand=True,
+                    ),
+                    ft.Divider(
+                        height=1,
+                        thickness=1,
+                        color=ui_theme.outline_muted(alpha=0.22),
+                    ),
+                ],
+                spacing=0,
+                tight=True,
+            ),
+        )
         # ── Tab-specific toolbar (below tab bar) ─────────────────────────────
-        _tb_text_style = ft.TextStyle(size=12, color=config.ON_SURFACE_VARIANT)
-        _tb_icon_color = config.ON_SURFACE_VARIANT
-        _tb_icon_size = 14
         _tb_pad = ft.padding.symmetric(horizontal=12, vertical=4)
 
         _tb_label_style = ft.TextStyle(size=12, color=config.ON_SURFACE_VARIANT)
-        _tb_col_label = lambda t: ft.Text(t, style=_tb_label_style)  # noqa: E731
 
         # History: older (left) + newer (right) version dropdowns
         self._toolbar_history = ft.Container(
@@ -659,65 +696,64 @@ class MarkdownStudio(
             ),
             padding=_tb_pad,
             expand=True,
-            visible=False,
         )
 
-        # Focus Area: filename + inline rename, horizontally centered in the toolbar strip
-        self._toolbar_focus_area = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Container(expand=True),
-                    self._compose_tab_filename_row,
-                    ft.Container(expand=True),
-                ],
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                expand=True,
-            ),
-            padding=_tb_pad,
-            expand=True,
-            visible=True,
-        )
+        self._toolbar_present_spacer = ft.Container(height=0, expand=True)
+        self._toolbar_review_spacer = ft.Container(height=0, expand=True)
 
-        # Review: left = "Current Version"  |  right = proposal/import selector + bulk accept/decline
-        self._toolbar_review = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Container(
-                        content=ft.Text("Current Version", style=_tb_label_style),
-                        expand=1,
-                        alignment=ft.Alignment(0, 0),
-                    ),
-                    ft.Container(
-                        content=ft.Row(
-                            [
-                                self._review_candidate_dropdown,
-                                self._compare_approve_all_btn,
-                                self._compare_decline_all_btn,
-                            ],
-                            spacing=4,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            expand=True,
-                        ),
-                        expand=1,
-                    ),
-                ],
-                spacing=0,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                expand=True,
-            ),
-            padding=_tb_pad,
-            expand=True,
-            visible=False,
+        # Only History shows Older/Newer here; Focus uses filename band only; Review uses rows below.
+        self._tab_toolbar_inner = ft.Container(
+            content=self._toolbar_present_spacer,
+            height=0,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
         )
-
         self._tab_toolbar = ft.Container(
+            visible=False,
             bgcolor=config.SURFACE,
             content=ft.Column(
                 [
-                    ft.Stack(
-                        [self._toolbar_history, self._toolbar_focus_area, self._toolbar_review],
-                        clip_behavior=ft.ClipBehavior.HARD_EDGE,
-                        height=44,
+                    self._tab_toolbar_inner,
+                    ft.Divider(
+                        height=1,
+                        thickness=1,
+                        color=ui_theme.outline_muted(alpha=0.22),
+                    ),
+                ],
+                spacing=0,
+                tight=True,
+            ),
+        )
+        self._review_difference_chrome_row = ft.Container(
+            visible=True,
+            bgcolor=config.SURFACE,
+            padding=_tb_pad,
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Container(
+                                content=ft.Text("Current", style=_tb_label_style),
+                                expand=1,
+                                alignment=ft.Alignment(-1, 0),
+                            ),
+                            ft.Container(
+                                content=ft.Row(
+                                    [
+                                        ft.Text("Candidate", style=_tb_label_style),
+                                        self._review_candidate_dropdown,
+                                        self._compare_approve_all_btn,
+                                        self._compare_decline_all_btn,
+                                    ],
+                                    spacing=8,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                    expand=True,
+                                ),
+                                expand=1,
+                            ),
+                        ],
+                        spacing=12,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        expand=True,
                     ),
                     ft.Divider(
                         height=1,
@@ -727,6 +763,21 @@ class MarkdownStudio(
                 ],
                 spacing=0,
                 tight=True,
+            ),
+        )
+        self._future_tab_body = ft.Container(
+            expand=True,
+            content=ft.Column(
+                [
+                    self._review_subtab_strip,
+                    self._review_difference_chrome_row,
+                    ft.Stack(
+                        [self._review_change_panel, self._review_impact_panel],
+                        expand=True,
+                    ),
+                ],
+                expand=True,
+                spacing=0,
             ),
         )
         # ─────────────────────────────────────────────────────────────────────
@@ -775,34 +826,10 @@ class MarkdownStudio(
             padding=ft.padding.only(bottom=2),
             content=self._main_tab_bar,
         )
-        # Review subtab strip: segmented Change | Impact bar that sits directly under
-        # the main tab bar (above the per-tab toolbar). Only visible on Review.
-        self._review_subtab_change_btn = self._build_review_subtab_button("Change", 0)
-        self._review_subtab_impact_btn = self._build_review_subtab_button("Impact", 1)
-        self._review_subtab_strip = ft.Container(
-            bgcolor=config.SURFACE,
-            visible=False,
-            content=ft.Column(
-                [
-                    ft.Row(
-                        [self._review_subtab_change_btn, self._review_subtab_impact_btn],
-                        spacing=0,
-                        expand=True,
-                    ),
-                    ft.Divider(
-                        height=1,
-                        thickness=1,
-                        color=ui_theme.outline_muted(alpha=0.22),
-                    ),
-                ],
-                spacing=0,
-                tight=True,
-            ),
-        )
         self._tabs_inner_column = ft.Column(
             [
                 self._sticky_tab_header,
-                self._review_subtab_strip,
+                self._workspace_filename_band,
                 self._tab_toolbar,
                 self._tab_bar_view,
             ],
@@ -993,6 +1020,40 @@ class MarkdownStudio(
         self._pill_row_discuss = ft.Row(spacing=4, wrap=True, run_spacing=4)
         self._pill_row_change = ft.Row(spacing=4, wrap=True, run_spacing=4)
         self._pill_row_analyse = ft.Row(spacing=4, wrap=True, run_spacing=4)
+        self._ki_act_panel = ft.Column(
+            [
+                ft.Text(
+                    "Ready to act on this change?",
+                    size=13,
+                    weight=ft.FontWeight.W_600,
+                    color=config.ON_SURFACE,
+                ),
+                ft.Text(
+                    "Connect {yourcompany}os to turn document changes into structured workflows — automatically routed to the right people.",
+                    size=12,
+                    color=config.ON_SURFACE_VARIANT,
+                    selectable=True,
+                ),
+                ft.TextButton(
+                    content="Connect {yourcompany}os \u2192",
+                    url="https://www.yourcompanyos.io",
+                    tooltip="https://www.yourcompanyos.io",
+                    style=ft.ButtonStyle(
+                        color=config.PRIMARY_COLOR,
+                        padding=ft.padding.symmetric(horizontal=0, vertical=0),
+                    ),
+                ),
+            ],
+            spacing=10,
+            tight=True,
+        )
+        self._ki_act_container = ft.Container(
+            padding=ft.padding.symmetric(
+                horizontal=4,
+                vertical=KI_TAB_PAGE_PAD_V_PX,
+            ),
+            content=self._ki_act_panel,
+        )
         # Analyse buttons keyed by check_id; updated by _refresh_analyse_button_state.
         self._analyse_buttons: dict[str, ft.FilledButton] = {}
         self._analyse_button_progress: dict[str, ft.ProgressRing] = {}
@@ -1001,6 +1062,7 @@ class MarkdownStudio(
             float(KI_TAB_BODY_MIN_HEIGHT_PX),
             float(KI_TAB_BODY_MIN_HEIGHT_PX),
             float(KI_TAB_BODY_MIN_HEIGHT_PX),
+            140.0,
         ]
 
         self._ki_tab_bar_view = ft.TabBarView(
@@ -1026,6 +1088,7 @@ class MarkdownStudio(
                     ),
                     content=self._pill_row_analyse,
                 ),
+                self._ki_act_container,
             ],
             height=float(KI_TAB_BODY_MIN_HEIGHT_PX + 2 * KI_TAB_PAGE_PAD_V_PX),
         )
@@ -1042,6 +1105,7 @@ class MarkdownStudio(
                 (ft.Icons.CHAT_BUBBLE, "Discuss"),
                 (ft.Icons.MODE_EDIT, "Change"),
                 (ft.Icons.INSIGHTS, "Analyse"),
+                (ft.Icons.PRECISION_MANUFACTURING, "Act"),
             ]
         ):
             sel = i == 0
@@ -1086,7 +1150,7 @@ class MarkdownStudio(
                 padding=ft.padding.only(top=float(KI_TAB_BAR_TO_PILLS_GAP_PX)),
                 content=self._ki_tab_bar_view,
             ),
-            length=3,
+            length=4,
             selected_index=0,
             on_change=self._on_ki_tabs_change,
         )
@@ -1183,6 +1247,7 @@ class MarkdownStudio(
         self._pill_row_discuss.on_size_change = self._on_ki_pill_row_size_discuss
         self._pill_row_change.on_size_change = self._on_ki_pill_row_size_change
         self._pill_row_analyse.on_size_change = self._on_ki_pill_row_size_analyse
+        self._ki_act_container.on_size_change = self._on_ki_pill_row_size_act
 
         self.right_panel = ft.Container(
             width=SIDEBAR_EXPANDED_WIDTH_PX,
@@ -1273,11 +1338,6 @@ class MarkdownStudio(
         self.filename_text.color = config.ON_SURFACE
         self.app_symbol.color = config.ON_SURFACE
         self.app_symbol.color_blend_mode = ft.BlendMode.SRC_IN
-        self._main_tab_bar.indicator_color = config.HIGHLIGHT
-        self._main_tab_bar.divider_color = ui_theme.outline_muted(alpha=0.28)
-        self._main_tab_bar.label_color = config.ON_SURFACE
-        self._main_tab_bar.unselected_label_color = config.ON_SURFACE_VARIANT
-        self._main_tab_bar.overlay_color = ft.Colors.with_opacity(0.06, config.ON_SURFACE)
         dd_ts = ft.TextStyle(size=12, height=1.0, color=config.ON_SURFACE)
         self._compare_candidate_dropdown.text_style = dd_ts
         self._compare_newer_dropdown.text_style = dd_ts
@@ -1294,7 +1354,6 @@ class MarkdownStudio(
         self._review_candidate_dropdown.menu_style = self._compare_candidate_dropdown.menu_style
         self._sync_side_panel_chrome()
         self.center_panel.bgcolor = config.SURFACE
-        self._sticky_tab_header.bgcolor = config.SURFACE
         self._apply_compare_candidate_dropdown_tab_chrome()
         self._ki_topic_top_bar.bgcolor = config.SIDEBAR_SURFACE
         self._ki_sidebar_well.bgcolor = config.SURFACE
@@ -1317,7 +1376,7 @@ class MarkdownStudio(
         self._chat_input.focused_bgcolor = config.SURFACE
         self._chat_input.border_color = ui_theme.outline_muted()
         self._tree_search_bar.bgcolor = config.SURFACE
-        self._tab_toolbar.bgcolor = config.SURFACE
+        self._apply_main_workspace_tab_chrome_theme()
         self._apply_ki_tier_tab_bar_theme()
         self.left_panel.content = self._build_left_column()
         self.right_panel.content = self._build_right_column()
@@ -1329,8 +1388,6 @@ class MarkdownStudio(
             self.filename_text.update()
         if _ctrl_on_page(self.app_symbol):
             self.app_symbol.update()
-        if _ctrl_on_page(self._main_tab_bar):
-            self._main_tab_bar.update()
         if self._main_tab_index == TAB_HISTORY and _ctrl_on_page(self._compare_candidate_dropdown):
             self._compare_candidate_dropdown.update()
         if self._main_tab_index == TAB_HISTORY and _ctrl_on_page(self._compare_newer_dropdown):
@@ -1349,8 +1406,6 @@ class MarkdownStudio(
             self._tree_search_bar.update()
         if _ctrl_on_page(self._chat_input):
             self._chat_input.update()
-        if _ctrl_on_page(self._tab_toolbar):
-            self._tab_toolbar.update()
         if self._header_shell and _ctrl_on_page(self._header_shell):
             self._header_shell.update()
         if self._menu_bar and _ctrl_on_page(self._menu_bar):

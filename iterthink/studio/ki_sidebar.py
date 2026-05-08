@@ -36,6 +36,7 @@ class MarkdownStudioKiSidebar:
         except (TypeError, ValueError):
             self._ki_topic_index = int(self._ki_topic_tabs.selected_index)
         self._sync_ki_topic_mode_buttons()
+        self._apply_ki_tab_bar_view_height()
 
     def _sync_ki_topic_mode_buttons(self) -> None:
         ix = self._ki_topic_index
@@ -59,13 +60,15 @@ class MarkdownStudioKiSidebar:
                 c.update()
 
     def _set_ki_topic(self, index: int) -> None:
-        ix = max(0, min(2, int(index)))
+        max_index = max(0, len(getattr(self, "_ki_topic_mode_buttons", [])) - 1)
+        ix = max(0, min(max_index, int(index)))
         self._ki_topic_index = ix
         if self._ki_topic_tabs.selected_index != ix:
             self._ki_topic_tabs.selected_index = ix
         if _ctrl_on_page(self._ki_topic_tabs):
             self._ki_topic_tabs.update()
         self._sync_ki_topic_mode_buttons()
+        self._apply_ki_tab_bar_view_height()
 
     def _on_ki_pill_row_size_discuss(self, e: ft.LayoutSizeChangeEvent) -> None:
         self._ki_tab_body_heights[0] = max(float(e.height), 28.0)
@@ -79,13 +82,13 @@ class MarkdownStudioKiSidebar:
         self._ki_tab_body_heights[2] = max(float(e.height), 28.0)
         self._apply_ki_tab_bar_view_height()
 
+    def _on_ki_pill_row_size_act(self, e: ft.LayoutSizeChangeEvent) -> None:
+        self._ki_tab_body_heights[3] = max(float(e.height), 28.0)
+        self._apply_ki_tab_bar_view_height()
+
     def _apply_ki_tab_bar_view_height(self) -> None:
-        inner = max(
-            self._ki_tab_body_heights[0],
-            self._ki_tab_body_heights[1],
-            self._ki_tab_body_heights[2],
-            float(KI_TAB_BODY_MIN_HEIGHT_PX),
-        )
+        ix = max(0, min(len(self._ki_tab_body_heights) - 1, int(self._ki_topic_index)))
+        inner = max(self._ki_tab_body_heights[ix], float(KI_TAB_BODY_MIN_HEIGHT_PX))
         h = inner + 2 * float(KI_TAB_PAGE_PAD_V_PX)
         cur = float(self._ki_tab_bar_view.height or 0)
         if abs(cur - h) < 0.75:
