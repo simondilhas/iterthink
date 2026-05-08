@@ -7,7 +7,8 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
-from iterthink import config, store_db
+from iterthink import config
+from iterthink.persistence import store_db
 
 
 def _repo_root() -> Path:

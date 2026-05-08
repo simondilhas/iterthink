@@ -37,6 +37,8 @@ dependencies = [
     "rapidfuzz>=3.6.0",
     "keyring>=25.0",
     "opencv-python-headless>=4.9.0",
+    "fastembed>=0.8.0",
+    "sqlite-vec>=0.1.9",
 ]
 
 [project.urls]
@@ -51,7 +53,14 @@ where = ["."]
 include = ["iterthink*"]
 
 [tool.setuptools.package-data]
-iterthink = ["assets/*.png", "assets/*.svg", "help.md", "defaults/*.yaml", "LICENSE"]
+iterthink = [
+    "assets/*.png",
+    "assets/*.svg",
+    "help.md",
+    "defaults/*.yaml",
+    "LICENSE",
+    "embedded_models/**/*",
+]
 
 [tool.flet]
 product = "Iterthink"

@@ -5,9 +5,10 @@ import sys
 import flet as ft
 from flet.controls.types import PagePlatform
 
-from iterthink import config, ui_theme
+from iterthink import config
+from iterthink.studio import ui_theme
 from iterthink.db import bootstrap
-from iterthink.ollama_util import ollama_error_message
+from iterthink.ai.ollama_util import ollama_error_message
 from iterthink.studio import MarkdownStudio
 
 
@@ -54,6 +55,9 @@ async def main(page: ft.Page) -> None:
     def on_window_event(e: ft.WindowEvent) -> None:
         if e.type == ft.WindowEventType.RESIZED:
             studio.reflow_columns()
+        elif e.type == ft.WindowEventType.FOCUS:
+            if not page.web:
+                page.run_task(studio._check_file_drift_async)
         elif e.type in (ft.WindowEventType.BLUR, ft.WindowEventType.CLOSE):
             page.run_task(_save_on_boundary)
 
@@ -72,3 +76,5 @@ async def main(page: ft.Page) -> None:
 
     await _ollama_startup_check()
     page.run_task(studio._refresh_ki_chat_model_dropdown)
+    if not page.web:
+        page.run_task(studio._periodic_file_drift_loop)

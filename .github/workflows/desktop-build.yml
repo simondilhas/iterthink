@@ -65,6 +65,12 @@ jobs:
       - name: Sync dependencies
         run: uv sync
 
+      - name: Prefetch embedding model
+        run: uv run python scripts/prefetch_embed_model.py
+
+      - name: Verify sqlite-vec embedding cache
+        run: uv run python scripts/verify_embedding_cache.py
+
       - name: Set build version
         shell: bash
         run: |

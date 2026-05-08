@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from iterthink.db.base import Base
@@ -21,6 +21,10 @@ class Document(Base):
     path_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     resolved_path: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
+    # Last canonical .md state after app read/write (detect external edits via stat + sha).
+    last_disk_mtime_ns: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_disk_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_disk_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     versions: Mapped[list["DocumentVersion"]] = relationship(
         "DocumentVersion",

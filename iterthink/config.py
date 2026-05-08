@@ -36,7 +36,6 @@ DOCUMENTS: Path = Path.home() / "Documents"
 STORE_DIR: Path = DOCUMENTS / ".iterthink"
 STORE_DB_PATH: Path = STORE_DIR / "store.sqlite3"
 DEFAULT_OLLAMA_MODEL: str = "llama3:8B"
-DEFAULT_OLLAMA_EMBED_MODEL: str = "nomic-embed-text-v2-moe"
 OLLAMA_HOST: str | None = None
 
 APPEARANCE: str = "dark"
@@ -139,7 +138,7 @@ def _legacy_dark_palette_overrides(merged: dict[str, Any]) -> dict[str, str]:
 def refresh() -> None:
     """Reload bootstrap YAML into module-level settings (paths, colors, defaults)."""
     global DOCUMENTS, STORE_DIR, STORE_DB_PATH
-    global DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_EMBED_MODEL, OLLAMA_HOST
+    global DEFAULT_OLLAMA_MODEL, OLLAMA_HOST
     global APPEARANCE, IS_LIGHT
     global PAGE_BG, PRIMARY_COLOR, HIGHLIGHT, ON_PRIMARY, ON_SURFACE, ON_SURFACE_SOFT
     global ON_SURFACE_VARIANT, OUTLINE, SUCCESS
@@ -152,14 +151,10 @@ def refresh() -> None:
     STORE_DB_PATH = STORE_DIR / "store.sqlite3"
 
     dm = merged.get("default_ollama_model")
-    em = merged.get("default_ollama_embed_model")
     if not isinstance(dm, str) or not dm.strip():
         raise ValueError("default_ollama_model must be a non-empty string.")
-    if not isinstance(em, str) or not em.strip():
-        raise ValueError("default_ollama_embed_model must be a non-empty string.")
 
     DEFAULT_OLLAMA_MODEL = (os.environ.get("OLLAMA_MODEL") or dm).strip()
-    DEFAULT_OLLAMA_EMBED_MODEL = (os.environ.get("OLLAMA_EMBED_MODEL") or em).strip()
 
     host_env = os.environ.get("OLLAMA_HOST")
     if host_env is not None and str(host_env).strip() != "":

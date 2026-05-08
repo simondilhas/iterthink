@@ -19,6 +19,9 @@ __pycache__/
 .env.*
 !.env.example
 
+# Bundled ONNX weights (CI prefetch; large — not committed)
+iterthink/embedded_models/
+
 # Local databases / caches
 *.db
 *.sqlite

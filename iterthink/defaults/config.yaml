@@ -1,5 +1,5 @@
 # App config (bootstrap file). Editable in Settings or here.
-# Precedence: OLLAMA_MODEL, OLLAMA_EMBED_MODEL, OLLAMA_HOST override these when set.
+# Precedence: OLLAMA_MODEL, OLLAMA_HOST override these when set.
 #
 # Theme: appearance selects theme.dark vs theme.light. Legacy top-level keys
 # (higlight_color, surface, …) still override the dark palette when present.
@@ -8,7 +8,6 @@ documents_root: ~/Documents
 store_dir: ~/Documents/.iterthink
 
 default_ollama_model: llama3:8B
-default_ollama_embed_model: nomic-embed-text-v2-moe
 ollama_host: null
 
 appearance: dark
