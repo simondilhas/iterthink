@@ -11,12 +11,13 @@ import httpx
 
 from iterthink import config
 from iterthink import prompts
-from iterthink.compare_layout import pair_paragraphs_for_compare
+from iterthink.compare_layout import aligned_review_rows, pair_paragraphs_for_compare
 from iterthink.diff_card import build_new_side_spans, build_old_side_spans, build_unified_spans
 from iterthink.db.session import session_scope
 from iterthink.paragraph_align import compute_hash
 from iterthink import paragraph_compare
 from iterthink import version_storage
+from iterthink.version_storage import SnapshotInfo
 from iterthink.margin import (
     distribute_heights,
     estimate_total_editor_height,
@@ -40,12 +41,11 @@ from iterthink.studio_focus_area import (
     _ki_topic_index_for_prompt_topic,
     _strip_change_topic_preamble,
 )
+from iterthink import ui_theme
 from iterthink.studio_constants import (
     COMPARE_ACTION_GRID_CELL,
-    COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE,
     COMPARE_COL_FONT_SIZE,
     COMPARE_COL_LINE_HEIGHT,
-    COMPARE_KEY_CANDIDATE as _COMPARE_KEY_CANDIDATE,
     COMPARE_KEY_CURRENT as _COMPARE_KEY_CURRENT,
     COMPARE_PILL_COL_W,
     DIFF_SPAN_CHAR_CAP as _DIFF_SPAN_CHAR_CAP,
@@ -69,117 +69,211 @@ class MarkdownStudioCompareText:
         return self._working_document_text() != self.last_saved_text
 
     def _editor_buffer(self) -> str:
-        if self._main_tab_index in (TAB_HISTORY, TAB_FUTURE):
+        if self._main_tab_index == TAB_HISTORY:
+            return self._history_newer_side_text() or ""
+        if self._main_tab_index == TAB_FUTURE:
             return self._compare_editor.value or ""
         return self.editor.value or ""
 
+    @staticmethod
+    def _history_compare_snapshots(snaps: list[SnapshotInfo]) -> list[SnapshotInfo]:
+        return [s for s in snaps if s.reason != "ai_proposal"]
+
+    @staticmethod
+    def _snapshots_strictly_older_than(
+        newest_first: list[SnapshotInfo], newer_version_id: int | None
+    ) -> list[SnapshotInfo]:
+        if newer_version_id is None:
+            return list(newest_first)
+        for i, s in enumerate(newest_first):
+            if s.version_id == newer_version_id:
+                return newest_first[i + 1 :]
+        return list(newest_first)
+
+    def _history_newer_side_text(self) -> str:
+        if self._compare_newer_version_id is None:
+            return self.editor.value or ""
+        return self._compare_newer_cached_body or ""
+
+    def _history_default_older_version_id(
+        self, snaps_all: list[SnapshotInfo], older_slice: list[SnapshotInfo]
+    ) -> int | None:
+        if not older_slice:
+            return None
+        allowed = {s.version_id for s in older_slice}
+        pick = version_storage.second_newest_history_autosave_version_id(snaps_all)
+        if pick is not None and pick in allowed:
+            return pick
+        return older_slice[0].version_id
+
     def _refresh_compare_tab_candidate_ui(self) -> None:
-        _st = COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE
+        _st = ui_theme.compare_candidate_dropdown_option_style()
 
-        # ── History dropdown: version snapshots only ──────────────────────────
-        history_opts: list[ft.dropdown.Option] = [
-            ft.dropdown.Option(key=_COMPARE_KEY_CURRENT, text="Current draft", style=_st)
-        ]
-        if self.current_path:
-            with session_scope() as s:
-                snaps = version_storage.list_snapshots(s, self.current_path.resolve())
-            snap_opts: list[ft.dropdown.Option] = []
-            import_opts: list[ft.dropdown.Option] = []
-            for sn in snaps:
-                if sn.reason == "ai_proposal":
-                    continue
-                row_text = version_storage.snapshot_dropdown_text(sn)
-                bucket = version_storage.snapshot_bucket(sn)
-                if bucket == "import":
-                    import_opts.append(
-                        ft.dropdown.Option(
-                            key=str(sn.version_id),
-                            text=f"Import - {row_text}",
-                            style=_st,
+        # History / Review dropdowns live in a Stack under the tab bar; only the active tab's
+        # toolbar is visible. Mutating + .update() on a hidden Dropdown can surface its menu
+        # overlay (e.g. History flash on Focus Area). Gate each block to its tab.
+        if self._main_tab_index == TAB_HISTORY:
+            # ── History: newer (right) + older (left) dropdowns ─────────────────────
+
+            def snapshot_option_rows(slist: list[SnapshotInfo]) -> list[ft.dropdown.Option]:
+                snap_opts: list[ft.dropdown.Option] = []
+                import_opts: list[ft.dropdown.Option] = []
+                for sn in slist:
+                    row_text = version_storage.snapshot_dropdown_text(sn)
+                    bucket = version_storage.snapshot_bucket(sn)
+                    if bucket == "import":
+                        import_opts.append(
+                            ft.dropdown.Option(
+                                key=str(sn.version_id),
+                                text=f"Import - {row_text}",
+                                style=_st,
+                            )
                         )
-                    )
+                    else:
+                        snap_opts.append(
+                            ft.dropdown.Option(
+                                key=str(sn.version_id),
+                                text=row_text,
+                                style=_st,
+                            )
+                        )
+                snap_opts.extend(import_opts)
+                return snap_opts
+
+            snaps_all: list[SnapshotInfo] = []
+            if self.current_path:
+                with session_scope() as s:
+                    snaps_all = version_storage.list_snapshots(s, self.current_path.resolve())
+            filt = self._history_compare_snapshots(snaps_all)
+
+            newer_opts: list[ft.dropdown.Option] = [
+                ft.dropdown.Option(key=_COMPARE_KEY_CURRENT, text="Current draft", style=_st)
+            ]
+            newer_opts.extend(snapshot_option_rows(filt))
+            self._compare_newer_dropdown.options = newer_opts
+            newer_keys = {o.key for o in newer_opts}
+            if self._compare_newer_version_id is not None:
+                nk = str(self._compare_newer_version_id)
+                if nk in newer_keys:
+                    self._compare_newer_dropdown.value = nk
                 else:
-                    snap_opts.append(
-                        ft.dropdown.Option(
-                            key=str(sn.version_id),
-                            text=row_text,
-                            style=_st,
-                        )
-                    )
-            history_opts.extend(snap_opts)
-            history_opts.extend(import_opts)
+                    self._compare_newer_version_id = None
+                    self._compare_newer_cached_body = ""
+                    self._compare_newer_dropdown.value = _COMPARE_KEY_CURRENT
+            else:
+                self._compare_newer_dropdown.value = _COMPARE_KEY_CURRENT
 
-        self._compare_candidate_dropdown.options = history_opts
-        h_keys = {o.key for o in history_opts}
-        if self._compare_candidate_source in ("snapshot", "pdf_original", "docx_original"):
-            sk = (
-                str(self._compare_snapshot_version_id)
-                if self._compare_snapshot_version_id is not None
-                else None
-            )
-            if sk is None and self._compare_pdf_peer_snapshot_id is not None:
-                sk = str(self._compare_pdf_peer_snapshot_id)
-            self._compare_candidate_dropdown.value = sk if sk in h_keys else _COMPARE_KEY_CURRENT
-        else:
-            self._compare_candidate_dropdown.value = _COMPARE_KEY_CURRENT
-        if _ctrl_on_page(self._compare_candidate_dropdown):
-            self._compare_candidate_dropdown.update()
+            if self._compare_newer_version_id is not None:
+                try:
+                    with session_scope() as s:
+                        self._compare_newer_cached_body = version_storage.load_version_body(
+                            s, self._compare_newer_version_id
+                        )
+                except BaseException:
+                    self._compare_newer_cached_body = ""
 
-        # ── Review dropdown: every persisted ai_proposal + every manual import ─
-        review_opts: list[ft.dropdown.Option] = []
-        if self.current_path:
-            with session_scope() as s:
-                snaps = version_storage.list_snapshots(s, self.current_path.resolve())
-            for sn in snaps:
-                row_text = version_storage.snapshot_dropdown_text(sn)
-                if sn.reason == "ai_proposal":
-                    review_opts.append(
-                        ft.dropdown.Option(
-                            key=str(sn.version_id),
-                            text=f"AI - {row_text}",
-                            style=_st,
+            older_slice = self._snapshots_strictly_older_than(filt, self._compare_newer_version_id)
+            older_opts = snapshot_option_rows(older_slice)
+            self._compare_candidate_dropdown.options = older_opts
+            o_keys = {o.key for o in older_opts}
+
+            cur_old = self._compare_snapshot_version_id
+            sk = str(cur_old) if cur_old is not None else None
+            if sk in o_keys:
+                self._compare_candidate_dropdown.value = sk
+            elif older_slice:
+                dv = self._history_default_older_version_id(snaps_all, older_slice)
+                if dv is not None:
+                    if cur_old != dv:
+                        self._select_snapshot_as_candidate(dv)
+                    self._compare_candidate_dropdown.value = str(dv)
+                else:
+                    self._compare_candidate_dropdown.value = None
+            else:
+                self._compare_snapshot_version_id = None
+                self._compare_pdf_peer_snapshot_id = None
+                self._pending_ai_accept_action_id = None
+                self._compare_candidate_source = "snapshot"
+                self._compare_editor.value = ""
+                self._compare_candidate_dropdown.value = None
+
+            if _ctrl_on_page(self._compare_newer_dropdown):
+                self._compare_newer_dropdown.update()
+            if _ctrl_on_page(self._compare_candidate_dropdown):
+                self._compare_candidate_dropdown.update()
+
+        if self._main_tab_index == TAB_FUTURE:
+            # ── Review dropdown: ai_proposal / legacy ai_staged + manual imports ─
+            review_opts: list[ft.dropdown.Option] = []
+            if self.current_path:
+                with session_scope() as s:
+                    snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+                for sn in snaps:
+                    row_text = version_storage.snapshot_dropdown_text(sn)
+                    if sn.reason == "ai_proposal":
+                        review_opts.append(
+                            ft.dropdown.Option(
+                                key=str(sn.version_id),
+                                text=f"AI - {row_text}",
+                                style=_st,
+                            )
                         )
-                    )
-                elif version_storage.snapshot_bucket(sn) == "import":
-                    review_opts.append(
-                        ft.dropdown.Option(
-                            key=str(sn.version_id),
-                            text=f"Import - {row_text}",
-                            style=_st,
+                    elif sn.reason == "ai_staged":
+                        review_opts.append(
+                            ft.dropdown.Option(
+                                key=str(sn.version_id),
+                                text=f"AI - {row_text} (legacy)",
+                                style=_st,
+                            )
                         )
-                    )
-        self._review_candidate_dropdown.options = review_opts
-        r_keys = {o.key for o in review_opts}
-        # Default selection: currently-loaded ai_preview vid, else most recent ai_proposal, else first option.
-        preferred: str | None = None
-        if (
-            self._compare_candidate_source == "ai_preview"
-            and self._compare_snapshot_version_id is not None
-        ):
-            preferred = str(self._compare_snapshot_version_id)
-        elif self._latest_ai_proposal_vid is not None:
-            preferred = str(self._latest_ai_proposal_vid)
-        if preferred and preferred in r_keys:
-            self._review_candidate_dropdown.value = preferred
-        elif review_opts:
-            self._review_candidate_dropdown.value = review_opts[0].key
-        else:
-            self._review_candidate_dropdown.value = None
-        self._review_candidate_dropdown.disabled = not bool(review_opts)
-        if _ctrl_on_page(self._review_candidate_dropdown):
-            self._review_candidate_dropdown.update()
+                    elif version_storage.snapshot_bucket(sn) == "import":
+                        review_opts.append(
+                            ft.dropdown.Option(
+                                key=str(sn.version_id),
+                                text=f"Import - {row_text}",
+                                style=_st,
+                            )
+                        )
+            self._review_candidate_dropdown.options = review_opts
+            r_keys = {o.key for o in review_opts}
+            # Default selection: currently-loaded ai_preview vid, else most recent ai_proposal, else first option.
+            preferred: str | None = None
+            if (
+                self._compare_candidate_source == "ai_preview"
+                and self._compare_snapshot_version_id is not None
+            ):
+                preferred = str(self._compare_snapshot_version_id)
+            elif self._latest_ai_proposal_vid is not None:
+                preferred = str(self._latest_ai_proposal_vid)
+            if preferred and preferred in r_keys:
+                self._review_candidate_dropdown.value = preferred
+            elif review_opts:
+                self._review_candidate_dropdown.value = review_opts[0].key
+            else:
+                self._review_candidate_dropdown.value = None
+            self._review_candidate_dropdown.disabled = not bool(review_opts)
+            if _ctrl_on_page(self._review_candidate_dropdown):
+                self._review_candidate_dropdown.update()
 
         self._refresh_plan_compare_bar()
 
     def _sync_version_toolbar_state(self) -> None:
         has_doc = self.current_path is not None
-        self._compare_candidate_dropdown.disabled = not has_doc
-        self._compare_candidate_dropdown.tooltip = (
-            "Pick a version snapshot to compare against the current draft."
+        self._compare_newer_dropdown.disabled = not has_doc
+        self._compare_newer_dropdown.tooltip = (
+            "Pick the newer version (right column, insertions). Default is the current draft."
             if has_doc
             else "Open a markdown file from the tree to list versions."
         )
-        if _ctrl_on_page(self._compare_candidate_dropdown):
+        self._compare_candidate_dropdown.tooltip = (
+            "Pick an older saved version (left column, deletions). Only versions older than the "
+            "newer side are listed."
+            if has_doc
+            else "Open a markdown file from the tree to list versions."
+        )
+        if self._main_tab_index == TAB_HISTORY and _ctrl_on_page(self._compare_newer_dropdown):
+            self._compare_newer_dropdown.update()
+        if self._main_tab_index == TAB_HISTORY and _ctrl_on_page(self._compare_candidate_dropdown):
             self._compare_candidate_dropdown.update()
         self._refresh_compare_bulk_buttons()
 
@@ -201,14 +295,42 @@ class MarkdownStudioCompareText:
         if _ctrl_on_page(self._compare_decline_all_btn):
             self._compare_decline_all_btn.update()
 
-    async def _on_compare_candidate_change_async(self, e: ft.ControlEvent) -> None:
-        from_review = e.control is self._review_candidate_dropdown
-        if not from_review and (self._compare_candidate_dropdown.disabled or not self.current_path):
+    async def _on_compare_newer_change_async(self, e: ft.ControlEvent) -> None:
+        if e.control is not self._compare_newer_dropdown or self._compare_newer_dropdown.disabled:
+            return
+        if not self.current_path:
             return
         v = e.control.value
+        if v == _COMPARE_KEY_CURRENT:
+            self._compare_newer_version_id = None
+            self._compare_newer_cached_body = ""
+        else:
+            try:
+                vid = int(v)
+            except (TypeError, ValueError):
+                return
+            self._compare_newer_version_id = vid
+            try:
+                with session_scope() as s:
+                    self._compare_newer_cached_body = version_storage.load_version_body(s, vid)
+            except BaseException:
+                self._compare_newer_version_id = None
+                self._compare_newer_cached_body = ""
+                self._snack("Could not load that version.")
+                self._refresh_compare_tab_candidate_ui()
+                return
+        self._refresh_compare_tab_candidate_ui()
+        self._capture_compare_baseline_snapshot()
+        self._sync_compare_pdf_layers_visibility()
+        self._refresh_compare_diff_immediate()
+        self._refresh_compare_bulk_buttons()
+        self._refresh_title_bar()
 
+    async def _on_compare_candidate_change_async(self, e: ft.ControlEvent) -> None:
+        from_review = e.control is self._review_candidate_dropdown
         if from_review:
-            # Review dropdown: ai_proposal snapshot or import — stays on Review tab.
+            # Review dropdown: ai_proposal / legacy ai_staged snapshot or import — stays on Review tab.
+            v = e.control.value
             if v is None:
                 return
             try:
@@ -219,7 +341,7 @@ class MarkdownStudioCompareText:
             self._flush_review_edits_if_changed()
             with session_scope() as s:
                 row = version_storage.get_version_row(s, vid)
-            if row is not None and row.reason == "ai_proposal":
+            if row is not None and row.reason in ("ai_proposal", "ai_staged"):
                 self._select_proposal_as_review_candidate(vid)
             else:
                 # Imports: load as candidate, then treat as ai_preview so accept goes through AI flow.
@@ -238,24 +360,22 @@ class MarkdownStudioCompareText:
             self._refresh_title_bar()
             return
 
-        # History dropdown
-        if v is None or v == _COMPARE_KEY_CURRENT:
-            self._compare_candidate_source = "draft"
-            self._compare_snapshot_version_id = None
-            self._pending_ai_accept_action_id = None
-            self._compare_pdf_peer_snapshot_id = None
-            self._compare_editor.value = self.editor.value or ""
-            self._capture_compare_baseline_snapshot()
-            if _ctrl_on_page(self._compare_editor):
-                self._compare_editor.update()
-            self._sync_compare_pdf_layers_visibility()
-            self._rebuild_compare_paragraph_ui()
-        else:
-            try:
-                vid = int(v)
-            except (TypeError, ValueError):
-                return
-            self._select_snapshot_as_candidate(vid)
+        if e.control is self._compare_newer_dropdown:
+            await self._on_compare_newer_change_async(e)
+            return
+
+        if self._compare_candidate_dropdown.disabled or not self.current_path:
+            return
+        v = e.control.value
+
+        # History: older-side dropdown (snapshots strictly older than the newer pick)
+        if v is None:
+            return
+        try:
+            vid = int(v)
+        except (TypeError, ValueError):
+            return
+        self._select_snapshot_as_candidate(vid)
         if self._main_tab_index != TAB_HISTORY:
             self._main_tabs.selected_index = TAB_HISTORY
             if _ctrl_on_page(self._main_tabs):
@@ -371,11 +491,100 @@ class MarkdownStudioCompareText:
             new_ix = int(self._main_tabs.selected_index)
         self.page.run_task(self._sync_tab_switch_async, new_ix)
 
+    def _build_review_subtab_button(self, label: str, idx: int) -> ft.Container:
+        """Segmented Change/Impact button styled like a TabBar tab.
+
+        Active tab gets the highlight underline; click swaps the panel + refreshes
+        the toolbar so the Review chrome only shows on the Change subtab.
+        """
+        is_active = getattr(self, "_review_subtab_index", 0) == idx
+        return ft.Container(
+            content=ft.Text(
+                label,
+                size=13,
+                weight=ft.FontWeight.W_500,
+                color=config.ON_SURFACE if is_active else config.ON_SURFACE_VARIANT,
+            ),
+            expand=1,
+            height=36,
+            alignment=ft.Alignment.CENTER,
+            on_click=lambda _e, i=idx: self._select_review_subtab(i),
+            border=ft.border.only(
+                bottom=ft.BorderSide(
+                    2,
+                    config.HIGHLIGHT if is_active else ft.Colors.TRANSPARENT,
+                )
+            ),
+        )
+
+    def _select_review_subtab(self, idx: int) -> None:
+        if idx == self._review_subtab_index:
+            return
+        self._review_subtab_index = idx
+        self._review_change_panel.visible = idx == 0
+        self._review_impact_panel.visible = idx == 1
+        if _ctrl_on_page(self._review_change_panel):
+            self._review_change_panel.update()
+        if _ctrl_on_page(self._review_impact_panel):
+            self._review_impact_panel.update()
+        self._refresh_review_subtab_strip()
+        self._refresh_tab_toolbar()
+
+    def _refresh_review_subtab_strip(self) -> None:
+        """Sync visibility of the strip with the main tab + restyle active button."""
+        on_review = self._main_tab_index == TAB_FUTURE
+        self._review_subtab_strip.visible = on_review
+        for idx, btn in (
+            (0, self._review_subtab_change_btn),
+            (1, self._review_subtab_impact_btn),
+        ):
+            is_active = idx == self._review_subtab_index
+            text = btn.content
+            if isinstance(text, ft.Text):
+                text.color = (
+                    config.ON_SURFACE if is_active else config.ON_SURFACE_VARIANT
+                )
+            btn.border = ft.border.only(
+                bottom=ft.BorderSide(
+                    2,
+                    config.HIGHLIGHT if is_active else ft.Colors.TRANSPARENT,
+                )
+            )
+            if _ctrl_on_page(btn):
+                btn.update()
+        if _ctrl_on_page(self._review_subtab_strip):
+            self._review_subtab_strip.update()
+
     def _refresh_tab_toolbar(self) -> None:
         """Switch toolbar slot visibility."""
-        self._toolbar_history.visible = self._main_tab_index == TAB_HISTORY
+        on_history = self._main_tab_index == TAB_HISTORY
+        on_review = (
+            self._main_tab_index == TAB_FUTURE
+            and getattr(self, "_review_subtab_index", 0) == 0
+        )
+        self._refresh_review_subtab_strip()
+        self._toolbar_history.visible = on_history
         self._toolbar_focus_area.visible = self._main_tab_index == TAB_PRESENT
-        self._toolbar_review.visible = self._main_tab_index == TAB_FUTURE
+        self._toolbar_review.visible = on_review
+        # Dropdown menus render in Flet's overlay layer, outside the toolbar Stack. Hide and
+        # disable the inactive dropdown itself so a History menu cannot linger over Review.
+        self._compare_candidate_dropdown.visible = on_history
+        self._compare_newer_dropdown.visible = on_history
+        lack_older = on_history and not bool(self._compare_candidate_dropdown.options)
+        self._compare_candidate_dropdown.disabled = (
+            (not on_history) or self.current_path is None or lack_older
+        )
+        self._compare_newer_dropdown.disabled = (not on_history) or self.current_path is None
+        self._review_candidate_dropdown.visible = on_review
+        self._review_candidate_dropdown.disabled = (not on_review) or not bool(
+            self._review_candidate_dropdown.options
+        )
+        if _ctrl_on_page(self._compare_candidate_dropdown):
+            self._compare_candidate_dropdown.update()
+        if _ctrl_on_page(self._compare_newer_dropdown):
+            self._compare_newer_dropdown.update()
+        if _ctrl_on_page(self._review_candidate_dropdown):
+            self._review_candidate_dropdown.update()
         if _ctrl_on_page(self._tab_toolbar):
             self._tab_toolbar.update()
 
@@ -386,15 +595,24 @@ class MarkdownStudioCompareText:
     def _apply_compare_candidate_dropdown_tab_chrome(self) -> None:
         """Outline around the version dropdown (tree search style): grey at rest, blue on hover/focus."""
         selected = self._main_tab_index == TAB_HISTORY
-        union_hover = self._compare_tab_bar_hover_index1 or self._compare_dropdown_hover
+        union_hover = (
+            self._compare_tab_bar_hover_index1
+            or self._compare_dropdown_hover
+            or self._compare_newer_dropdown_hover
+        )
         accent = selected and (union_hover or self._compare_version_dd_focused)
-        rim = config.FEDORA_BLUE if accent else ft.Colors.GREY_700
-        wrap = self._compare_dropdown_hover_wrap
-        wrap.border = ft.Border.all(1, rim)
-        if _ctrl_on_page(wrap):
-            wrap.update()
-        if _ctrl_on_page(self._compare_candidate_dropdown):
-            self._compare_candidate_dropdown.update()
+        rim = config.PRIMARY_COLOR if accent else ui_theme.outline_muted()
+        for wrap in (self._compare_dropdown_hover_wrap, self._compare_newer_dropdown_hover_wrap):
+            wrap.border = ft.Border.all(1, rim)
+        if self._main_tab_index == TAB_HISTORY:
+            if _ctrl_on_page(self._compare_dropdown_hover_wrap):
+                self._compare_dropdown_hover_wrap.update()
+            if _ctrl_on_page(self._compare_newer_dropdown_hover_wrap):
+                self._compare_newer_dropdown_hover_wrap.update()
+            if _ctrl_on_page(self._compare_candidate_dropdown):
+                self._compare_candidate_dropdown.update()
+            if _ctrl_on_page(self._compare_newer_dropdown):
+                self._compare_newer_dropdown.update()
 
     def _on_main_tab_bar_hover(self, e: ft.TabBarHoverEvent) -> None:
         self._compare_tab_bar_hover_index1 = e.index == TAB_HISTORY and e.hovering
@@ -402,6 +620,10 @@ class MarkdownStudioCompareText:
 
     def _on_compare_dropdown_container_hover(self, e: ft.ControlEvent) -> None:
         self._compare_dropdown_hover = str(e.data).lower() == "true"
+        self._apply_compare_candidate_dropdown_tab_chrome()
+
+    def _on_compare_newer_dropdown_container_hover(self, e: ft.ControlEvent) -> None:
+        self._compare_newer_dropdown_hover = str(e.data).lower() == "true"
         self._apply_compare_candidate_dropdown_tab_chrome()
 
     async def _sync_tab_switch_async(self, new_ix: int) -> None:
@@ -423,6 +645,9 @@ class MarkdownStudioCompareText:
 
         # Entering History (TAB_HISTORY): prefer 2nd-newest history autosave (newest ≈ draft), else rebuild.
         if new_ix == TAB_HISTORY:
+            if prev != TAB_HISTORY:
+                self._compare_newer_version_id = None
+                self._compare_newer_cached_body = ""
             pick_vid: int | None = None
             if self.current_path and prev != TAB_HISTORY:
                 with session_scope() as s:
@@ -453,7 +678,7 @@ class MarkdownStudioCompareText:
             # editor.value is authoritative; rebuild margin sparkle
             await self._debounced_compose_rebuild(self._margin_gen)
 
-        # Entering Future (TAB_FUTURE): auto-load the most recent ai_proposal when nothing is staged.
+        # Entering Future (TAB_FUTURE): auto-load the most recent ai_proposal / legacy ai_staged when nothing is staged.
         elif new_ix == TAB_FUTURE:
             already_staged = (
                 self._compare_candidate_source == "ai_preview"
@@ -466,7 +691,7 @@ class MarkdownStudioCompareText:
                     with session_scope() as s:
                         snaps = version_storage.list_snapshots(s, self.current_path.resolve())
                     for sn in snaps:  # newest first
-                        if sn.reason == "ai_proposal":
+                        if sn.reason in ("ai_proposal", "ai_staged"):
                             target_vid = sn.version_id
                             break
                 if target_vid is not None:
@@ -483,11 +708,13 @@ class MarkdownStudioCompareText:
             self._rebuild_future_paragraph_ui()
 
         self._main_tab_index = new_ix
+        self._hide_all_result_card_overlays()
         if new_ix != TAB_HISTORY:
             self._compare_version_dd_focused = False
+            self._compare_dropdown_hover = False
+            self._compare_newer_dropdown_hover = False
         if new_ix == TAB_PRESENT:
             self._compare_tab_bar_hover_index1 = False
-            self._compare_dropdown_hover = False
         self._apply_compare_candidate_dropdown_tab_chrome()
         self._refresh_compare_tab_candidate_ui()
         if new_ix == TAB_HISTORY:
@@ -500,19 +727,36 @@ class MarkdownStudioCompareText:
             font_family="monospace",
             size=COMPARE_COL_FONT_SIZE,
             height=COMPARE_COL_LINE_HEIGHT,
-            color=ft.Colors.GREY_100,
+            color=config.ON_SURFACE,
         )
 
+    def _compare_insertion_diff_colors(self) -> tuple[str, str | None]:
+        """Insertion spans: foreground always ``on_surface``; light uses ``success`` tint as bg."""
+        if config.IS_LIGHT:
+            return config.ON_SURFACE, ft.Colors.with_opacity(0.5, config.SUCCESS)
+        return config.ON_SURFACE, None
+
     def _compare_pill_colors(self, kind: paragraph_compare.SlotKind) -> tuple[str, str]:
+        new_pill: tuple[str, str] = (
+            (ft.Colors.with_opacity(0.45, config.SUCCESS), config.ON_SURFACE)
+            if config.IS_LIGHT
+            else (ft.Colors.with_opacity(0.28, ft.Colors.GREEN_400), ft.Colors.GREEN_100)
+        )
         m: dict[str, tuple[str, str]] = {
-            "unchanged": (ft.Colors.with_opacity(0.14, ft.Colors.GREY_500), ft.Colors.GREY_400),
+            "unchanged": (
+                ft.Colors.with_opacity(0.18, config.OUTLINE),
+                config.ON_SURFACE_VARIANT,
+            ),
             "minor": (ft.Colors.with_opacity(0.28, ft.Colors.BLUE_400), ft.Colors.BLUE_100),
             "major": (ft.Colors.with_opacity(0.28, ft.Colors.ORANGE_400), ft.Colors.ORANGE_100),
             "rewritten": (ft.Colors.with_opacity(0.28, ft.Colors.PURPLE_400), ft.Colors.PURPLE_100),
-            "new": (ft.Colors.with_opacity(0.28, ft.Colors.GREEN_400), ft.Colors.GREEN_100),
+            "new": new_pill,
             "deleted": (ft.Colors.with_opacity(0.28, ft.Colors.RED_400), ft.Colors.RED_100),
         }
-        return m.get(kind, (ft.Colors.with_opacity(0.2, ft.Colors.GREY_600), ft.Colors.GREY_200))
+        return m.get(
+            kind,
+            (ft.Colors.with_opacity(0.22, config.OUTLINE), config.ON_SURFACE_VARIANT),
+        )
 
     @staticmethod
     def _compare_displacement_arrow_text(displacement: int | None) -> str:
@@ -549,7 +793,7 @@ class MarkdownStudioCompareText:
                 arrow,
                 size=11,
                 weight=ft.FontWeight.W_500,
-                color=ft.Colors.GREY_500,
+                color=config.ON_SURFACE_VARIANT,
                 font_family="monospace",
                 text_align=ft.TextAlign.CENTER,
             ),
@@ -566,10 +810,18 @@ class MarkdownStudioCompareText:
 
     def _sync_compare_buffer_from_fields(self) -> None:
         parts = [tf.value or "" for tf in self._compare_right_fields]
-        merged = "\n\n".join(parts) if parts else ""
+        if self._main_tab_index == TAB_FUTURE:
+            # Drop empty entries: a delete row that's accepted (field stays "") removes
+            # the paragraph from the buffer; an insert row that's declined ("" set on
+            # decline) does the same — naturally yielding the post-accept document.
+            merged = "\n\n".join(p for p in parts if p)
+        else:
+            merged = "\n\n".join(parts) if parts else ""
         if self._main_tab_index == TAB_HISTORY:
-            # History right fields = current draft → sync back to editor
-            self.editor.value = merged
+            if self._compare_newer_version_id is None:
+                self.editor.value = merged
+            else:
+                self._compare_newer_cached_body = merged
         else:
             self._compare_editor.value = merged
 
@@ -578,7 +830,9 @@ class MarkdownStudioCompareText:
         self._compare_baseline_snapshot = self.editor.value or ""
 
     def _compare_latest_baseline_text(self) -> str:
-        """Baseline text for checks / diff: always the current draft in editor."""
+        """On History, the newer (right) side; otherwise the compose document."""
+        if self._main_tab_index == TAB_HISTORY:
+            return self._history_newer_side_text()
         return self.editor.value or ""
 
     def _persist_ai_accept_snapshots(
@@ -619,13 +873,15 @@ class MarkdownStudioCompareText:
     def _compare_paragraph_diff_spans(self, left_para: str, right_para: str) -> list[ft.TextSpan]:
         """Unified inline diff (Review right column): both deletions and insertions in one stream."""
         old_t, new_t = self._compare_diff_clip(left_para, right_para)
+        ins_fg, ins_bg = self._compare_insertion_diff_colors()
         return build_unified_spans(
             old_t,
             new_t,
             base_size=COMPARE_COL_FONT_SIZE,
-            base_color=ft.Colors.GREY_100,
+            base_color=config.ON_SURFACE,
             font_family="monospace",
-            insert_color=ft.Colors.LIGHT_GREEN_200,
+            insert_color=ins_fg,
+            insert_bgcolor=ins_bg,
             line_height=COMPARE_COL_LINE_HEIGHT,
         )
 
@@ -644,7 +900,7 @@ class MarkdownStudioCompareText:
             old_t,
             new_t,
             base_size=COMPARE_COL_FONT_SIZE,
-            base_color=ft.Colors.GREY_100,
+            base_color=config.ON_SURFACE,
             font_family="monospace",
             line_height=COMPARE_COL_LINE_HEIGHT,
         )
@@ -661,18 +917,20 @@ class MarkdownStudioCompareText:
     def _compare_new_side_spans(self, old_para: str, new_para: str) -> list[ft.TextSpan]:
         """History right column: only words from the draft, insertions tinted green."""
         old_t, new_t = self._compare_diff_clip(old_para, new_para)
+        ins_fg, ins_bg = self._compare_insertion_diff_colors()
         return build_new_side_spans(
             old_t,
             new_t,
             base_size=COMPARE_COL_FONT_SIZE,
-            base_color=ft.Colors.GREY_100,
+            base_color=config.ON_SURFACE,
             font_family="monospace",
-            insert_color=ft.Colors.LIGHT_GREEN_200,
+            insert_color=ins_fg,
+            insert_bgcolor=ins_bg,
             line_height=COMPARE_COL_LINE_HEIGHT,
         )
 
     def _refresh_future_left_diff_spans(self) -> None:
-        """Update Future left column diff spans (current vs candidate; same paragraph count)."""
+        """Update Review left column diff spans for the gap-aligned row list."""
         if self._main_tab_index != TAB_FUTURE:
             return
         if len(self._future_left_diff_texts) != len(self._compare_right_fields):
@@ -683,12 +941,17 @@ class MarkdownStudioCompareText:
             half = _DIFF_SPAN_CHAR_CAP // 2
             current = current[:half] + "\n…"
             candidate = candidate[:half] + "\n…"
-        pairs = pair_paragraphs_for_compare(current, candidate)
-        for i, (cur_txt, ai_txt) in enumerate(pairs):
+        rows = aligned_review_rows(current, candidate)
+        for i, row in enumerate(rows):
             if i >= len(self._future_left_diff_texts):
                 break
             t = self._future_left_diff_texts[i]
-            t.spans = self._future_old_side_spans(cur_txt, ai_txt)
+            if row.kind == "insert":
+                t.spans = []
+                t.value = ""
+            else:
+                t.value = None
+                t.spans = self._future_old_side_spans(row.old_text, row.new_text)
             if _ctrl_on_page(t):
                 t.update()
 
@@ -698,13 +961,13 @@ class MarkdownStudioCompareText:
             return
         if len(self._compare_left_diff_texts) != len(self._compare_right_fields):
             return
-        snapshot = self._compare_editor.value or ""
-        draft = self.editor.value or ""
-        if len(snapshot) + len(draft) > _DIFF_SPAN_CHAR_CAP:
+        older = self._compare_editor.value or ""
+        newer = self._history_newer_side_text() or ""
+        if len(older) + len(newer) > _DIFF_SPAN_CHAR_CAP:
             half = _DIFF_SPAN_CHAR_CAP // 2
-            snapshot = snapshot[:half] + "\n…"
-            draft = draft[:half] + "\n…"
-        pairs = pair_paragraphs_for_compare(snapshot, draft)
+            older = older[:half] + "\n…"
+            newer = newer[:half] + "\n…"
+        pairs = pair_paragraphs_for_compare(older, newer)
         for i, (left_txt, right_txt) in enumerate(pairs):
             if i >= len(self._compare_left_diff_texts):
                 break
@@ -740,22 +1003,20 @@ class MarkdownStudioCompareText:
         return wrap_workspace_action_chrome(actions_inner, persistent=persistent)
 
     def _rebuild_compare_paragraph_ui(self) -> None:
-        """History tab: old(deletions only) | pill | new(insertions only) — both read-only ft.Text."""
+        """History tab: eval | old(deletions) | pill | new(insertions) — diff columns read-only ft.Text."""
         self._compare_pill_gen += 1
-        # History: left = snapshot (old), right = current draft
-        snapshot_text = self._compare_editor.value or ""
-        current_text = self.editor.value or ""
-        if len(snapshot_text) + len(current_text) > _DIFF_SPAN_CHAR_CAP:
+        older_text = self._compare_editor.value or ""
+        newer_text = self._history_newer_side_text()
+        if len(older_text) + len(newer_text) > _DIFF_SPAN_CHAR_CAP:
             half = _DIFF_SPAN_CHAR_CAP // 2
-            snapshot_text = snapshot_text[:half] + "\n…"
-            current_text = current_text[:half] + "\n…"
-        pairs = pair_paragraphs_for_compare(snapshot_text, current_text)
-        # stable_texts = current paragraphs (referenced elsewhere even though History is read-only)
-        current_paras = split_paragraphs(current_text)
+            older_text = older_text[:half] + "\n…"
+            newer_text = newer_text[:half] + "\n…"
+        pairs = pair_paragraphs_for_compare(older_text, newer_text)
+        newer_paras = split_paragraphs(newer_text)
         self._compare_row_stable_texts = [
-            current_paras[i] if i < len(current_paras) else "" for i in range(len(pairs))
+            newer_paras[i] if i < len(newer_paras) else "" for i in range(len(pairs))
         ]
-        kinds_h, disps_h = paragraph_compare.compare_slots_heuristic(snapshot_text, current_text)
+        kinds_h, disps_h = paragraph_compare.compare_slots_heuristic(older_text, newer_text)
 
         self._compare_rows_listview.controls.clear()
         self._compare_right_fields.clear()
@@ -764,10 +1025,7 @@ class MarkdownStudioCompareText:
         self._compare_right_diff_texts.clear()
         self._compare_eval_hosts.clear()
         # Hide any active result-card overlay; row layout is being rebuilt.
-        self._result_card_overlay.visible = False
-        self._result_card_visible_for = None
-        if _ctrl_on_page(self._result_card_overlay):
-            self._result_card_overlay.update()
+        self._hide_all_result_card_overlays()
         # Refresh paragraph hash list against the current text; resize results buffers.
         self._check_para_hashes = [compute_hash(new) for _, new in pairs]
         for cid in list(self._check_results.keys()):
@@ -821,9 +1079,12 @@ class MarkdownStudioCompareText:
                 width=0,
             )
 
-            # History row: old(deletions) | pill (fixed) | new(insertions) — both columns expand equally
+            eval_host = self._build_eval_cell(i)
+
+            # History row: eval | old(deletions) | pill | new(insertions)
             row_inner = ft.Row(
                 [
+                    eval_host,
                     left_cell,
                     pill_host,
                     right_cell,
@@ -834,38 +1095,46 @@ class MarkdownStudioCompareText:
             self._compare_rows_listview.controls.append(row_inner)
             self._compare_right_fields.append(right_carrier)
             self._compare_row_pill_hosts.append(pill_host)
+            self._compare_eval_hosts.append(eval_host)
 
         if _ctrl_on_page(self._compare_rows_listview):
             self._compare_rows_listview.update()
+
+        if self._active_check_id is not None:
+            self._refresh_all_eval_cells()
 
         self._refresh_compare_bulk_buttons()
         self._compare_refine_gen += 1
         self.page.run_task(self._debounced_refine_compare_slots, self._compare_refine_gen)
 
     def _rebuild_future_paragraph_ui(self) -> None:
-        """Future tab: eval | current(read-only diff with deletions) | pill | AI proposal(editable) | actions."""
+        """Future tab: eval | current(read-only diff with deletions) | pill | AI proposal(editable) | actions.
+
+        Rows are gap-aligned: pure deletions render with an empty right cell, pure
+        insertions with an empty left cell. ``_compare_right_fields`` keeps one entry per
+        UI row (a hidden empty TextField for delete rows) so accept/decline indices align
+        with the visible row order. ``_future_row_kinds`` / ``_future_row_cand_idx`` /
+        ``_future_row_stable_texts`` track per-row metadata for buffer sync and decline.
+        """
         self._compare_pill_gen += 1
-        # Future: left = current draft (old), right = AI proposal (new) — deletions live on the left.
         current_text = self.editor.value or ""
         ai_text = self._compare_editor.value or ""
         if len(current_text) + len(ai_text) > _DIFF_SPAN_CHAR_CAP:
             half = _DIFF_SPAN_CHAR_CAP // 2
             current_text = current_text[:half] + "\n…"
             ai_text = ai_text[:half] + "\n…"
-        pairs = pair_paragraphs_for_compare(current_text, ai_text)
-        # stable_texts = current paragraphs (decline = reject AI, revert right to current)
-        current_paras = split_paragraphs(current_text)
-        self._compare_row_stable_texts = [
-            current_paras[i] if i < len(current_paras) else "" for i in range(len(pairs))
-        ]
+        rows = aligned_review_rows(current_text, ai_text)
         kinds_h, disps_h = paragraph_compare.compare_slots_heuristic(current_text, ai_text)
 
         self._future_rows_listview.controls.clear()
         self._future_left_diff_texts.clear()
         self._future_row_pill_hosts.clear()
-        # _compare_right_fields holds the editable right TextFields (AI proposal); accept/decline reuse it.
         self._compare_right_fields.clear()
         self._compare_eval_hosts.clear()
+        self._future_row_kinds = []
+        self._future_row_cand_idx = []
+        self._future_row_stable_texts = []
+        self._hide_all_result_card_overlays()
 
         para_style = self._compare_para_text_style()
         right_tf_kwargs: dict[str, Any] = {
@@ -877,61 +1146,98 @@ class MarkdownStudioCompareText:
             "dense": True,
             "text_size": COMPARE_COL_FONT_SIZE,
             "text_style": para_style,
-            "cursor_color": config.FEDORA_BLUE,
+            "cursor_color": config.PRIMARY_COLOR,
             "selection_color": config.SELECTION_OVERLAY,
-            # Outer container drives the inset (see _COMPARE_HISTORY_CELL_PAD); zero here so the
-            # editable inner box matches the read-only diff Text on the left to the pixel.
             "content_padding": ft.padding.all(0),
         }
         show_actions = bool(self.current_path)
 
-        for i, (cur_txt, ai_txt) in enumerate(pairs):
-            kind = kinds_h[i] if i < len(kinds_h) else "unchanged"
-            disp = disps_h[i] if i < len(disps_h) else None
+        for i, row_spec in enumerate(rows):
+            self._future_row_kinds.append(row_spec.kind)
+            self._future_row_cand_idx.append(row_spec.cand_idx)
+            self._future_row_stable_texts.append(row_spec.old_text)
+
+            if row_spec.kind == "delete":
+                pill_kind: paragraph_compare.SlotKind = "deleted"
+                disp: int | None = None
+            elif row_spec.cand_idx is not None and row_spec.cand_idx < len(kinds_h):
+                pill_kind = kinds_h[row_spec.cand_idx]
+                disp = (
+                    disps_h[row_spec.cand_idx]
+                    if row_spec.cand_idx < len(disps_h)
+                    else None
+                )
+            else:
+                pill_kind = "new" if row_spec.kind == "insert" else "unchanged"
+                disp = None
             pill_host = ft.Container(
-                content=self._make_compare_pill_row(kind, disp),
+                content=self._make_compare_pill_row(pill_kind, disp),
                 width=COMPARE_PILL_COL_W,
                 alignment=ft.Alignment.TOP_CENTER,
                 padding=ft.padding.only(top=4),
             )
-            # Left: current draft, read-only Text with deletions struck red (insertions skipped).
-            left_diff = ft.Text(
-                spans=self._future_old_side_spans(cur_txt, ai_txt),
-                style=para_style,
-                selectable=True,
-                expand=True,
-                no_wrap=False,
-            )
+
+            # Left cell: empty placeholder for inserts; struck-through old paragraph
+            # (full strikethrough on delete since new_text="") otherwise.
+            if row_spec.kind == "insert":
+                left_diff = ft.Text(
+                    "",
+                    style=para_style,
+                    selectable=True,
+                    expand=True,
+                    no_wrap=False,
+                )
+            else:
+                left_diff = ft.Text(
+                    spans=self._future_old_side_spans(row_spec.old_text, row_spec.new_text),
+                    style=para_style,
+                    selectable=True,
+                    expand=True,
+                    no_wrap=False,
+                )
             self._future_left_diff_texts.append(left_diff)
             left_cell = ft.Container(
                 content=left_diff,
                 expand=1,
                 padding=_COMPARE_HISTORY_CELL_PAD,
             )
-            # Right: AI proposal, editable plain TextField (no diff styling).
-            right_tf = ft.TextField(
-                **right_tf_kwargs,
-                value=ai_txt,
-                read_only=False,
-                enable_interactive_selection=True,
-                hint_text="…",
-                expand=True,
-                on_change=lambda _e, ix=i: self._on_compare_para_field_change(ix),
-            )
-            right_cell = ft.Container(
-                content=right_tf,
-                expand=1,
-                padding=_COMPARE_HISTORY_CELL_PAD,
-            )
+
+            # Right cell: editable AI proposal for replace/insert/equal; empty placeholder
+            # for delete rows. The hidden TextField keeps accept/decline index parity.
+            if row_spec.kind == "delete":
+                right_tf = ft.TextField(
+                    **right_tf_kwargs,
+                    value="",
+                    read_only=True,
+                    visible=False,
+                )
+                right_cell = ft.Container(
+                    expand=1,
+                    padding=_COMPARE_HISTORY_CELL_PAD,
+                )
+            else:
+                right_tf = ft.TextField(
+                    **right_tf_kwargs,
+                    value=row_spec.new_text,
+                    read_only=False,
+                    enable_interactive_selection=True,
+                    hint_text="…",
+                    expand=True,
+                    on_change=lambda _e, ix=i: self._on_compare_para_field_change(ix),
+                )
+                right_cell = ft.Container(
+                    content=right_tf,
+                    expand=1,
+                    padding=_COMPARE_HISTORY_CELL_PAD,
+                )
+
             if show_actions:
                 actions_ctrl, hover_wrap_future = self._build_actions_square(i, persistent=False)
             else:
                 actions_ctrl, hover_wrap_future = None, None
 
-            # Eval cell (leftmost): AI-check symbol for this paragraph; populated by Analyse pills.
             eval_host = self._build_eval_cell(i)
 
-            # Review row: eval | current(read-only diff) | pill | AI proposal(editable) | actions(hover)
             row_cells: list[ft.Control] = [
                 eval_host,
                 left_cell,
@@ -960,6 +1266,9 @@ class MarkdownStudioCompareText:
         if _ctrl_on_page(self._future_rows_listview):
             self._future_rows_listview.update()
 
+        if self._active_check_id is not None:
+            self._refresh_all_eval_cells()
+
         self._refresh_compare_bulk_buttons()
         self._compare_refine_gen += 1
         self.page.run_task(self._debounced_refine_compare_slots, self._compare_refine_gen)
@@ -984,9 +1293,14 @@ class MarkdownStudioCompareText:
             return
         if self._compare_candidate_source in ("pdf_original", "docx_original"):
             return
-        cand = self._compare_editor.value or ""
-        n_para = len(split_paragraphs(cand))
-        if n_para != len(self._compare_right_fields):
+        if self._main_tab_index == TAB_HISTORY:
+            cand = self._history_newer_side_text() or ""
+            n_rows = len(split_paragraphs(cand))
+        else:
+            cand = self._compare_editor.value or ""
+            current = self.editor.value or ""
+            n_rows = len(aligned_review_rows(current, cand))
+        if n_rows != len(self._compare_right_fields):
             if self._main_tab_index == TAB_FUTURE:
                 self._rebuild_future_paragraph_ui()
             else:
@@ -1018,7 +1332,7 @@ class MarkdownStudioCompareText:
             return
         if self._main_tab_index == TAB_HISTORY:
             old_text = self._compare_editor.value or ""
-            new_text = self.editor.value or ""
+            new_text = self._history_newer_side_text() or ""
         else:
             new_text = self._compare_editor.value or ""
             old_text = self.editor.value or ""
@@ -1038,7 +1352,7 @@ class MarkdownStudioCompareText:
             return
         if self._main_tab_index == TAB_HISTORY:
             baseline = self._compare_editor.value or ""
-            candidate = self.editor.value or ""
+            candidate = self._history_newer_side_text() or ""
         else:
             baseline = self.editor.value or ""
             candidate = self._compare_editor.value or ""
@@ -1086,8 +1400,11 @@ class MarkdownStudioCompareText:
         # Future:  right fields are the AI proposal candidate → in-memory only, no autosave.
         on_future = self._main_tab_index == TAB_FUTURE
         cand = (self.editor.value if not on_future else self._compare_editor.value) or ""
-        n_para = len(split_paragraphs(cand))
-        if n_para != len(self._compare_right_fields):
+        if on_future:
+            n_rows = len(aligned_review_rows(self.editor.value or "", cand))
+        else:
+            n_rows = len(split_paragraphs(cand))
+        if n_rows != len(self._compare_right_fields):
             if on_future:
                 self._rebuild_future_paragraph_ui()
             else:
@@ -1130,8 +1447,6 @@ class MarkdownStudioCompareText:
                 return
             self.last_saved_text = new_buf
             self._refresh_compare_tab_candidate_ui()
-            if _ctrl_on_page(self._compare_candidate_dropdown):
-                self._compare_candidate_dropdown.update()
         self.editor.value = new_buf
         self._capture_compare_baseline_snapshot()
         if _ctrl_on_page(self.editor):
@@ -1145,8 +1460,12 @@ class MarkdownStudioCompareText:
     async def _compare_decline_paragraph_async(self, index: int) -> None:
         if index < 0 or index >= len(self._compare_right_fields):
             return
-        if index < len(self._compare_row_stable_texts):
-            revert = self._compare_row_stable_texts[index]
+        on_future = self._main_tab_index == TAB_FUTURE
+        stable_list = (
+            self._future_row_stable_texts if on_future else self._compare_row_stable_texts
+        )
+        if index < len(stable_list):
+            revert = stable_list[index]
         else:
             paras = split_paragraphs(self._compare_latest_baseline_text() or "")
             revert = paras[index] if 0 <= index < len(paras) else ""
@@ -1185,8 +1504,6 @@ class MarkdownStudioCompareText:
                 return
             self.last_saved_text = new_buf
             self._refresh_compare_tab_candidate_ui()
-            if _ctrl_on_page(self._compare_candidate_dropdown):
-                self._compare_candidate_dropdown.update()
         self.editor.value = new_buf
         self._capture_compare_baseline_snapshot()
         if _ctrl_on_page(self.editor):
@@ -1200,11 +1517,15 @@ class MarkdownStudioCompareText:
     async def _compare_decline_all_async(self) -> None:
         if not self._compare_right_fields:
             return
+        on_future = self._main_tab_index == TAB_FUTURE
+        stable_list = (
+            self._future_row_stable_texts if on_future else self._compare_row_stable_texts
+        )
         baseline = self._compare_latest_baseline_text()
         paras = split_paragraphs(baseline or "")
         for i, tf in enumerate(self._compare_right_fields):
-            if i < len(self._compare_row_stable_texts):
-                revert = self._compare_row_stable_texts[i]
+            if i < len(stable_list):
+                revert = stable_list[i]
             else:
                 revert = paras[i] if i < len(paras) else ""
             tf.value = revert
@@ -1271,6 +1592,23 @@ class MarkdownStudioCompareText:
         paras = split_paragraphs(self._compare_editor.value or "")
         return paras[idx] if 0 <= idx < len(paras) else ""
 
+    def _resolve_vid_after_proposal_persist(
+        self, new_vid: int | None, cand_body: str
+    ) -> int | None:
+        """If persist returned None (SHA dedup), use newest snapshot row matching ``cand_body``."""
+        if new_vid is not None or not self.current_path:
+            return new_vid
+        want_sha = version_storage.content_sha256(cand_body)
+        try:
+            with session_scope() as s:
+                snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+            for sn in snaps:
+                if sn.content_sha256 == want_sha:
+                    return sn.version_id
+        except BaseException:
+            pass
+        return None
+
     async def _stage_compare_margin_review_async(
         self, idx: int, reply: ft.Text, footer: ft.Row, action_id: str
     ) -> None:
@@ -1280,30 +1618,36 @@ class MarkdownStudioCompareText:
             self._snack("Reply is empty.")
             return
         act = prompts.get_margin_action(action_id)
+        base = self._compare_editor.value or ""
+        cand_body = replace_paragraph_at_index(base, idx, text)
+        loc_label = f"paragraph {idx + 1}"
+        new_vid: int | None = None
         if self.current_path:
             try:
                 with session_scope() as s:
-                    version_storage.persist_version_snapshot(
+                    new_vid = version_storage.persist_version_snapshot(
                         s,
                         self.current_path.resolve(),
-                        self.editor.value or "",
-                        "ai_staged",
-                        display_label=f"{act.label} · preview" if act else "AI · preview",
+                        cand_body,
+                        "ai_proposal",
+                        display_label=f"{act.label} - {loc_label}" if act else f"AI - {loc_label}",
                     )
             except BaseException:
                 pass
-        base = self._compare_editor.value or ""
-        self._compare_editor.value = replace_paragraph_at_index(base, idx, text)
+        new_vid = self._resolve_vid_after_proposal_persist(new_vid, cand_body)
+        self._compare_editor.value = cand_body
         self._compare_candidate_source = "ai_preview"
-        self._compare_snapshot_version_id = None
+        self._compare_snapshot_version_id = new_vid
         self._pending_ai_accept_action_id = action_id
+        if new_vid is not None:
+            self._ai_proposal_action_ids[new_vid] = action_id
+            self._latest_ai_proposal_vid = new_vid
         self._loaded_proposal_sha = version_storage.content_sha256(self._compare_editor.value or "")
         self._hide_prompt_footer(footer)
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)
         self._refresh_tab_toolbar()
         self._refresh_compare_tab_candidate_ui()
-        self._compare_candidate_dropdown.value = _COMPARE_KEY_CANDIDATE
         if _ctrl_on_page(self._compare_editor):
             self._compare_editor.update()
         self._refresh_compare_diff_immediate()
@@ -1325,13 +1669,13 @@ class MarkdownStudioCompareText:
             "user", f"Compare · paragraph {idx + 1}: {act.label}", quote=para
         )
 
-        reply = ft.Text("", size=12, selectable=True, color=ft.Colors.GREY_100)
+        reply = ft.Text("", size=12, selectable=True, color=config.ON_SURFACE)
         footer = ft.Row(spacing=8, visible=False)
         bubble = ft.Column([reply, footer], tight=True, spacing=8)
         wrap = ft.Container(
             content=bubble,
             padding=ft.padding.symmetric(horizontal=10, vertical=8),
-            bgcolor=ft.Colors.with_opacity(0.22, ft.Colors.GREY_800),
+            bgcolor=ft.Colors.with_opacity(0.14, config.OUTLINE),
             border_radius=10,
             alignment=ft.Alignment.CENTER_LEFT,
         )
@@ -1383,7 +1727,7 @@ class MarkdownStudioCompareText:
                 ft.IconButton(
                     ft.Icons.CLOSE_ROUNDED,
                     icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=ft.Colors.GREY_400,
+                    icon_color=config.ON_SURFACE_VARIANT,
                     tooltip="Dismiss",
                     style=action_rail_icon_button_style(),
                     on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
@@ -1403,7 +1747,7 @@ class MarkdownStudioCompareText:
                 ft.IconButton(
                     ft.Icons.VISIBILITY_OUTLINED,
                     icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=ft.Colors.GREY_400,
+                    icon_color=config.ON_SURFACE_VARIANT,
                     tooltip="Review: stage this text as the Compare candidate for this paragraph",
                     style=action_rail_icon_button_style(),
                     on_click=lambda _e, i=idx, r=reply, f=footer, aid=action_id: self.page.run_task(
@@ -1413,7 +1757,7 @@ class MarkdownStudioCompareText:
                 ft.IconButton(
                     ft.Icons.CLOSE_ROUNDED,
                     icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=ft.Colors.GREY_400,
+                    icon_color=config.ON_SURFACE_VARIANT,
                     tooltip="Dismiss",
                     style=action_rail_icon_button_style(),
                     on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
@@ -1424,7 +1768,7 @@ class MarkdownStudioCompareText:
                 ft.IconButton(
                     ft.Icons.CLOSE_ROUNDED,
                     icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=ft.Colors.GREY_400,
+                    icon_color=config.ON_SURFACE_VARIANT,
                     tooltip="Dismiss",
                     style=action_rail_icon_button_style(),
                     on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
@@ -1441,23 +1785,30 @@ class MarkdownStudioCompareText:
             return
         self._compose_sel_span = None
         act = prompts.get_margin_action(action_id)
+        base = self.editor.value or ""
+        cand_body = replace_paragraph_at_index(base, idx, text)
+        loc_label = f"paragraph {idx + 1}"
+        new_vid: int | None = None
         if self.current_path:
             try:
                 with session_scope() as s:
-                    version_storage.persist_version_snapshot(
+                    new_vid = version_storage.persist_version_snapshot(
                         s,
                         self.current_path.resolve(),
-                        self.editor.value or "",
-                        "ai_staged",
-                        display_label=f"{act.label} · preview" if act else "AI · preview",
+                        cand_body,
+                        "ai_proposal",
+                        display_label=f"{act.label} - {loc_label}" if act else f"AI - {loc_label}",
                     )
             except BaseException:
                 pass
-        base = self.editor.value or ""
-        self._compare_editor.value = replace_paragraph_at_index(base, idx, text)
+        new_vid = self._resolve_vid_after_proposal_persist(new_vid, cand_body)
+        self._compare_editor.value = cand_body
         self._compare_candidate_source = "ai_preview"
-        self._compare_snapshot_version_id = None
+        self._compare_snapshot_version_id = new_vid
         self._pending_ai_accept_action_id = action_id
+        if new_vid is not None:
+            self._ai_proposal_action_ids[new_vid] = action_id
+            self._latest_ai_proposal_vid = new_vid
         self._loaded_proposal_sha = version_storage.content_sha256(self._compare_editor.value or "")
         self._hide_prompt_footer(footer)
         self._margin_gen += 1
@@ -1471,7 +1822,6 @@ class MarkdownStudioCompareText:
         self._rebuild_future_paragraph_ui()
         self._refresh_tab_toolbar()
         self._refresh_compare_tab_candidate_ui()
-        self._compare_candidate_dropdown.value = _COMPARE_KEY_CANDIDATE
         if _ctrl_on_page(self._compare_editor):
             self._compare_editor.update()
         self._refresh_compare_diff_immediate()

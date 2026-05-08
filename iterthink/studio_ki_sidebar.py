@@ -1,5 +1,5 @@
 
-"""KI sidebar: tabs, topic pills, chat, panel chrome."""
+"""Right KI sidebar: topic tabs, pills, chat stream, layout helpers."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from iterthink.studio_constants import (
 from iterthink.studio_util import KI_TIERS, ctrl_on_page as _ctrl_on_page, normalize_ki_tier
 
 
-class MarkdownStudioKi:
+class MarkdownStudioKiSidebar:
     def _on_ki_tabs_change(self, e: ft.ControlEvent) -> None:
         try:
             self._ki_topic_index = int(e.data)
@@ -41,7 +41,7 @@ class MarkdownStudioKi:
         u_w = 1.5
         for i, b in enumerate(self._ki_topic_mode_buttons):
             want = i == ix
-            col = config.FEDORA_BLUE if want else ft.Colors.GREY_400
+            col = config.HIGHLIGHT if want else config.ON_SURFACE_VARIANT
             if getattr(b, "icon_color", None) != col:
                 b.icon_color = col
                 if _ctrl_on_page(b):
@@ -51,7 +51,7 @@ class MarkdownStudioKi:
             c.border = ft.border.only(
                 bottom=ft.BorderSide(
                     u_w if want else 0.0,
-                    config.FEDORA_BLUE if want else ft.Colors.TRANSPARENT,
+                    config.HIGHLIGHT if want else ft.Colors.TRANSPARENT,
                 )
             )
             if _ctrl_on_page(c):
@@ -147,13 +147,17 @@ class MarkdownStudioKi:
         self.toggle_right()
 
     def _append_chat_line(self, role: str, text: str, *, quote: str | None = None) -> None:
-        bg = ft.Colors.with_opacity(0.35, ft.Colors.GREY_900) if role == "user" else ft.Colors.with_opacity(0.25, config.FEDORA_BLUE)
+        bg = (
+            ft.Colors.with_opacity(0.22, config.OUTLINE)
+            if role == "user"
+            else ft.Colors.with_opacity(0.22, config.PRIMARY_COLOR)
+        )
         align = ft.Alignment.CENTER_RIGHT if role == "user" else ft.Alignment.CENTER_LEFT
         header = ft.Text(
             text,
             size=12,
             selectable=True,
-            color=ft.Colors.GREY_100,
+            color=config.ON_SURFACE,
             weight=ft.FontWeight.W_600 if quote else ft.FontWeight.NORMAL,
         )
         body: ft.Control
@@ -163,12 +167,12 @@ class MarkdownStudioKi:
                 size=12,
                 selectable=True,
                 italic=True,
-                color=ft.Colors.GREY_400,
+                color=config.ON_SURFACE_VARIANT,
             )
             quote_box = ft.Container(
                 content=quote_text,
                 padding=ft.padding.only(left=8, top=2, bottom=2),
-                border=ft.border.only(left=ft.BorderSide(2, config.FEDORA_BLUE)),
+                border=ft.border.only(left=ft.BorderSide(2, config.PRIMARY_COLOR)),
             )
             body = ft.Column([header, quote_box], tight=True, spacing=4)
         else:
@@ -228,11 +232,11 @@ class MarkdownStudioKi:
         messages.append({"role": "user", "content": raw})
 
         acc = ""
-        reply = ft.Text("", size=12, selectable=True, color=ft.Colors.GREY_100)
+        reply = ft.Text("", size=12, selectable=True, color=config.ON_SURFACE)
         wrap = ft.Container(
             content=reply,
             padding=ft.padding.symmetric(horizontal=10, vertical=8),
-            bgcolor=ft.Colors.with_opacity(0.22, ft.Colors.GREY_800),
+            bgcolor=ft.Colors.with_opacity(0.14, config.OUTLINE),
             border_radius=10,
             alignment=ft.Alignment.CENTER_LEFT,
         )

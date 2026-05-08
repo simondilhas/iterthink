@@ -89,7 +89,7 @@ class MarkdownStudioCompose:
                 label,
                 size=12,
                 weight=ft.FontWeight.W_600,
-                color=ft.Colors.GREY_400,
+                color=config.ON_SURFACE_VARIANT,
             ),
             height=28,
             disabled=True,
@@ -99,14 +99,14 @@ class MarkdownStudioCompose:
         self, label: str, *, on_click
     ) -> ft.PopupMenuItem:
         return ft.PopupMenuItem(
-            content=ft.Text(label, size=13, color=ft.Colors.GREY_100),
+            content=ft.Text(label, size=13, color=config.ON_SURFACE),
             on_click=on_click,
         )
 
     def _ctx_item_prompt(self, action: prompts.MarginAction) -> ft.PopupMenuItem:
         return ft.PopupMenuItem(
             content=ft.Container(
-                content=ft.Text(action.label, size=13, color=ft.Colors.GREY_100),
+                content=ft.Text(action.label, size=13, color=config.ON_SURFACE),
                 padding=ft.padding.only(left=12),
             ),
             on_click=lambda _e, aid=action.id: self._ctx_run_prompt(aid),
@@ -414,13 +414,13 @@ class MarkdownStudioCompose:
             return
         if not self.current_path:
             self._compose_tab_filename_text.value = "—"
-            self._compose_tab_filename_text.color = ft.Colors.GREY_500
+            self._compose_tab_filename_text.color = config.ON_SURFACE_VARIANT
             self._compose_tab_filename_text.style = None
             self._compose_tab_filename_hit.mouse_cursor = ft.MouseCursor.BASIC
             self._compose_tab_filename_hit.tooltip = "Open a note first"
         else:
             self._compose_tab_filename_text.value = self.current_path.stem
-            self._compose_tab_filename_text.color = ft.Colors.GREY_200
+            self._compose_tab_filename_text.color = config.ON_SURFACE
             self._compose_tab_filename_text.style = None
             self._compose_tab_filename_hit.mouse_cursor = ft.MouseCursor.CLICK
             self._compose_tab_filename_hit.tooltip = "Click to rename"
@@ -433,11 +433,14 @@ class MarkdownStudioCompose:
         self._compose_tab_inline_rename_active = False
         self._compose_tab_filename_hit.visible = True
         self._compose_tab_filename_field.visible = False
+        self._compose_tab_filename_suffix_text.visible = False
         self._refresh_compose_tab_label()
         if _ctrl_on_page(self._compose_tab_filename_hit):
             self._compose_tab_filename_hit.update()
         if _ctrl_on_page(self._compose_tab_filename_field):
             self._compose_tab_filename_field.update()
+        if _ctrl_on_page(self._compose_tab_filename_suffix_text):
+            self._compose_tab_filename_suffix_text.update()
         if _ctrl_on_page(self._compose_tab_filename_row):
             self._compose_tab_filename_row.update()
 
@@ -454,11 +457,15 @@ class MarkdownStudioCompose:
             if self._compose_tab_inline_rename_active:
                 return
             self._compose_tab_inline_rename_active = True
-            self._compose_tab_filename_field.value = self.current_path.name
+            self._compose_tab_filename_field.value = self.current_path.stem
+            self._compose_tab_filename_suffix_text.value = self.current_path.suffix
+            self._compose_tab_filename_suffix_text.visible = bool(self.current_path.suffix)
             self._compose_tab_filename_hit.visible = False
             self._compose_tab_filename_field.visible = True
             if _ctrl_on_page(self._compose_tab_filename_field):
                 self._compose_tab_filename_field.update()
+            if _ctrl_on_page(self._compose_tab_filename_suffix_text):
+                self._compose_tab_filename_suffix_text.update()
             if _ctrl_on_page(self._compose_tab_filename_hit):
                 self._compose_tab_filename_hit.update()
             if _ctrl_on_page(self._compose_tab_filename_row):
@@ -486,15 +493,16 @@ class MarkdownStudioCompose:
             if not old:
                 self._compose_tab_exit_rename_mode()
                 return
-            name = (self._compose_tab_filename_field.value or "").strip()
-            if not name or name in (".", ".."):
+            stem = (self._compose_tab_filename_field.value or "").strip()
+            if not stem or stem in (".", ".."):
                 self._snack("Invalid filename.")
                 self._compose_tab_exit_rename_mode()
                 return
-            if "/" in name or "\\" in name or "\x00" in name:
+            if "/" in stem or "\\" in stem or "\x00" in stem:
                 self._snack("Use a single filename only.")
                 self._compose_tab_exit_rename_mode()
                 return
+            name = stem + old.suffix
             new_path = old.parent / name
             if new_path.resolve() == old.resolve():
                 self._compose_tab_exit_rename_mode()
@@ -683,7 +691,7 @@ class MarkdownStudioCompose:
         compose_items: list[ft.PopupMenuItem] = []
         _hdr_h = 30.0 if compact else 34.0
         _leaf_h = 40.0 if compact else 44.0
-        _hdr_color = ft.Colors.with_opacity(0.65, ft.Colors.GREY_400)
+        _hdr_color = ft.Colors.with_opacity(0.65, config.ON_SURFACE_VARIANT)
         for cat_label, sorted_acts in rows_for_menu:
             compose_items.append(
                 ft.PopupMenuItem(
@@ -754,13 +762,13 @@ class MarkdownStudioCompose:
                 "user", f"Paragraph {idx + 1}: {act.label}", quote=para
             )
 
-        reply = ft.Text("", size=12, selectable=True, color=ft.Colors.GREY_100)
+        reply = ft.Text("", size=12, selectable=True, color=config.ON_SURFACE)
         footer = ft.Row(spacing=8, visible=False)
         bubble = ft.Column([reply, footer], tight=True, spacing=8)
         wrap = ft.Container(
             content=bubble,
             padding=ft.padding.symmetric(horizontal=10, vertical=8),
-            bgcolor=ft.Colors.with_opacity(0.22, ft.Colors.GREY_800),
+            bgcolor=ft.Colors.with_opacity(0.14, config.OUTLINE),
             border_radius=10,
             alignment=ft.Alignment.CENTER_LEFT,
         )
@@ -812,7 +820,7 @@ class MarkdownStudioCompose:
                 ft.IconButton(
                     ft.Icons.CLOSE_ROUNDED,
                     icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=ft.Colors.GREY_400,
+                    icon_color=config.ON_SURFACE_VARIANT,
                     tooltip="Dismiss",
                     style=action_rail_icon_button_style(),
                     on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
@@ -867,7 +875,7 @@ class MarkdownStudioCompose:
                 apply_btn = ft.IconButton(
                     ft.Icons.CHECK_ROUNDED,
                     icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=config.FEDORA_BLUE,
+                    icon_color=config.PRIMARY_COLOR,
                     tooltip="Apply: replace the selected range with this reply",
                     style=action_rail_icon_button_style(),
                     on_click=lambda _e, r=reply, f=footer, aid=action_id, sp=replace_span, sn=apply_snippet: self.page.run_task(
@@ -877,7 +885,7 @@ class MarkdownStudioCompose:
             review_btn = ft.IconButton(
                 ft.Icons.VISIBILITY_OUTLINED,
                 icon_size=ACTION_RAIL_ICON_SIZE,
-                icon_color=ft.Colors.GREY_400,
+                icon_color=config.ON_SURFACE_VARIANT,
                 tooltip="Review: open Compare with this text as candidate",
                 style=action_rail_icon_button_style(),
                 on_click=lambda _e, i=idx, r=reply, f=footer, aid=action_id: self.page.run_task(
@@ -887,7 +895,7 @@ class MarkdownStudioCompose:
             dismiss_btn = ft.IconButton(
                 ft.Icons.CLOSE_ROUNDED,
                 icon_size=ACTION_RAIL_ICON_SIZE,
-                icon_color=ft.Colors.GREY_400,
+                icon_color=config.ON_SURFACE_VARIANT,
                 tooltip="Dismiss",
                 style=action_rail_icon_button_style(),
                 on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
@@ -900,7 +908,7 @@ class MarkdownStudioCompose:
                 ft.IconButton(
                     ft.Icons.CLOSE_ROUNDED,
                     icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=ft.Colors.GREY_400,
+                    icon_color=config.ON_SURFACE_VARIANT,
                     tooltip="Dismiss",
                     style=action_rail_icon_button_style(),
                     on_click=lambda _e, f=footer: self._hide_prompt_footer(f),

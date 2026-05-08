@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import date
 from pathlib import Path
 from typing import Literal
@@ -11,21 +12,21 @@ import flet as ft
 from ollama import AsyncClient
 
 from iterthink import config, document_import, passphrase_keyring, plan_compare_panel
+from iterthink import ui_theme
 from iterthink import store_db, vault_store, version_storage
 from iterthink.db.session import session_scope
 from iterthink.studio_asset_compare import MarkdownStudioAssetCompare
 from iterthink.studio_checks_ui import MarkdownStudioChecksUi
 from iterthink.studio_history import MarkdownStudioCompareText
 from iterthink.studio_focus_area import MarkdownStudioCompose
-from iterthink.studio_explorer import MarkdownStudioExplorer
-from iterthink.studio_ki import MarkdownStudioKi
-from iterthink.studio_llm import MarkdownStudioLlm, build_ki_tier_tabs
+from iterthink.studio_explorer import MarkdownStudioExplorer, first_markdown_in_tree
+from iterthink.studio_ki_sidebar import MarkdownStudioKiSidebar
+from iterthink.studio_llm_backend import MarkdownStudioLlmBackend, build_llm_tier_tabs
 from iterthink.studio_shell import MarkdownStudioShell
 from iterthink.studio_sidebars import MarkdownStudioSidebars
 from iterthink.studio_constants import (
     COMPARE_COL_FONT_SIZE,
     COMPARE_COL_LINE_HEIGHT,
-    COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE,
     COMPARE_EVAL_COL_W,
     COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX,
     COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX,
@@ -62,11 +63,11 @@ class MarkdownStudio(
     MarkdownStudioCompose,
     MarkdownStudioCompareText,
     MarkdownStudioSidebars,
-    MarkdownStudioKi,
+    MarkdownStudioKiSidebar,
     MarkdownStudioExplorer,
     MarkdownStudioChecksUi,
     MarkdownStudioAssetCompare,
-    MarkdownStudioLlm,
+    MarkdownStudioLlmBackend,
 ):
     def __init__(self, page: ft.Page) -> None:
         self.page = page
@@ -116,11 +117,16 @@ class MarkdownStudio(
         self._margin_gen: int = 0
         self._compare_diff_gen: int = 0
         self._main_tab_index: int = TAB_PRESENT
+        self._review_subtab_index: int = 0
         self._compare_tab_bar_hover_index1: bool = False
         self._compare_dropdown_hover: bool = False
         self._compare_version_dd_focused: bool = False
         self._compare_candidate_source: CompareCandidateSource = "draft"
         self._compare_snapshot_version_id: int | None = None
+        # History tab: newer side (right column) — None means live current draft in ``editor``.
+        self._compare_newer_version_id: int | None = None
+        self._compare_newer_cached_body: str = ""
+        self._compare_newer_dropdown_hover: bool = False
         self._pending_ai_accept_action_id: str | None = None
         # AI proposal book-keeping: every change-topic reply persists an ai_proposal snapshot;
         # action_id is kept in-memory so accept can label the apply correctly. _latest_ai_proposal_vid
@@ -137,6 +143,12 @@ class MarkdownStudio(
         self._compare_right_diff_texts: list[ft.Text] = []
         self._compare_row_pill_hosts: list[ft.Container] = []
         self._compare_row_stable_texts: list[str] = []
+        # Future-only parallel state: per UI row kind (equal/replace/delete/insert),
+        # mapping back to the candidate-paragraph index (None for delete rows), and
+        # the original "current draft" paragraph used by decline to restore content.
+        self._future_row_kinds: list[str] = []
+        self._future_row_cand_idx: list[int | None] = []
+        self._future_row_stable_texts: list[str] = []
         self._compare_pill_gen: int = 0
         self._compare_refine_gen: int = 0
         # Future tab: left column = current draft (read-only diff with deletions),
@@ -167,6 +179,7 @@ class MarkdownStudio(
         self._header_menu_open: int = 0
         self._header_chrome_hover: bool = False
 
+        _hint_style = ft.TextStyle(color=config.ON_SURFACE_VARIANT)
         self.editor = ft.TextField(
             multiline=True,
             max_lines=None,
@@ -174,6 +187,7 @@ class MarkdownStudio(
             border=ft.InputBorder.NONE,
             filled=False,
             hint_text="Write…",
+            hint_style=_hint_style,
             content_padding=ft.padding.only(
                 left=COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX,
                 right=COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX,
@@ -184,9 +198,9 @@ class MarkdownStudio(
                 font_family="monospace",
                 size=COMPARE_COL_FONT_SIZE,
                 height=COMPARE_COL_LINE_HEIGHT,
-                color=ft.Colors.GREY_100,
+                color=ui_theme.editor_text_color(),
             ),
-            cursor_color=config.FEDORA_BLUE,
+            cursor_color=config.PRIMARY_COLOR,
             selection_color=config.SELECTION_OVERLAY,
             enable_interactive_selection=True,
             on_change=self._on_editor_change,
@@ -201,8 +215,13 @@ class MarkdownStudio(
             width=0,
             border=ft.InputBorder.NONE,
             filled=False,
-            text_style=ft.TextStyle(font_family="monospace", size=14, height=1.6, color=ft.Colors.GREY_100),
-            cursor_color=config.FEDORA_BLUE,
+            text_style=ft.TextStyle(
+                font_family="monospace",
+                size=14,
+                height=1.6,
+                color=ui_theme.editor_text_color(),
+            ),
+            cursor_color=config.PRIMARY_COLOR,
             selection_color=config.SELECTION_OVERLAY,
         )
 
@@ -283,27 +302,23 @@ class MarkdownStudio(
         )
         # Dense toolbar dropdown: line height 1.0 keeps label vertically aligned with the
         # trailing chevron; the tab strip below must be tall enough for Material input (~36px+).
-        _tb_dd_text_style = ft.TextStyle(size=12, height=1.0, color=ft.Colors.GREY_200)
+        _tb_dd_text_style = ft.TextStyle(size=12, height=1.0, color=config.ON_SURFACE)
+        _dd_opt_st = ui_theme.compare_candidate_dropdown_option_style()
         self._compare_candidate_dropdown = ft.Dropdown(
             expand=True,
             dense=True,
             text_style=_tb_dd_text_style,
             filled=False,
-            bgcolor=ft.Colors.TRANSPARENT,
+            # Flet maps this to the *open menu* fill; TRANSPARENT reads as frosted/see-through.
+            bgcolor=config.SURFACE,
             border=ft.InputBorder.NONE,
             border_width=0,
             content_padding=ft.padding.symmetric(horizontal=6, vertical=0),
             menu_style=_dd_menu_style,
-            options=[
-                ft.dropdown.Option(
-                    key=_COMPARE_KEY_CURRENT,
-                    text="Current",
-                    style=COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE,
-                )
-            ],
-            value=_COMPARE_KEY_CURRENT,
+            options=[],
+            value=None,
             disabled=True,
-            tooltip="Pick a version snapshot to compare against the current draft.",
+            tooltip="Pick an older saved version (left column, deletions).",
             on_select=lambda e: self.page.run_task(self._on_compare_candidate_change_async, e),
             on_focus=lambda _e: self._set_compare_version_dd_focused(True),
             on_blur=lambda _e: self._set_compare_version_dd_focused(False),
@@ -315,7 +330,42 @@ class MarkdownStudio(
             expand=True,
             bgcolor=config.SURFACE,
             border_radius=float(SIDEBAR_INNER_BORDER_RADIUS_PX),
-            border=ft.Border.all(1, ft.Colors.GREY_700),
+            border=ft.Border.all(1, ui_theme.outline_muted()),
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            alignment=ft.Alignment.CENTER_LEFT,
+            padding=ft.padding.symmetric(horizontal=2, vertical=1),
+        )
+        self._compare_newer_dropdown = ft.Dropdown(
+            expand=True,
+            dense=True,
+            text_style=_tb_dd_text_style,
+            filled=False,
+            bgcolor=config.SURFACE,
+            border=ft.InputBorder.NONE,
+            border_width=0,
+            content_padding=ft.padding.symmetric(horizontal=6, vertical=0),
+            menu_style=_dd_menu_style,
+            options=[
+                ft.dropdown.Option(
+                    key=_COMPARE_KEY_CURRENT,
+                    text="Current draft",
+                    style=_dd_opt_st,
+                )
+            ],
+            value=_COMPARE_KEY_CURRENT,
+            disabled=True,
+            tooltip="Pick the newer version (right column, insertions). Default is the current draft.",
+            on_select=lambda e: self.page.run_task(self._on_compare_newer_change_async, e),
+            on_focus=lambda _e: self._set_compare_version_dd_focused(True),
+            on_blur=lambda _e: self._set_compare_version_dd_focused(False),
+        )
+        self._compare_newer_dropdown_hover_wrap = ft.Container(
+            content=self._compare_newer_dropdown,
+            on_hover=self._on_compare_newer_dropdown_container_hover,
+            expand=True,
+            bgcolor=config.SURFACE,
+            border_radius=float(SIDEBAR_INNER_BORDER_RADIUS_PX),
+            border=ft.Border.all(1, ui_theme.outline_muted()),
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
             alignment=ft.Alignment.CENTER_LEFT,
             padding=ft.padding.symmetric(horizontal=2, vertical=1),
@@ -332,6 +382,7 @@ class MarkdownStudio(
             menu_style=_dd_menu_style,
             options=[],
             disabled=True,
+            visible=False,
             tooltip="Pick an AI proposal or import to review against the current draft.",
             on_select=lambda e: self.page.run_task(self._on_compare_candidate_change_async, e),
         )
@@ -342,7 +393,7 @@ class MarkdownStudio(
         self._compare_approve_all_btn = ft.IconButton(
             ft.Icons.DONE_ALL,
             icon_size=18,
-            icon_color=config.FEDORA_BLUE,
+            icon_color=config.PRIMARY_COLOR,
             tooltip="Apply all paragraphs to the document",
             style=_compare_bulk_icon_style,
             visible=False,
@@ -351,7 +402,7 @@ class MarkdownStudio(
         self._compare_decline_all_btn = ft.IconButton(
             ft.Icons.CLOSE_ROUNDED,
             icon_size=18,
-            icon_color=ft.Colors.GREY_400,
+            icon_color=config.ON_SURFACE_VARIANT,
             tooltip="Reset all paragraphs to match latest (left)",
             style=_compare_bulk_icon_style,
             visible=False,
@@ -359,7 +410,7 @@ class MarkdownStudio(
         )
         # History tab label: simple text (dropdown lives in the tab body toolbar)
         self._compare_tab_label_host = ft.Container(
-            content=ft.Text("History", size=14, color=ft.Colors.GREY_400),
+            content=ft.Text("History", size=14, color=config.ON_SURFACE_VARIANT),
             expand=True,
             alignment=ft.Alignment.CENTER,
         )
@@ -398,13 +449,13 @@ class MarkdownStudio(
                 ft.Container(
                     content=self._compare_pdf_left_lv,
                     expand=True,
-                    border=ft.border.all(1, ft.Colors.with_opacity(0.35, ft.Colors.GREY_600)),
+                    border=ft.border.all(1, ui_theme.outline_muted(alpha=0.38)),
                     border_radius=8,
                 ),
                 ft.Container(
                     content=self._compare_pdf_right_column,
                     expand=True,
-                    border=ft.border.all(1, ft.Colors.with_opacity(0.35, ft.Colors.GREY_600)),
+                    border=ft.border.all(1, ui_theme.outline_muted(alpha=0.38)),
                     border_radius=8,
                 ),
             ],
@@ -413,25 +464,30 @@ class MarkdownStudio(
         )
         self._compare_pdf_layer = ft.Container(content=self._compare_pdf_split_row, expand=True, visible=False)
         self._compare_editor_holder = ft.Container(content=self._compare_editor, visible=False, height=0)
-        # Floating card shown on hover over an Analyse symbol in a History row's eval cell.
-        self._result_card_overlay = ft.Container(
-            visible=False,
-            width=_RESULT_CARD_W,
-            bgcolor=ft.Colors.with_opacity(0.96, "#1A1D22"),
-            border=ft.border.all(1, ft.Colors.with_opacity(0.55, ft.Colors.GREY_700)),
-            border_radius=10,
-            padding=ft.padding.all(12),
-            shadow=ft.BoxShadow(
-                blur_radius=18,
-                spread_radius=0,
-                color=ft.Colors.with_opacity(0.45, ft.Colors.BLACK),
-                offset=ft.Offset(0, 6),
-            ),
-            top=0,
-            left=4,
-            on_hover=self._on_result_card_hover,
-            content=ft.Column([], tight=True, spacing=6),
-        )
+        def _make_result_card_overlay() -> ft.Container:
+            return ft.Container(
+                visible=False,
+                width=_RESULT_CARD_W,
+                bgcolor=ui_theme.result_card_bg(),
+                border=ft.border.all(1, ui_theme.result_card_border()),
+                border_radius=10,
+                padding=ft.padding.all(12),
+                shadow=ft.BoxShadow(
+                    blur_radius=18,
+                    spread_radius=0,
+                    color=ft.Colors.with_opacity(0.45, ft.Colors.BLACK),
+                    offset=ft.Offset(0, 6),
+                ),
+                top=0,
+                left=4,
+                on_hover=self._on_result_card_hover,
+                content=ft.Column([], tight=True, spacing=6),
+            )
+
+        # Floating card on hover over Analyse eval symbol (History / compare paragraph stack).
+        self._result_card_overlay = _make_result_card_overlay()
+        # Same chrome for Future tab stack (a control cannot have two parents).
+        self._future_result_card_overlay = _make_result_card_overlay()
         self._compare_body_stack = ft.Stack(
             controls=[
                 self._compare_paragraph_layer,
@@ -461,18 +517,36 @@ class MarkdownStudio(
         )
         self._future_paragraph_layer = ft.Container(content=self._future_rows_listview, expand=True)
         self._future_body_stack = ft.Stack(
-            controls=[self._future_paragraph_layer],
-            expand=True,
-        )
-        self._future_tab_body = ft.Column(
-            [
-                ft.Row(
-                    [self._future_body_stack],
-                    expand=True,
-                ),
+            controls=[
+                self._future_paragraph_layer,
+                self._future_result_card_overlay,
             ],
             expand=True,
-            spacing=0,
+        )
+        self._review_change_panel = ft.Container(
+            expand=True,
+            content=ft.Column(
+                [ft.Row([self._future_body_stack], expand=True)],
+                expand=True,
+                spacing=0,
+            ),
+        )
+        self._review_impact_panel = ft.Container(
+            expand=True,
+            visible=False,
+            alignment=ft.Alignment.CENTER,
+            content=ft.Text(
+                "Impact analysis coming soon",
+                size=13,
+                color=config.ON_SURFACE_VARIANT,
+            ),
+        )
+        self._future_tab_body = ft.Container(
+            expand=True,
+            content=ft.Stack(
+                [self._review_change_panel, self._review_impact_panel],
+                expand=True,
+            ),
         )
 
         self._compose_tab_filename_text = ft.Text(
@@ -480,6 +554,7 @@ class MarkdownStudio(
             size=14,
             max_lines=1,
             overflow=ft.TextOverflow.ELLIPSIS,
+            color=config.ON_SURFACE_VARIANT,
         )
         self._compose_tab_filename_hit = ft.GestureDetector(
             content=self._compose_tab_filename_text,
@@ -497,37 +572,49 @@ class MarkdownStudio(
             bgcolor=ft.Colors.TRANSPARENT,
             border=ft.InputBorder.UNDERLINE,
             border_width=1,
-            border_color=ft.Colors.GREY_600,
-            focused_border_color=config.FEDORA_BLUE,
-            cursor_color=config.FEDORA_BLUE,
+            border_color=config.OUTLINE,
+            focused_border_color=config.PRIMARY_COLOR,
+            cursor_color=config.PRIMARY_COLOR,
             selection_color=config.SELECTION_OVERLAY,
             content_padding=ft.padding.only(left=0, right=4, bottom=2, top=0),
             on_submit=self._on_compose_tab_rename_field_submit,
             on_blur=self._on_compose_tab_rename_field_blur,
         )
+        # Static (non-editable) extension shown next to the rename field so the
+        # user sees the full filename but cannot change the extension.
+        self._compose_tab_filename_suffix_text = ft.Text(
+            "",
+            size=14,
+            color=config.ON_SURFACE_VARIANT,
+            visible=False,
+        )
         self._compose_tab_filename_row = ft.Row(
-            [self._compose_tab_filename_hit, self._compose_tab_filename_field],
+            [
+                self._compose_tab_filename_hit,
+                self._compose_tab_filename_field,
+                self._compose_tab_filename_suffix_text,
+            ],
             tight=True,
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         # ── Tab-specific toolbar (below tab bar) ─────────────────────────────
-        _tb_text_style = ft.TextStyle(size=12, color=ft.Colors.GREY_500)
-        _tb_icon_color = ft.Colors.GREY_600
+        _tb_text_style = ft.TextStyle(size=12, color=config.ON_SURFACE_VARIANT)
+        _tb_icon_color = config.ON_SURFACE_VARIANT
         _tb_icon_size = 14
         _tb_pad = ft.padding.symmetric(horizontal=12, vertical=4)
 
-        _tb_label_style = ft.TextStyle(size=12, color=ft.Colors.GREY_600)
+        _tb_label_style = ft.TextStyle(size=12, color=config.ON_SURFACE_VARIANT)
         _tb_col_label = lambda t: ft.Text(t, style=_tb_label_style)  # noqa: E731
 
-        # History: left = "Old Version:" + snapshot dropdown  |  right = "Draft"
+        # History: older (left) + newer (right) version dropdowns
         self._toolbar_history = ft.Container(
             content=ft.Row(
                 [
                     ft.Container(
                         content=ft.Row(
                             [
-                                ft.Text("Old Version:", style=_tb_label_style),
+                                ft.Text("Older:", style=_tb_label_style),
                                 self._compare_dropdown_hover_wrap,
                             ],
                             spacing=6,
@@ -537,9 +624,16 @@ class MarkdownStudio(
                         expand=1,
                     ),
                     ft.Container(
-                        content=ft.Text("Current Version", style=_tb_label_style),
+                        content=ft.Row(
+                            [
+                                ft.Text("Newer:", style=_tb_label_style),
+                                self._compare_newer_dropdown_hover_wrap,
+                            ],
+                            spacing=6,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            expand=True,
+                        ),
                         expand=1,
-                        alignment=ft.Alignment(0, 0),
                     ),
                 ],
                 spacing=0,
@@ -611,7 +705,7 @@ class MarkdownStudio(
                     ft.Divider(
                         height=1,
                         thickness=1,
-                        color=ft.Colors.with_opacity(0.12, ft.Colors.GREY_600),
+                        color=ui_theme.outline_muted(alpha=0.22),
                     ),
                 ],
                 spacing=0,
@@ -621,14 +715,14 @@ class MarkdownStudio(
         # ─────────────────────────────────────────────────────────────────────
 
         self._compose_tab_label_row = ft.Row(
-            [ft.Text("Focus Area", size=14, color=ft.Colors.GREY_400)],
+            [ft.Text("Focus Area", size=14, color=config.ON_SURFACE_VARIANT)],
             tight=True,
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         # Future tab label: "Future" + bulk approve/decline buttons
         _future_tab_label_row = ft.Row(
-            [ft.Text("Review", size=14, color=ft.Colors.GREY_400)],
+            [ft.Text("Review", size=14, color=config.ON_SURFACE_VARIANT)],
             tight=True,
             spacing=4,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -648,8 +742,11 @@ class MarkdownStudio(
             tab_alignment=ft.TabAlignment.FILL,
             indicator_size=ft.TabBarIndicatorSize.TAB,
             label_padding=ft.padding.only(bottom=8),
-            indicator_color=config.FEDORA_BLUE,
-            divider_color=ft.Colors.with_opacity(0.2, ft.Colors.GREY_700),
+            indicator_color=config.HIGHLIGHT,
+            divider_color=ui_theme.outline_muted(alpha=0.28),
+            label_color=config.ON_SURFACE,
+            unselected_label_color=config.ON_SURFACE_VARIANT,
+            overlay_color=ft.Colors.with_opacity(0.06, config.ON_SURFACE),
             on_hover=self._on_main_tab_bar_hover,
         )
         self._tab_bar_view = ft.TabBarView(
@@ -661,8 +758,37 @@ class MarkdownStudio(
             padding=ft.padding.only(bottom=2),
             content=self._main_tab_bar,
         )
+        # Review subtab strip: segmented Change | Impact bar that sits directly under
+        # the main tab bar (above the per-tab toolbar). Only visible on Review.
+        self._review_subtab_change_btn = self._build_review_subtab_button("Change", 0)
+        self._review_subtab_impact_btn = self._build_review_subtab_button("Impact", 1)
+        self._review_subtab_strip = ft.Container(
+            bgcolor=config.SURFACE,
+            visible=False,
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [self._review_subtab_change_btn, self._review_subtab_impact_btn],
+                        spacing=0,
+                        expand=True,
+                    ),
+                    ft.Divider(
+                        height=1,
+                        thickness=1,
+                        color=ui_theme.outline_muted(alpha=0.22),
+                    ),
+                ],
+                spacing=0,
+                tight=True,
+            ),
+        )
         self._tabs_inner_column = ft.Column(
-            [self._sticky_tab_header, self._tab_toolbar, self._tab_bar_view],
+            [
+                self._sticky_tab_header,
+                self._review_subtab_strip,
+                self._tab_toolbar,
+                self._tab_bar_view,
+            ],
             expand=True,
             spacing=0,
         )
@@ -679,17 +805,25 @@ class MarkdownStudio(
             expand=True,
         )
 
+        _sym_path = (
+            config.APP_SYMBOL_SVG
+            if config.APP_SYMBOL_SVG.is_file()
+            else config.APP_SYMBOL_PNG
+        )
         self.app_symbol = ft.Image(
-            src=str(config.APP_SYMBOL_PNG),
+            src=str(_sym_path.resolve()),
             width=22,
             height=22,
             fit=ft.BoxFit.CONTAIN,
+            # Tint to title color: white in dark mode, ink in light (SRC_IN works for SVG too).
+            color=config.ON_SURFACE,
+            color_blend_mode=ft.BlendMode.SRC_IN,
         )
         self.filename_text = ft.Text(
             "iterthink - No file",
             size=16,
             weight=ft.FontWeight.W_500,
-            color=ft.Colors.GREY_200,
+            color=config.ON_SURFACE,
             overflow=ft.TextOverflow.ELLIPSIS,
             max_lines=1,
         )
@@ -697,7 +831,7 @@ class MarkdownStudio(
             "•",
             size=18,
             weight=ft.FontWeight.W_700,
-            color=config.FEDORA_BLUE,
+            color=config.PRIMARY_COLOR,
             visible=False,
         )
         self.title_hit = ft.Container(
@@ -717,7 +851,7 @@ class MarkdownStudio(
         self._tree_explorer_overflow_btn = ft.PopupMenuButton(
             icon=ft.Icons.MORE_VERT,
             icon_size=KI_TAB_ICON_PX,
-            icon_color=ft.Colors.GREY_400,
+            icon_color=config.ON_SURFACE_VARIANT,
             tooltip="Sort tree",
             style=ft.ButtonStyle(padding=ft.padding.all(2)),
             height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
@@ -746,11 +880,15 @@ class MarkdownStudio(
         self.tree_search_field = ft.TextField(
             hint_text="Search files…",
             dense=True,
-            filled=False,
-            bgcolor=ft.Colors.TRANSPARENT,
+            filled=True,
+            fill_color=config.SURFACE,
+            focused_bgcolor=config.SURFACE,
+            bgcolor=config.SURFACE,
             border=ft.InputBorder.NONE,
             text_size=12,
-            cursor_color=config.FEDORA_BLUE,
+            color=config.ON_SURFACE,
+            hint_style=_hint_style,
+            cursor_color=config.PRIMARY_COLOR,
             content_padding=ft.padding.symmetric(horizontal=8, vertical=0),
             expand=True,
             on_change=self._on_tree_search_change,
@@ -760,7 +898,7 @@ class MarkdownStudio(
             height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
             bgcolor=config.SURFACE,
             border_radius=float(SIDEBAR_INNER_BORDER_RADIUS_PX),
-            border=ft.Border.all(1, ft.Colors.GREY_700),
+            border=ft.Border.all(1, ui_theme.outline_muted()),
             alignment=ft.Alignment.CENTER_LEFT,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
             content=self.tree_search_field,
@@ -769,7 +907,7 @@ class MarkdownStudio(
 
         def _tree_search_rim(focused: bool) -> None:
             _tree_search_bar.border = ft.Border.all(
-                1, config.FEDORA_BLUE if focused else ft.Colors.GREY_700
+                1, config.PRIMARY_COLOR if focused else ui_theme.outline_muted()
             )
             if _ctrl_on_page(_tree_search_bar):
                 _tree_search_bar.update()
@@ -780,7 +918,7 @@ class MarkdownStudio(
         self._tree_add_menu = ft.PopupMenuButton(
             icon=ft.Icons.ADD,
             icon_size=KI_TAB_ICON_PX,
-            icon_color=config.FEDORA_BLUE,
+            icon_color=config.PRIMARY_COLOR,
             tooltip="New, import…",
             style=ft.ButtonStyle(padding=ft.padding.all(2)),
             height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
@@ -894,7 +1032,7 @@ class MarkdownStudio(
                 icon=ic,
                 tooltip=tip,
                 icon_size=KI_TAB_ICON_PX,
-                icon_color=config.FEDORA_BLUE if sel else ft.Colors.GREY_400,
+                icon_color=config.PRIMARY_COLOR if sel else config.ON_SURFACE_VARIANT,
                 style=_ki_mode_btn_style,
                 on_click=lambda e, ix=i: self._set_ki_topic(ix),
             )
@@ -906,7 +1044,7 @@ class MarkdownStudio(
                 border=ft.border.only(
                     bottom=ft.BorderSide(
                         _ki_tab_under if sel else 0.0,
-                        config.FEDORA_BLUE if sel else ft.Colors.TRANSPARENT,
+                        config.HIGHLIGHT if sel else ft.Colors.TRANSPARENT,
                     )
                 ),
                 content=ib,
@@ -949,13 +1087,17 @@ class MarkdownStudio(
             multiline=True,
             dense=True,
             filled=True,
+            fill_color=config.SURFACE,
+            focused_bgcolor=config.SURFACE,
             bgcolor=config.SURFACE,
             border_radius=8,
             expand=True,
             text_size=12,
-            border_color=ft.Colors.GREY_700,
-            focused_border_color=config.FEDORA_BLUE,
-            cursor_color=config.FEDORA_BLUE,
+            color=config.ON_SURFACE,
+            hint_style=_hint_style,
+            border_color=ui_theme.outline_muted(),
+            focused_border_color=config.PRIMARY_COLOR,
+            cursor_color=config.PRIMARY_COLOR,
             content_padding=ft.padding.symmetric(horizontal=8, vertical=6),
             on_submit=lambda e: self.page.run_task(self._send_chat_message, e),
         )
@@ -963,12 +1105,12 @@ class MarkdownStudio(
             icon=ft.Icons.SEND,
             icon_size=20,
             tooltip="Send",
-            icon_color=config.FEDORA_BLUE,
+            icon_color=config.PRIMARY_COLOR,
             style=ft.ButtonStyle(padding=ft.padding.all(4)),
             on_click=lambda e: self.page.run_task(self._send_chat_message, e),
         )
         _tier_ix = KI_TIERS.index(normalize_ki_tier(self.ki_tier))
-        self._ki_tier_tabs = build_ki_tier_tabs(
+        self._ki_tier_tabs = build_llm_tier_tabs(
             selected_index=_tier_ix,
             on_change=self._on_ki_tier_tabs_change,
             icon_size=KI_TIER_TAB_ICON_PX,
@@ -1070,12 +1212,68 @@ class MarkdownStudio(
     def refresh_ollama_client(self) -> None:
         self.ollama = AsyncClient(host=config.OLLAMA_HOST) if config.OLLAMA_HOST else AsyncClient()
 
+    def _apply_ki_tier_tab_bar_theme(self) -> None:
+        """KI composer tier strip (Local / Office / Cloud): tab chrome follows appearance."""
+        tabs = getattr(self, "_ki_tier_tabs", None)
+        if tabs is None:
+            return
+        body = getattr(tabs, "content", None)
+        if not isinstance(body, ft.Column) or not body.controls:
+            return
+        tier_bar = body.controls[0]
+        if not isinstance(tier_bar, ft.TabBar):
+            return
+        tier_bar.indicator_color = config.PRIMARY_COLOR
+        tier_bar.divider_color = ui_theme.outline_muted(alpha=0.22)
+        tier_bar.label_color = config.ON_SURFACE
+        tier_bar.unselected_label_color = config.ON_SURFACE_VARIANT
+        tier_bar.overlay_color = ft.Colors.with_opacity(0.06, config.ON_SURFACE)
+        if _ctrl_on_page(tier_bar):
+            tier_bar.update()
+
     def apply_config_theme(self) -> None:
-        self.editor.cursor_color = config.FEDORA_BLUE
+        self.page.theme_mode = ft.ThemeMode.LIGHT if config.IS_LIGHT else ft.ThemeMode.DARK
+        self.page.bgcolor = config.PAGE_BG
+        ec = ui_theme.editor_text_color()
+        self.editor.text_style = ft.TextStyle(
+            font_family="monospace",
+            size=COMPARE_COL_FONT_SIZE,
+            height=COMPARE_COL_LINE_HEIGHT,
+            color=ec,
+        )
+        self.editor.cursor_color = config.PRIMARY_COLOR
         self.editor.selection_color = config.SELECTION_OVERLAY
-        self._compare_editor.cursor_color = config.FEDORA_BLUE
+        self._compare_editor.text_style = ft.TextStyle(
+            font_family="monospace",
+            size=14,
+            height=1.6,
+            color=ec,
+        )
+        self._compare_editor.cursor_color = config.PRIMARY_COLOR
         self._compare_editor.selection_color = config.SELECTION_OVERLAY
-        self.dirty_dot.color = config.FEDORA_BLUE
+        self.dirty_dot.color = config.PRIMARY_COLOR
+        self.filename_text.color = config.ON_SURFACE
+        self.app_symbol.color = config.ON_SURFACE
+        self.app_symbol.color_blend_mode = ft.BlendMode.SRC_IN
+        self._main_tab_bar.indicator_color = config.HIGHLIGHT
+        self._main_tab_bar.divider_color = ui_theme.outline_muted(alpha=0.28)
+        self._main_tab_bar.label_color = config.ON_SURFACE
+        self._main_tab_bar.unselected_label_color = config.ON_SURFACE_VARIANT
+        self._main_tab_bar.overlay_color = ft.Colors.with_opacity(0.06, config.ON_SURFACE)
+        dd_ts = ft.TextStyle(size=12, height=1.0, color=config.ON_SURFACE)
+        self._compare_candidate_dropdown.text_style = dd_ts
+        self._compare_newer_dropdown.text_style = dd_ts
+        self._review_candidate_dropdown.text_style = dd_ts
+        self._compare_candidate_dropdown.bgcolor = config.SURFACE
+        self._compare_newer_dropdown.bgcolor = config.SURFACE
+        self._compare_candidate_dropdown.menu_style = ft.MenuStyle(
+            bgcolor=config.SURFACE,
+            elevation=12,
+            shadow_color=ft.Colors.with_opacity(0.45, ft.Colors.BLACK),
+            visual_density=ft.VisualDensity.COMPACT,
+        )
+        self._compare_newer_dropdown.menu_style = self._compare_candidate_dropdown.menu_style
+        self._review_candidate_dropdown.menu_style = self._compare_candidate_dropdown.menu_style
         self._sync_side_panel_chrome()
         self.center_panel.bgcolor = config.SURFACE
         self._sticky_tab_header.bgcolor = config.SURFACE
@@ -1086,31 +1284,61 @@ class MarkdownStudio(
             self._header_shell.bgcolor = config.SURFACE_VARIANT
         if self._menu_bar:
             self._menu_bar.style = self._menu_bar_style()
-        self.page.theme = ft.Theme(
-            color_scheme=ft.ColorScheme(
-                primary=config.FEDORA_BLUE,
-                on_primary=ft.Colors.WHITE,
-                surface=config.SURFACE_VARIANT,
-                on_surface=ft.Colors.GREY_100,
-                surface_container=config.SURFACE,
-            ),
-        )
+        self.page.theme = ft.Theme(color_scheme=ui_theme.page_color_scheme())
+        _hs = ft.TextStyle(color=config.ON_SURFACE_VARIANT)
+        self.editor.hint_style = _hs
+        self.tree_search_field.color = config.ON_SURFACE
+        self.tree_search_field.hint_style = _hs
+        self.tree_search_field.fill_color = config.SURFACE
+        self.tree_search_field.bgcolor = config.SURFACE
+        self.tree_search_field.focused_bgcolor = config.SURFACE
+        self._chat_input.color = config.ON_SURFACE
+        self._chat_input.hint_style = _hs
+        self._chat_input.fill_color = config.SURFACE
+        self._chat_input.bgcolor = config.SURFACE
+        self._chat_input.focused_bgcolor = config.SURFACE
+        self._chat_input.border_color = ui_theme.outline_muted()
+        self._tree_search_bar.bgcolor = config.SURFACE
+        self._tab_toolbar.bgcolor = config.SURFACE
+        self._apply_ki_tier_tab_bar_theme()
         self.left_panel.content = self._build_left_column()
         self.right_panel.content = self._build_right_column()
         if _ctrl_on_page(self.editor):
             self.editor.update()
             self._compare_editor.update()
             self.dirty_dot.update()
+        if _ctrl_on_page(self.filename_text):
+            self.filename_text.update()
+        if _ctrl_on_page(self.app_symbol):
+            self.app_symbol.update()
+        if _ctrl_on_page(self._main_tab_bar):
+            self._main_tab_bar.update()
+        if self._main_tab_index == TAB_HISTORY and _ctrl_on_page(self._compare_candidate_dropdown):
+            self._compare_candidate_dropdown.update()
+        if self._main_tab_index == TAB_HISTORY and _ctrl_on_page(self._compare_newer_dropdown):
+            self._compare_newer_dropdown.update()
+        if self._main_tab_index == TAB_FUTURE and _ctrl_on_page(self._review_candidate_dropdown):
+            self._review_candidate_dropdown.update()
         if _ctrl_on_page(self.left_panel):
             self.left_panel.update()
         if _ctrl_on_page(self.right_panel):
             self.right_panel.update()
         if _ctrl_on_page(self.center_panel):
             self.center_panel.update()
+        if _ctrl_on_page(self.tree_search_field):
+            self.tree_search_field.update()
+        if _ctrl_on_page(self._tree_search_bar):
+            self._tree_search_bar.update()
+        if _ctrl_on_page(self._chat_input):
+            self._chat_input.update()
+        if _ctrl_on_page(self._tab_toolbar):
+            self._tab_toolbar.update()
         if self._header_shell and _ctrl_on_page(self._header_shell):
             self._header_shell.update()
         if self._menu_bar and _ctrl_on_page(self._menu_bar):
             self._menu_bar.update()
+        self._refresh_compare_tab_candidate_ui()
+        self._refresh_compose_tab_label()
         self.page.update()
 
     def _next_dated_note_path(self) -> Path:
@@ -1124,13 +1352,89 @@ class MarkdownStudio(
                 return cand
             n += 1
 
+    def _next_template_note_path(self) -> Path:
+        template = (config.NEW_NOTE_NAME_TEMPLATE or "").strip()
+        if template.count("{n}") != 1:
+            raise ValueError('new_note_name_template must contain exactly one "{n}" placeholder.')
+        root = config.DOCUMENTS
+        root.mkdir(parents=True, exist_ok=True)
+        left, right = template.split("{n}", 1)
+        pattern = re.compile("^" + re.escape(left) + r"(\d+)" + re.escape(right) + r"$")
+        max_n = 0
+        for p in root.glob("*.md"):
+            m = pattern.match(p.name)
+            if m:
+                max_n = max(max_n, int(m.group(1)))
+        return root / template.replace("{n}", str(max_n + 1))
+
     async def _startup_open_default_note(self) -> None:
-        if not self.current_path:
-            await self.new_file(None)
+        if self.current_path:
+            return
+        if config.STARTUP_DAILY_LOG:
+            await self._startup_open_daily_log()
+        else:
+            await self._startup_open_first_or_template()
+
+    async def _startup_open_daily_log(self) -> None:
+        root = config.DOCUMENTS
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = date.today().strftime("%Y%m%d")
+        dated: list[tuple[int, Path]] = []
+        for p in root.glob(f"{stamp}-*.md"):
+            rest = p.stem[len(stamp) :]
+            if not rest.startswith("-"):
+                continue
+            suf = rest[1:]
+            if suf.isdigit():
+                dated.append((int(suf), p))
+        if dated:
+            path = min(dated, key=lambda x: x[0])[1]
+            self._rebuild_tree_ui()
+            if _ctrl_on_page(self.tree_column):
+                self.tree_column.update()
+            await self.open_file(path)
+            return
+        path = root / f"{stamp}-1.md"
+        try:
+            path.write_text("", encoding="utf-8")
+        except OSError as ex:
+            self._snack(f"Could not create file: {ex}")
+            return
+        self._rebuild_tree_ui()
+        if _ctrl_on_page(self.tree_column):
+            self.tree_column.update()
+        await self.open_file(path)
+
+    async def _startup_open_first_or_template(self) -> None:
+        root = config.DOCUMENTS
+        root.mkdir(parents=True, exist_ok=True)
+        mode = getattr(self, "_tree_sort_mode", "name_az")
+        first = first_markdown_in_tree(root, mode)
+        if first is not None:
+            await self.open_file(first)
+            return
+        try:
+            path = self._next_template_note_path()
+        except ValueError as ex:
+            self._snack(str(ex))
+            return
+        try:
+            path.write_text("", encoding="utf-8")
+        except OSError as ex:
+            self._snack(f"Could not create file: {ex}")
+            return
+        self._rebuild_tree_ui()
+        if _ctrl_on_page(self.tree_column):
+            self.tree_column.update()
+        await self.open_file(path)
 
     async def new_file(self, _e: ft.ControlEvent | None = None) -> None:
         config.DOCUMENTS.mkdir(parents=True, exist_ok=True)
-        path = self._next_dated_note_path()
+        try:
+            path = self._next_dated_note_path() if config.STARTUP_DAILY_LOG else self._next_template_note_path()
+        except ValueError as ex:
+            self._snack(str(ex))
+            return
         try:
             path.write_text("", encoding="utf-8")
         except OSError as ex:
@@ -1140,31 +1444,8 @@ class MarkdownStudio(
         self.tree_column.update()
         await self.open_file(path)
 
-    def _next_untitled_dir_path(self) -> Path:
-        root = config.DOCUMENTS
-        root.mkdir(parents=True, exist_ok=True)
-        cand = root / "New folder"
-        if not cand.exists():
-            return cand
-        n = 1
-        while True:
-            cand = root / f"New folder {n}"
-            if not cand.exists():
-                return cand
-            n += 1
-
     async def new_folder(self, _e: ft.ControlEvent | None = None) -> None:
-        config.DOCUMENTS.mkdir(parents=True, exist_ok=True)
-        path = self._next_untitled_dir_path()
-        try:
-            path.mkdir(parents=False)
-        except OSError as ex:
-            self._snack(f"Could not create folder: {ex}")
-            return
-        self._rebuild_tree_ui()
-        if _ctrl_on_page(self.tree_column):
-            self.tree_column.update()
-        self._snack(f'Created folder "{path.name}".')
+        self._show_new_folder_dialog()
 
     async def save_file(
         self,
@@ -1179,6 +1460,7 @@ class MarkdownStudio(
             if not silent:
                 self._snack("Open or create a note first.")
             return
+        self._flush_review_edits_if_changed()
         buf = self._working_document_text()
         reason: version_storage.SnapshotReason = snapshot_reason or ("autosave" if silent else "manual")
         try:
@@ -1203,8 +1485,6 @@ class MarkdownStudio(
             except BaseException:
                 pass
         self._refresh_compare_tab_candidate_ui()
-        if _ctrl_on_page(self._compare_candidate_dropdown):
-            self._compare_candidate_dropdown.update()
         self._margin_gen += 1
         if self._main_tab_index == TAB_PRESENT:
             self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)

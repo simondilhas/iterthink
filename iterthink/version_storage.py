@@ -422,3 +422,25 @@ def latest_pdf_version_detail(session: Session, resolved_doc: Path) -> tuple[int
     if row is None:
         return None
     return (vid, rel, row.pdf_profile)
+
+
+def delete_document_row_if_any(session: Session, resolved_doc: Path) -> None:
+    """Remove the ``Document`` row if present (``DocumentVersion`` rows cascade)."""
+    key = path_key_for(resolved_doc.resolve())
+    doc = session.execute(select(Document).where(Document.path_key == key)).scalar_one_or_none()
+    if doc is not None:
+        session.delete(doc)
+
+
+def purge_document_store_dirs(resolved_doc: Path) -> None:
+    """Remove snapshot / PDF / DOCX asset directories keyed by this document path."""
+    pk = path_key_for(resolved_doc.resolve())
+    base = config.STORE_DIR.resolve()
+    for sub in ("snapshots", "pdf_assets", "docx_assets"):
+        d = (config.STORE_DIR / sub / pk).resolve()
+        try:
+            d.relative_to(base)
+        except ValueError:
+            continue
+        if d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)

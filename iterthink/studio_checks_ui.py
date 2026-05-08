@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from typing import Any
 
 import flet as ft
@@ -14,7 +15,7 @@ from iterthink.compare_layout import aligned_compare_pairs
 from iterthink.ollama_util import ollama_error_message
 from iterthink.paragraph_align import compute_hash
 from iterthink.studio_constants import (
-    COMPARE_EVAL_COL_W,
+    COMPARE_EVAL_COL_W_WIDE,
     KI_PILL_TEXT_SIZE,
     RESULT_CARD_HIDE_DELAY_SEC,
     TAB_FUTURE,
@@ -32,9 +33,9 @@ class MarkdownStudioChecksUi:
         self._analyse_button_count.clear()
         for c in checks_mod.CHECKS:
             spinner = ft.ProgressRing(
-                width=10, height=10, stroke_width=2, color=config.FEDORA_BLUE, visible=False
+                width=10, height=10, stroke_width=2, color=config.PRIMARY_COLOR, visible=False
             )
-            counter = ft.Text("", size=KI_PILL_TEXT_SIZE, color=ft.Colors.GREY_300, visible=False)
+            counter = ft.Text("", size=KI_PILL_TEXT_SIZE, color=config.ON_SURFACE_VARIANT, visible=False)
             label_row = ft.Row(
                 [
                     spinner,
@@ -52,13 +53,6 @@ class MarkdownStudioChecksUi:
                     text_style=ft.TextStyle(size=KI_PILL_TEXT_SIZE),
                     visual_density=ft.VisualDensity.COMPACT,
                     padding=ft.padding.symmetric(horizontal=8, vertical=4),
-                    bgcolor={
-                        ft.ControlState.DEFAULT: ft.Colors.with_opacity(0.18, config.FEDORA_BLUE),
-                        ft.ControlState.HOVERED: ft.Colors.with_opacity(0.32, config.FEDORA_BLUE),
-                    },
-                    color={
-                        ft.ControlState.DEFAULT: ft.Colors.GREY_100,
-                    },
                 ),
                 tooltip=f"Run {c.label} on every paragraph (cached results reused).",
                 on_click=lambda _e, cid=c.id: self.page.run_task(self._run_check_async, cid),
@@ -87,21 +81,16 @@ class MarkdownStudioChecksUi:
                 total = max(len(results), len(self._check_para_hashes))
                 counter.value = f"{done}/{total}" if running else ""
                 counter.visible = running and total > 0
-            # Active check: stronger background (same accent as other KI pills).
-            base_color = config.FEDORA_BLUE
+            # Match Edit/Discuss pills: default theme primary; active gets an outline.
             btn.style = ft.ButtonStyle(
                 text_style=ft.TextStyle(size=KI_PILL_TEXT_SIZE),
                 visual_density=ft.VisualDensity.COMPACT,
                 padding=ft.padding.symmetric(horizontal=8, vertical=4),
-                bgcolor={
-                    ft.ControlState.DEFAULT: ft.Colors.with_opacity(
-                        0.42 if is_active else 0.18, base_color
-                    ),
-                    ft.ControlState.HOVERED: ft.Colors.with_opacity(
-                        0.55 if is_active else 0.32, base_color
-                    ),
-                },
-                color={ft.ControlState.DEFAULT: ft.Colors.GREY_100},
+                side=(
+                    ft.BorderSide(1.5, config.HIGHLIGHT)
+                    if is_active
+                    else ft.BorderSide(0, ft.Colors.TRANSPARENT)
+                ),
             )
             if _ctrl_on_page(btn):
                 btn.update()
@@ -122,8 +111,12 @@ class MarkdownStudioChecksUi:
         # Need a candidate to analyse against the baseline.
         if not self._compare_right_fields:
             self._rebuild_compare_paragraph_ui()
-        baseline = self._compare_latest_baseline_text()
-        candidate = self._compare_editor.value or self.editor.value or ""
+        if self._main_tab_index == TAB_FUTURE:
+            baseline = self.editor.value or ""
+            candidate = self._compare_editor.value or ""
+        else:
+            baseline = self._compare_editor.value or ""
+            candidate = self._history_newer_side_text() or ""
         if not candidate.strip():
             self._snack("Open a note first to analyse it.")
             return
@@ -149,6 +142,7 @@ class MarkdownStudioChecksUi:
             self._refresh_eval_cell(idx)
             self._refresh_analyse_button_state()
 
+        run_ok = False
         try:
             await checks_runner.run_check_for_document(
                 self._make_llm_backend(),
@@ -158,6 +152,7 @@ class MarkdownStudioChecksUi:
                 on_progress=on_progress,
                 use_cache=True,
             )
+            run_ok = True
         except BaseException as exc:  # noqa: BLE001
             self._snack(f"Analyse failed: {ollama_error_message(exc)}")
         finally:
@@ -165,6 +160,13 @@ class MarkdownStudioChecksUi:
                 self._check_running[check_id] = False
                 self._refresh_analyse_button_state()
                 self._refresh_all_eval_cells()
+                if run_ok:
+                    results = self._check_results.get(check_id) or []
+                    doc_summary = self._build_document_check_summary_text(check, results)
+                    self._append_chat_line("assistant", doc_summary)
+                    self._chat_api_messages.append(
+                        {"role": "assistant", "content": doc_summary}
+                    )
 
     # ------------------------------------------------------------------
     # Eval cell (leftmost cell in compare rows)
@@ -173,36 +175,71 @@ class MarkdownStudioChecksUi:
     def _build_eval_cell(self, idx: int) -> ft.Container:
         cid = self._active_check_id
         host = ft.Container(
-            width=COMPARE_EVAL_COL_W,
+            width=COMPARE_EVAL_COL_W_WIDE,
             alignment=ft.Alignment.TOP_CENTER,
             padding=ft.padding.only(top=4, right=2),
             content=self._build_eval_cell_inner(idx, cid),
         )
         return host
 
+    def _eval_cand_idx(self, ui_idx: int) -> int | None:
+        """UI row index → candidate-paragraph index used to key into ``_check_results``.
+
+        On Review (Future) the visible row list may include gap rows (pure deletions)
+        with no candidate paragraph; those map to ``None`` so the eval cell stays empty.
+        """
+        if self._main_tab_index != TAB_FUTURE:
+            return ui_idx
+        arr = getattr(self, "_future_row_cand_idx", None)
+        if not arr or not (0 <= ui_idx < len(arr)):
+            return ui_idx
+        return arr[ui_idx]
+
     def _build_eval_cell_inner(self, idx: int, check_id: str | None) -> ft.Control:
         if check_id is None:
             return ft.Container(width=18, height=18)
+        cand_idx = self._eval_cand_idx(idx)
+        if cand_idx is None:
+            return ft.Container(width=18, height=18)
         check = checks_mod.get_check(check_id)
         results = self._check_results.get(check_id) or []
-        payload = results[idx] if 0 <= idx < len(results) else None
+        payload = results[cand_idx] if 0 <= cand_idx < len(results) else None
         running = bool(self._check_running.get(check_id))
         if payload is None:
             if running:
                 return ft.Container(
                     content=ft.ProgressRing(
                         width=14, height=14, stroke_width=2,
-                        color=(check.accent if check else config.FEDORA_BLUE),
+                        color=(check.accent if check else config.PRIMARY_COLOR),
                     ),
                     alignment=ft.Alignment.TOP_CENTER,
                 )
             return ft.Container(
-                content=ft.Text("·", size=14, color=ft.Colors.GREY_700),
+                content=ft.Text("·", size=14, color=config.OUTLINE),
                 alignment=ft.Alignment.TOP_CENTER,
             )
         symbol = checks_mod.extract_symbol(check, payload) if check else "?"
-        color = check.color_for_symbol(symbol) if check else ft.Colors.GREY_400
-        return ft.Container(
+        color = check.color_for_symbol(symbol) if check else config.ON_SURFACE_VARIANT
+        summary_raw = checks_mod.extract_summary(check, payload) if check else ""
+        tip: str | None = None
+        if summary_raw:
+            tip = summary_raw if len(summary_raw) <= 220 else summary_raw[:217] + "…"
+        # Review (Future): bare symbol only — no pill chrome, no summary subtext.
+        if self._main_tab_index == TAB_FUTURE:
+            return ft.Container(
+                content=ft.Text(
+                    symbol,
+                    size=18,
+                    weight=ft.FontWeight.W_700,
+                    color=color,
+                    no_wrap=True,
+                ),
+                alignment=ft.Alignment.TOP_CENTER,
+                padding=ft.padding.only(top=2),
+                on_hover=lambda e, i=idx: self._on_eval_symbol_hover(e, i),
+                tooltip=tip,
+            )
+        symbol_box = ft.Container(
             content=ft.Text(
                 symbol,
                 size=18,
@@ -215,7 +252,24 @@ class MarkdownStudioChecksUi:
             border_radius=6,
             bgcolor=ft.Colors.with_opacity(0.10, color),
             on_hover=lambda e, i=idx: self._on_eval_symbol_hover(e, i),
-            tooltip=None,
+            tooltip=tip,
+        )
+        if not summary_raw:
+            return symbol_box
+        summary_txt = ft.Text(
+            summary_raw,
+            size=10,
+            color=config.ON_SURFACE_VARIANT,
+            max_lines=3,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            selectable=True,
+            text_align=ft.TextAlign.CENTER,
+        )
+        return ft.Column(
+            [symbol_box, summary_txt],
+            tight=True,
+            spacing=4,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
     def _refresh_eval_cell(self, idx: int) -> None:
@@ -233,6 +287,19 @@ class MarkdownStudioChecksUi:
     # ------------------------------------------------------------------
     # Floating result card
     # ------------------------------------------------------------------
+
+    def _active_result_card_overlay(self) -> ft.Container:
+        if self._main_tab_index == TAB_FUTURE:
+            return self._future_result_card_overlay
+        return self._result_card_overlay
+
+    def _hide_all_result_card_overlays(self) -> None:
+        self._result_card_visible_for = None
+        self._result_card_hide_gen += 1
+        for ov in (self._result_card_overlay, self._future_result_card_overlay):
+            ov.visible = False
+            if _ctrl_on_page(ov):
+                ov.update()
 
     def _on_eval_symbol_hover(self, e: ft.ControlEvent, idx: int) -> None:
         if str(e.data).lower() == "true":
@@ -253,23 +320,35 @@ class MarkdownStudioChecksUi:
         check = checks_mod.get_check(cid)
         if check is None:
             return
-        results = self._check_results.get(cid) or []
-        if not (0 <= idx < len(results)):
+        cand_idx = self._eval_cand_idx(idx)
+        if cand_idx is None:
             return
-        payload = results[idx]
+        results = self._check_results.get(cid) or []
+        if not (0 <= cand_idx < len(results)):
+            return
+        payload = results[cand_idx]
         if payload is None:
             return
         self._result_card_hide_gen += 1  # cancel pending hide
+        active = self._active_result_card_overlay()
+        other = (
+            self._future_result_card_overlay
+            if active is self._result_card_overlay
+            else self._result_card_overlay
+        )
+        if other.visible:
+            other.visible = False
+            if _ctrl_on_page(other):
+                other.update()
         # Position vertically: estimate row position by index * row pitch.
         row_pitch = 88.0  # pragmatic estimate; ListView spacing=0 + padding=2.
         top = max(4.0, idx * row_pitch + 4.0)
-        # If there are many rows, keep card visible.
-        self._result_card_overlay.top = top
-        self._result_card_overlay.content = self._build_result_card(check, payload, idx)
-        self._result_card_overlay.visible = True
+        active.top = top
+        active.content = self._build_result_card(check, payload, cand_idx)
+        active.visible = True
         self._result_card_visible_for = (cid, idx)
-        if _ctrl_on_page(self._result_card_overlay):
-            self._result_card_overlay.update()
+        if _ctrl_on_page(active):
+            active.update()
 
     def _schedule_hide_result_card(self) -> None:
         self._result_card_hide_gen += 1
@@ -280,10 +359,12 @@ class MarkdownStudioChecksUi:
         await asyncio.sleep(RESULT_CARD_HIDE_DELAY_SEC)
         if gen != self._result_card_hide_gen:
             return
-        self._result_card_overlay.visible = False
         self._result_card_visible_for = None
-        if _ctrl_on_page(self._result_card_overlay):
-            self._result_card_overlay.update()
+        for ov in (self._result_card_overlay, self._future_result_card_overlay):
+            if ov.visible:
+                ov.visible = False
+                if _ctrl_on_page(ov):
+                    ov.update()
 
     def _metric_chip(self, label: str, value: Any, value_set: tuple[str, ...]) -> ft.Container:
         """Coloured chip for a project/sustainability metric (None/Low/Medium/High) or numeric score."""
@@ -313,8 +394,14 @@ class MarkdownStudioChecksUi:
         return ft.Container(
             content=ft.Column(
                 [
-                    ft.Text(label, size=10, color=ft.Colors.GREY_400, no_wrap=True),
-                    ft.Text(text_val, size=12, weight=ft.FontWeight.W_700, color=ft.Colors.GREY_100, no_wrap=True),
+                    ft.Text(label, size=10, color=config.ON_SURFACE_VARIANT, no_wrap=True),
+                    ft.Text(
+                        text_val,
+                        size=12,
+                        weight=ft.FontWeight.W_700,
+                        color=config.ON_SURFACE,
+                        no_wrap=True,
+                    ),
                 ],
                 spacing=0,
                 tight=True,
@@ -346,11 +433,16 @@ class MarkdownStudioChecksUi:
                 ),
                 ft.Column(
                     [
-                        ft.Text(check.label, size=13, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_100),
+                        ft.Text(
+                            check.label,
+                            size=13,
+                            weight=ft.FontWeight.W_600,
+                            color=config.ON_SURFACE,
+                        ),
                         ft.Text(
                             f"Paragraph {idx + 1}" + (f" · {label}" if label else ""),
                             size=10,
-                            color=ft.Colors.GREY_400,
+                            color=config.ON_SURFACE_VARIANT,
                         ),
                     ],
                     spacing=0,
@@ -361,7 +453,7 @@ class MarkdownStudioChecksUi:
                     content=ft.Text(
                         f"{int(round(confidence * 100))}%" if confidence is not None else "",
                         size=10,
-                        color=ft.Colors.GREY_400,
+                        color=config.ON_SURFACE_VARIANT,
                     ),
                     tooltip="Model confidence" if confidence is not None else None,
                 ),
@@ -378,7 +470,7 @@ class MarkdownStudioChecksUi:
                     content=ft.Text(
                         summary,
                         size=12,
-                        color=ft.Colors.GREY_200,
+                        color=config.ON_SURFACE,
                         selectable=True,
                     ),
                     padding=ft.padding.only(top=4),
@@ -401,7 +493,7 @@ class MarkdownStudioChecksUi:
 
         if recs:
             rec_controls: list[ft.Control] = [
-                ft.Text("Recommendations", size=10, color=ft.Colors.GREY_400)
+                ft.Text("Recommendations", size=10, color=config.ON_SURFACE_VARIANT)
             ]
             for r in recs:
                 action = str(r.get("action") or r.get("recommendation") or "").strip()
@@ -412,7 +504,7 @@ class MarkdownStudioChecksUi:
                     "high": "#E5484D",
                     "medium": "#F0A455",
                     "low": "#7ED9A0",
-                }.get(priority, ft.Colors.GREY_500)
+                }.get(priority, config.ON_SURFACE_VARIANT)
                 rec_controls.append(
                     ft.Row(
                         [
@@ -420,7 +512,7 @@ class MarkdownStudioChecksUi:
                                 width=6, height=6, border_radius=3, bgcolor=pcolor,
                                 margin=ft.margin.only(top=6),
                             ),
-                            ft.Text(action, size=12, color=ft.Colors.GREY_100, expand=True, selectable=True),
+                            ft.Text(action, size=12, color=config.ON_SURFACE, expand=True, selectable=True),
                         ],
                         spacing=8,
                         vertical_alignment=ft.CrossAxisAlignment.START,
@@ -440,6 +532,48 @@ class MarkdownStudioChecksUi:
             scroll=ft.ScrollMode.AUTO,
         )
 
+    def _build_document_check_summary_text(
+        self, check: checks_mod.Check, results: list[dict | None]
+    ) -> str:
+        """Deterministic rollup for chat after a full document check run."""
+        n = len(results)
+        nonempty = [(i, p) for i, p in enumerate(results) if isinstance(p, dict)]
+        lines: list[str] = [f"{check.label} — {n} paragraph(s)."]
+        if not nonempty:
+            lines.append("No paragraph-level results returned.")
+            return "\n".join(lines)
+        syms = [checks_mod.extract_symbol(check, p) for _, p in nonempty]
+        ctr = Counter(syms)
+        hist = ", ".join(f"{s}: {c}" for s, c in sorted(ctr.items(), key=lambda x: (-x[1], x[0]))[:12])
+        lines.append(f"Symbols: {hist}")
+        scored: list[tuple[float, int, str, str]] = []
+        neutral_syms = frozenset({"~", "●", "?"})
+        for i, p in nonempty:
+            recs = checks_mod.extract_recommendations(p)
+            conf = checks_mod.extract_confidence(p)
+            sym = checks_mod.extract_symbol(check, p)
+            summary = checks_mod.extract_summary(check, p)
+            low = (
+                "unchanged" in summary.lower()
+                or "skipped" in summary.lower()
+                or sym in neutral_syms
+            )
+            score = float(len(recs)) * 10.0
+            if conf is not None:
+                score += (1.0 - max(0.0, min(1.0, conf))) * 4.0
+            if not low:
+                score += 3.0
+            scored.append((score, i, sym, summary))
+        scored.sort(key=lambda t: t[0], reverse=True)
+        lines.append("")
+        lines.append("Highlights:")
+        for _sc, i, sym, summary in scored[:5]:
+            snip = summary.replace("\n", " ").strip()
+            if len(snip) > 120:
+                snip = snip[:117] + "…"
+            lines.append(f"- Para {i + 1} ({sym}): {snip or '—'}")
+        return "\n".join(lines)
+
     # ------------------------------------------------------------------
     # Invalidation: drop per-paragraph cache when candidate text changes.
     # ------------------------------------------------------------------
@@ -453,8 +587,15 @@ class MarkdownStudioChecksUi:
         if not self._check_results:
             self._check_para_hashes = []
             return
-        baseline = self._compare_latest_baseline_text()
-        candidate = self._compare_editor.value or ""
+        if self._main_tab_index == TAB_HISTORY:
+            baseline = self._compare_editor.value or ""
+            candidate = self._history_newer_side_text() or ""
+        elif self._main_tab_index == TAB_FUTURE:
+            baseline = self.editor.value or ""
+            candidate = self._compare_editor.value or ""
+        else:
+            baseline = self._compare_latest_baseline_text()
+            candidate = self._compare_editor.value or ""
         pairs = aligned_compare_pairs(baseline, candidate)
         new_hashes = [compute_hash(new) for _, new in pairs]
         prev_hashes = self._check_para_hashes

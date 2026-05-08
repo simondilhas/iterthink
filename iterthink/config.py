@@ -13,6 +13,7 @@ import yaml
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _DEFAULTS_DIR = _PACKAGE_DIR / "defaults"
 APP_SYMBOL_PNG = _PACKAGE_DIR / "assets" / "fav.png"
+APP_SYMBOL_SVG = _PACKAGE_DIR / "assets" / "fav.svg"
 
 
 def app_config_dir() -> Path:
@@ -37,12 +38,28 @@ STORE_DB_PATH: Path = STORE_DIR / "store.sqlite3"
 DEFAULT_OLLAMA_MODEL: str = "llama3:8B"
 DEFAULT_OLLAMA_EMBED_MODEL: str = "nomic-embed-text-v2-moe"
 OLLAMA_HOST: str | None = None
-FEDORA_BLUE: str = "#007BFF"
-SURFACE: str = "#1E1E1E"
-SURFACE_VARIANT: str = "#2D2D2D"
-SIDEBAR_SURFACE: str = "#2A2D32"
+
+APPEARANCE: str = "dark"
+IS_LIGHT: bool = False
+
+PAGE_BG: str = "#230F33"
+PRIMARY_COLOR: str = "#B38FC1"
+HIGHLIGHT: str = "#B38FC1"
+ON_PRIMARY: str = "#FFFFFF"
+ON_SURFACE: str = "#FFFFFF"
+ON_SURFACE_SOFT: str = "#B8CEE8"
+ON_SURFACE_VARIANT: str = "#959799"
+OUTLINE: str = "#959799"
+SUCCESS: str = "#C8E4C4"
+
+SURFACE: str = "#230F33"
+SURFACE_VARIANT: str = "#1A0A26"
+SIDEBAR_SURFACE: str = "#1A0A26"
 CHAT_SYSTEM: str = "You are a prose editor focusing on intent and clarity."
-SELECTION_OVERLAY: str = "#59007BFF"
+SELECTION_OVERLAY: str = "#88B38FC1"
+
+STARTUP_DAILY_LOG: bool = True
+NEW_NOTE_NAME_TEMPLATE: str = "unnamed-{n}.md"
 
 
 def _bundled_defaults_dict() -> dict[str, Any]:
@@ -80,11 +97,54 @@ def _as_path(key: str, merged: dict[str, Any]) -> Path:
     return Path(v).expanduser().resolve()
 
 
+def _branch_dict(themes: Any, name: str) -> dict[str, Any]:
+    if not isinstance(themes, dict):
+        return {}
+    b = themes.get(name)
+    return b if isinstance(b, dict) else {}
+
+
+def _merged_theme_variants(merged: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    base = _bundled_defaults_dict()
+    base_t = base.get("theme")
+    merged_t = merged.get("theme")
+    dark = {**_branch_dict(base_t, "dark"), **_branch_dict(merged_t, "dark")}
+    light = {**_branch_dict(base_t, "light"), **_branch_dict(merged_t, "light")}
+    return dark, light
+
+
+def _legacy_dark_palette_overrides(merged: dict[str, Any]) -> dict[str, str]:
+    """Map legacy flat color keys into dark theme tokens (user files pre-theme block)."""
+    out: dict[str, str] = {}
+    hc = merged.get("higlight_color")
+    if isinstance(hc, str) and hc.strip():
+        v = hc.strip()
+        out["primary"] = v
+        out["highlight"] = v
+    hl = merged.get("highlight_color")
+    if isinstance(hl, str) and hl.strip():
+        out["highlight"] = hl.strip()
+    for src, dest in (
+        ("surface", "surface"),
+        ("sidebar_surface", "sidebar_surface"),
+        ("sidebar_surface", "sidebar_surface"),
+        ("selection_overlay", "selection_overlay"),
+    ):
+        x = merged.get(src)
+        if isinstance(x, str) and x.strip():
+            out[dest] = x.strip()
+    return out
+
+
 def refresh() -> None:
     """Reload bootstrap YAML into module-level settings (paths, colors, defaults)."""
     global DOCUMENTS, STORE_DIR, STORE_DB_PATH
     global DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_EMBED_MODEL, OLLAMA_HOST
-    global FEDORA_BLUE, SURFACE, SURFACE_VARIANT, SIDEBAR_SURFACE, CHAT_SYSTEM, SELECTION_OVERLAY
+    global APPEARANCE, IS_LIGHT
+    global PAGE_BG, PRIMARY_COLOR, HIGHLIGHT, ON_PRIMARY, ON_SURFACE, ON_SURFACE_SOFT
+    global ON_SURFACE_VARIANT, OUTLINE, SUCCESS
+    global SURFACE, SURFACE_VARIANT, SIDEBAR_SURFACE, CHAT_SYSTEM, SELECTION_OVERLAY
+    global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE
 
     merged = _merged_config()
     DOCUMENTS = _as_path("documents_root", merged)
@@ -113,21 +173,55 @@ def refresh() -> None:
         else:
             OLLAMA_HOST = None
 
-    def _str_key(k: str, fallback: str) -> str:
-        v = merged.get(k, fallback)
-        return v if isinstance(v, str) and v else fallback
+    dark_m, light_m = _merged_theme_variants(merged)
+    dark_m = {**dark_m, **_legacy_dark_palette_overrides(merged)}
 
-    FEDORA_BLUE = _str_key("higlight_color", "#007BFF")
-    SURFACE = _str_key("surface", "#1E1E1E")
-    SURFACE_VARIANT = _str_key("surface_variant", "#2D2D2D")
-    SIDEBAR_SURFACE = _str_key("sidebar_surface", "#2A2D32")
-    SELECTION_OVERLAY = _str_key("selection_overlay", "#59007BFF")
+    raw_ap = merged.get("appearance", "dark")
+    ap = raw_ap.strip().lower() if isinstance(raw_ap, str) and raw_ap.strip() else "dark"
+    if ap not in ("dark", "light"):
+        ap = "dark"
+    APPEARANCE = ap
+    IS_LIGHT = ap == "light"
+    pal = light_m if IS_LIGHT else dark_m
+
+    def _tok(key: str, fallback: str) -> str:
+        v = pal.get(key, fallback)
+        return v.strip() if isinstance(v, str) and v.strip() else fallback
+
+    PAGE_BG = _tok("page_background", "#230F33" if not IS_LIGHT else "#FFFFFF")
+    SURFACE = _tok("surface", "#230F33" if not IS_LIGHT else "#FFFFFF")
+    SURFACE_VARIANT = _tok("sidebar_surface", "#1A0A26" if not IS_LIGHT else "#F8F9FA")
+    SIDEBAR_SURFACE = _tok("sidebar_surface", "#1A0A26" if not IS_LIGHT else "#F8F9FA")
+    PRIMARY_COLOR = _tok("primary", "#B38FC1" if not IS_LIGHT else "#312F8A")
+    HIGHLIGHT = _tok("highlight", PRIMARY_COLOR)
+    ON_PRIMARY = _tok("on_primary", "#FFFFFF")
+    ON_SURFACE = _tok("on_surface", "#FFFFFF" if not IS_LIGHT else "#230F33")
+    ON_SURFACE_SOFT = _tok("on_surface_soft", "#B8CEE8" if not IS_LIGHT else "#230F33")
+    ON_SURFACE_VARIANT = _tok("on_sidebar_surface", "#959799")
+    OUTLINE = _tok("outline", "#959799")
+    SUCCESS = _tok("success", "#C8E4C4")
+    SELECTION_OVERLAY = _tok("selection_overlay", "#88B38FC1" if not IS_LIGHT else "#55312F8A")
+
     cs = merged.get("chat_system")
     if isinstance(cs, str) and cs.strip():
         CHAT_SYSTEM = cs.strip()
     else:
         fb = _bundled_defaults_dict().get("chat_system")
         CHAT_SYSTEM = fb.strip() if isinstance(fb, str) and fb.strip() else "You are a prose editor focusing on intent and clarity."
+
+    sdl = merged.get("startup_daily_log", True)
+    STARTUP_DAILY_LOG = bool(sdl) if isinstance(sdl, bool) else True
+
+    nt = merged.get("new_note_name_template")
+    if isinstance(nt, str) and nt.strip() and nt.count("{n}") == 1:
+        NEW_NOTE_NAME_TEMPLATE = nt.strip()
+    else:
+        fb_nt = _bundled_defaults_dict().get("new_note_name_template")
+        NEW_NOTE_NAME_TEMPLATE = (
+            fb_nt.strip()
+            if isinstance(fb_nt, str) and fb_nt.strip() and fb_nt.count("{n}") == 1
+            else "unnamed-{n}.md"
+        )
 
 
 def read_bootstrap_yaml_text() -> str:

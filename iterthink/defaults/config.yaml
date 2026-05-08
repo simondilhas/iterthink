@@ -1,18 +1,50 @@
 # App config (bootstrap file). Editable in Settings or here.
 # Precedence: OLLAMA_MODEL, OLLAMA_EMBED_MODEL, OLLAMA_HOST override these when set.
+#
+# Theme: appearance selects theme.dark vs theme.light. Legacy top-level keys
+# (higlight_color, surface, …) still override the dark palette when present.
 
 documents_root: ~/Documents
 store_dir: ~/Documents/.iterthink
 
 default_ollama_model: llama3:8B
 default_ollama_embed_model: nomic-embed-text-v2-moe
-# Optional; use OLLAMA_HOST env to override. Empty/null = default client host.
 ollama_host: null
 
-higlight_color: "#B38FC1"
-surface: "#1E1E1E"
-surface_variant: "#B8CEE8"
-sidebar_surface: "#2A2D32"
-selection_overlay: "#B8CEE8"
+appearance: dark
+
+theme:
+  dark:
+    page_background: "#1A1A1A"
+    surface: "#230F33"
+    sidebar_surface: "#1A0A26"
+    primary: "#B38FC1"
+    highlight: "#B38FC1"
+    on_primary: "#FFFFFF"
+    on_surface: "#FFFFFF"
+    on_surface_soft: "#B8CEE8"
+    on_sidebar_surface: "#959799"
+    outline: "#959799"
+    success: "#C8E4C4"
+    selection_overlay: "#88B38FC1"
+  light:
+    page_background: "#FFFFFF"
+    surface: "#FFFFFF"
+    sidebar_surface: "#F8F9FA"
+    primary: "#312F8A"
+    highlight: "#B38FC1"
+    on_primary: "#FFFFFF"
+    on_surface: "#230F33"
+    on_surface_soft: "#230F33"
+    on_sidebar_surface: "#959799"
+    outline: "#959799"
+    success: "#C8E4C4"
+    selection_overlay: "#55312F8A"
 
 chat_system: "You are a prose editor focusing on intent and clarity."
+
+# Startup: when true, open or create one YYYYMMDD-n.md per calendar day in documents_root.
+# When false, open the first note in the tree (name order by default) or create from template.
+startup_daily_log: true
+# Used for "New file" and first-run create when startup_daily_log is false; must contain {n} once.
+new_note_name_template: "unnamed-{n}.md"

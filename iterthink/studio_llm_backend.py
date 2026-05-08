@@ -1,4 +1,4 @@
-"""LLM routing: build ``LlmChatBackend`` from studio state."""
+"""Studio binding to ``LlmChatBackend`` (tier, models, vault) and shared tier-tab control."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from typing import Any
 
 import flet as ft
 
-from iterthink import config, crypto_vault, store_db, vault_store
+from iterthink import config, crypto_vault, store_db, vault_store, ui_theme
 from iterthink.llm_router import LlmChatBackend
 from iterthink.studio_util import KI_TIER_CLOUD, KI_TIER_COMPANY, KI_TIER_LOCAL
 
 
-def build_ki_tier_tabs(
+def build_llm_tier_tabs(
     *,
     selected_index: int,
     on_change: Callable[[ft.ControlEvent], Any],
@@ -20,34 +20,55 @@ def build_ki_tier_tabs(
     tab_bar_height: float,
     tab_texts: tuple[str, str, str] | None = None,
 ) -> ft.Tabs:
-    """Underline + divider like KI topic tabs; outlined icons, compact size, start-aligned cluster."""
-    t0, t1, t2 = tab_texts if tab_texts else ("", "", "")
+    """Home / Office / Cloud tier selector (styling aligned with KI topic tabs)."""
+    raw = tab_texts if tab_texts else ("", "", "")
+    texts = tuple((s or "").strip() if isinstance(s, str) else "" for s in raw)
+    icons = (
+        ft.Icons.HOME_OUTLINED,
+        ft.Icons.BUSINESS_OUTLINED,
+        ft.Icons.CLOUD_OUTLINED,
+    )
+    tooltips = (
+        "Home: local model on this machine (Ollama).",
+        "Office: organisation OpenAI-compatible API.",
+        "Cloud: selected vendor API using encrypted vault credentials.",
+    )
+    tier_tabs: list[ft.Tab] = []
+    for i in range(3):
+        icon_ctrl = ft.Icon(icons[i], size=icon_size)
+        label_txt = texts[i] if i < len(texts) else ""
+        if label_txt:
+            tier_tabs.append(
+                ft.Tab(
+                    label=ft.Row(
+                        [icon_ctrl, ft.Text(label_txt, size=13)],
+                        tight=True,
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    tooltip=tooltips[i],
+                    height=tab_bar_height,
+                )
+            )
+        else:
+            tier_tabs.append(
+                ft.Tab(
+                    icon=icon_ctrl,
+                    tooltip=tooltips[i],
+                    height=tab_bar_height,
+                )
+            )
+
     tier_tab_bar = ft.TabBar(
-        tabs=[
-            ft.Tab(
-                icon=ft.Icon(ft.Icons.MONITOR_OUTLINED, size=icon_size),
-                label=t0 or None,
-                tooltip="Home: local model on this machine (Ollama).",
-                height=tab_bar_height,
-            ),
-            ft.Tab(
-                icon=ft.Icon(ft.Icons.HOME_OUTLINED, size=icon_size),
-                label=t1 or None,
-                tooltip="Office: organisation OpenAI-compatible API.",
-                height=tab_bar_height,
-            ),
-            ft.Tab(
-                icon=ft.Icon(ft.Icons.CLOUD_OUTLINED, size=icon_size),
-                label=t2 or None,
-                tooltip="Cloud: selected vendor API using encrypted vault credentials.",
-                height=tab_bar_height,
-            ),
-        ],
+        tabs=tier_tabs,
         scrollable=True,
         secondary=True,
         tab_alignment=ft.TabAlignment.START,
-        indicator_color=config.FEDORA_BLUE,
-        divider_color=ft.Colors.with_opacity(0.14, ft.Colors.WHITE),
+        indicator_color=config.PRIMARY_COLOR,
+        divider_color=ui_theme.outline_muted(alpha=0.22),
+        label_color=config.ON_SURFACE,
+        unselected_label_color=config.ON_SURFACE_VARIANT,
+        overlay_color=ft.Colors.with_opacity(0.06, config.ON_SURFACE),
         label_padding=ft.padding.symmetric(horizontal=6, vertical=0),
         indicator_thickness=1.5,
         height=tab_bar_height,
@@ -70,8 +91,8 @@ def build_ki_tier_tabs(
     )
 
 
-def ki_tier_display_name(tier: str) -> str:
-    """Short tier name for status lines (no leading symbol)."""
+def llm_tier_display_name(tier: str) -> str:
+    """Short tier label for status lines (no leading symbol)."""
     return {
         KI_TIER_LOCAL: "Private",
         KI_TIER_COMPANY: "Work",
@@ -79,7 +100,7 @@ def ki_tier_display_name(tier: str) -> str:
     }.get(tier, tier)
 
 
-class MarkdownStudioLlm:
+class MarkdownStudioLlmBackend:
     """Mixed into ``MarkdownStudio``; expects ``ollama``, ``_db``, tier fields, ``_api_secrets_cache``."""
 
     ollama: Any

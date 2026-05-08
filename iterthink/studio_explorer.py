@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,7 +13,7 @@ from iterthink.db.session import session_scope
 from iterthink.studio_constants import TAB_HISTORY, TAB_PRESENT
 from iterthink.studio_util import ctrl_on_page as _ctrl_on_page
 from iterthink import version_storage
-from iterthink.tree import build_md_tree, filter_md_tree
+from iterthink.tree import build_md_tree, filter_md_tree, is_excluded_from_doc_tree
 
 ExplorerTreeSortMode = Literal["name_az", "name_za", "mtime_newest", "mtime_oldest"]
 
@@ -51,6 +52,30 @@ def _sorted_file_entries(
     return sorted(entries, key=lambda x: x[0].lower())
 
 
+def first_markdown_in_tree(root: Path, sort_mode: ExplorerTreeSortMode = "name_az") -> Path | None:
+    """First ``.md`` path in DFS order matching the sidebar (``build_md_tree`` + sort mode)."""
+    if not root.is_dir():
+        return None
+    tree = build_md_tree(root)
+    if not tree:
+        return None
+    mode = sort_mode if sort_mode in ("name_az", "name_za", "mtime_newest", "mtime_oldest") else "name_az"
+
+    def walk(node: dict[str, Any], parent_path: Path) -> Path | None:
+        for dirname in _sorted_dirnames(node, parent_path, mode):
+            sub = node[dirname]
+            folder_path = parent_path / dirname
+            hit = walk(sub, folder_path)
+            if hit is not None:
+                return hit
+        files = node.get("_files", [])
+        for _fname, fpath in _sorted_file_entries(list(files), mode):
+            return fpath
+        return None
+
+    return walk(tree, root)
+
+
 class MarkdownStudioExplorer:
     def _on_tree_search_change(self, _e: ft.ControlEvent | None = None) -> None:
         self._rebuild_tree_ui()
@@ -81,7 +106,7 @@ class MarkdownStudioExplorer:
         dialog_content: ft.Control
         if is_md_file:
             dialog_content = ft.Row(
-                [name_field, ft.Text(".md", size=14, color=ft.Colors.GREY_400)],
+                [name_field, ft.Text(".md", size=14, color=config.ON_SURFACE_VARIANT)],
                 tight=True,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
@@ -178,8 +203,6 @@ class MarkdownStudioExplorer:
             if _ctrl_on_page(self.tree_column):
                 self.tree_column.update()
             self._refresh_compare_tab_candidate_ui()
-            if _ctrl_on_page(self._compare_candidate_dropdown):
-                self._compare_candidate_dropdown.update()
             self._refresh_title_bar()
             self._snack("Renamed.")
 
@@ -196,6 +219,369 @@ class MarkdownStudioExplorer:
                 actions=[
                     ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
                     ft.TextButton("OK", on_click=on_ok),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        )
+
+    def _show_new_folder_dialog(self) -> None:
+        root = config.DOCUMENTS.resolve()
+        config.DOCUMENTS.mkdir(parents=True, exist_ok=True)
+        name_field = ft.TextField(
+            label="Folder name",
+            autofocus=True,
+            dense=True,
+            width=360,
+        )
+
+        async def apply_async() -> None:
+            raw = (name_field.value or "").strip()
+            if not raw or raw in (".", ".."):
+                self._snack("Invalid name.")
+                return
+            if "/" in raw or "\\" in raw:
+                self._snack("Name cannot contain path separators.")
+                return
+            new_path = (config.DOCUMENTS / raw).resolve()
+            try:
+                new_path.relative_to(root)
+            except ValueError:
+                self._snack("Invalid target path.")
+                return
+            if new_path.exists():
+                self._snack("A file or folder with that name already exists.")
+                return
+            try:
+                new_path.mkdir(parents=False)
+            except OSError as ex:
+                self._snack(f"Could not create folder: {ex}")
+                return
+            self.page.pop_dialog()
+            self._rebuild_tree_ui()
+            if _ctrl_on_page(self.tree_column):
+                self.tree_column.update()
+            self._snack(f'Created folder "{new_path.name}".')
+
+        def on_ok(_e: ft.ControlEvent | None = None) -> None:
+            self.page.run_task(apply_async)
+
+        name_field.on_submit = lambda _e: self.page.run_task(apply_async)
+
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("New folder", weight=ft.FontWeight.W_600),
+                content=name_field,
+                actions=[
+                    ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
+                    ft.TextButton("Create", on_click=on_ok),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        )
+
+    def _clear_open_document_ui(self) -> None:
+        """Reset editor and compare state when no file is open (e.g. after delete)."""
+        self._cancel_autosave_timers()
+        self._compare_candidate_source = "draft"
+        self._compare_snapshot_version_id = None
+        self._compare_newer_version_id = None
+        self._compare_newer_cached_body = ""
+        self._pending_ai_accept_action_id = None
+        self._compare_pdf_peer_snapshot_id = None
+        self._latest_ai_proposal_vid = None
+        self._ai_proposal_action_ids.clear()
+        self._loaded_proposal_sha = None
+        self.current_path = None
+        self.last_saved_text = ""
+        self.editor.value = ""
+        self._compare_editor.value = ""
+        self._compare_baseline_snapshot = ""
+        if _ctrl_on_page(self.editor):
+            self.editor.update()
+        if _ctrl_on_page(self._compare_editor):
+            self._compare_editor.update()
+        self._sync_version_toolbar_state()
+        self._refresh_compare_tab_candidate_ui()
+        self._refresh_compare_diff_immediate()
+        self._refresh_compare_bulk_buttons()
+        self._refresh_title_bar()
+        self._refresh_compose_plan_surface()
+
+    def _show_delete_file_dialog(self, path: Path) -> None:
+        root = config.DOCUMENTS.resolve()
+        try:
+            path.resolve().relative_to(root)
+        except ValueError:
+            self._snack("Cannot delete outside the documents folder.")
+            return
+        if path.suffix.lower() != ".md":
+            self._snack("Only markdown files can be deleted here.")
+            return
+
+        body = ft.Text(
+            f"Delete “{path.name}”? The file, its version snapshots, and stored import assets "
+            "for this note will be removed. This cannot be undone.",
+            size=13,
+        )
+
+        async def apply_delete(_e: ft.ControlEvent | None = None) -> None:
+            rp = path.resolve()
+            was_current = self.current_path is not None and self.current_path.resolve() == rp
+            if was_current:
+                self._flush_review_edits_if_changed()
+            try:
+                with session_scope() as s:
+                    version_storage.delete_document_row_if_any(s, rp)
+            except BaseException as ex:
+                self._snack(f"Could not update library: {ex}")
+                return
+            version_storage.purge_document_store_dirs(rp)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as ex:
+                self._snack(f"Could not delete file: {ex}")
+                return
+            self.page.pop_dialog()
+            if was_current:
+                self._clear_open_document_ui()
+            self._rebuild_tree_ui()
+            if _ctrl_on_page(self.tree_column):
+                self.tree_column.update()
+            self._refresh_compare_tab_candidate_ui()
+            self._refresh_title_bar()
+            self._snack("File deleted.")
+
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Delete file", weight=ft.FontWeight.W_600),
+                content=body,
+                actions=[
+                    ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
+                    ft.TextButton(
+                        "Delete",
+                        style=ft.ButtonStyle(color=ft.Colors.RED_400),
+                        on_click=lambda _e: self.page.run_task(apply_delete),
+                    ),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        )
+
+    def _show_delete_folder_dialog(self, path: Path) -> None:
+        root = config.DOCUMENTS.resolve()
+        folder = path.resolve()
+        try:
+            folder.relative_to(root)
+        except ValueError:
+            self._snack("Cannot delete outside the documents folder.")
+            return
+        if folder == root:
+            self._snack("Cannot delete the documents root folder.")
+            return
+        if not folder.is_dir():
+            self._snack("Not a folder.")
+            return
+
+        body = ft.Text(
+            f"Delete folder “{path.name}” and everything inside? All notes under this folder, "
+            "their version snapshots, and stored import assets will be removed. This cannot be undone.",
+            size=13,
+        )
+
+        async def apply_delete(_e: ft.ControlEvent | None = None) -> None:
+            folder_resolved = folder
+            cur_resolved = self.current_path.resolve() if self.current_path else None
+            opened_under = False
+            if cur_resolved:
+                try:
+                    cur_resolved.relative_to(folder_resolved)
+                    opened_under = True
+                except ValueError:
+                    pass
+            if opened_under:
+                self._flush_review_edits_if_changed()
+
+            md_paths: list[Path] = []
+            try:
+                for p in folder.rglob("*.md"):
+                    if is_excluded_from_doc_tree(p):
+                        continue
+                    md_paths.append(p.resolve())
+            except OSError as ex:
+                self._snack(f"Could not scan folder: {ex}")
+                return
+
+            try:
+                for rp in md_paths:
+                    try:
+                        with session_scope() as s:
+                            version_storage.delete_document_row_if_any(s, rp)
+                    except BaseException as ex:
+                        self._snack(f"Could not update library: {ex}")
+                        return
+                    version_storage.purge_document_store_dirs(rp)
+                    try:
+                        rp.unlink(missing_ok=True)
+                    except OSError as ex:
+                        self._snack(f"Could not delete file: {ex}")
+                        return
+                shutil.rmtree(folder, ignore_errors=False)
+            except OSError as ex:
+                self._snack(f"Could not delete folder: {ex}")
+                return
+
+            self.page.pop_dialog()
+            if opened_under:
+                self._clear_open_document_ui()
+            self._rebuild_tree_ui()
+            if _ctrl_on_page(self.tree_column):
+                self.tree_column.update()
+            self._refresh_compare_tab_candidate_ui()
+            self._refresh_title_bar()
+            self._snack("Folder deleted.")
+
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Delete folder", weight=ft.FontWeight.W_600),
+                content=body,
+                actions=[
+                    ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
+                    ft.TextButton(
+                        "Delete",
+                        style=ft.ButtonStyle(color=ft.Colors.RED_400),
+                        on_click=lambda _e: self.page.run_task(apply_delete),
+                    ),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        )
+
+    def _show_move_file_dialog(self, path: Path) -> None:
+        root = config.DOCUMENTS.resolve()
+        try:
+            path.resolve().relative_to(root)
+        except ValueError:
+            self._snack("Cannot move outside the documents folder.")
+            return
+        if path.suffix.lower() != ".md":
+            self._snack("Only markdown files can be moved here.")
+            return
+
+        folder_entries: list[tuple[str, str]] = [("", "Documents (root)")]
+        for p in sorted(root.rglob("*"), key=lambda x: str(x).lower()):
+            if not p.is_dir() or is_excluded_from_doc_tree(p):
+                continue
+            try:
+                rel = p.relative_to(root)
+            except ValueError:
+                continue
+            if not rel.parts:
+                continue
+            posix = rel.as_posix()
+            folder_entries.append((posix, posix))
+
+        cur_parent = path.parent.resolve()
+        try:
+            cur_rel = cur_parent.relative_to(root)
+            default_key = cur_rel.as_posix() if cur_rel.parts else ""
+        except ValueError:
+            default_key = ""
+        keys = {k for k, _ in folder_entries}
+        if default_key not in keys:
+            default_key = ""
+
+        folder_dd = ft.Dropdown(
+            label="Move into folder",
+            width=360,
+            options=[ft.dropdown.Option(key=k, text=lab) for k, lab in folder_entries],
+            value=default_key,
+        )
+
+        async def apply_move(_e: ft.ControlEvent | None = None) -> None:
+            raw_key = folder_dd.value
+            key = (raw_key or "").strip()
+            if key not in keys:
+                self._snack("Pick a folder.")
+                return
+            dest_dir = root if not key else (root / key).resolve()
+            try:
+                dest_dir.relative_to(root)
+            except ValueError:
+                self._snack("Invalid folder.")
+                return
+            old_resolved = path.resolve()
+            new_path = (dest_dir / path.name).resolve()
+            try:
+                new_path.relative_to(root)
+            except ValueError:
+                self._snack("Invalid target path.")
+                return
+            if new_path == old_resolved:
+                self.page.pop_dialog()
+                return
+            if new_path.exists():
+                self._snack("A file with that name already exists in that folder.")
+                return
+
+            if self.current_path and self._is_dirty():
+                cur = self.current_path.resolve()
+                if cur == old_resolved:
+                    await self.save_file(silent=True, snapshot_reason="pre_switch")
+
+            try:
+                path.rename(new_path)
+            except OSError as ex:
+                self._snack(f"Move failed: {ex}")
+                return
+
+            new_resolved = new_path.resolve()
+            _db_collision = "iterthink_move_db_collision"
+            try:
+                with session_scope() as s:
+                    st = version_storage.update_document_path_after_rename(s, old_resolved, new_resolved)
+                    if st == "collision":
+                        raise RuntimeError(_db_collision)
+            except RuntimeError as ex:
+                if ex.args and ex.args[0] == _db_collision:
+                    try:
+                        new_path.rename(path)
+                    except OSError:
+                        self._snack("Move rolled back: library path conflict.")
+                        return
+                    self._snack("That folder already has this file in the version library.")
+                    return
+                raise
+            except BaseException:
+                try:
+                    new_path.rename(path)
+                except OSError:
+                    pass
+                raise
+
+            if self.current_path:
+                cur = self.current_path.resolve()
+                if cur == old_resolved:
+                    self.current_path = new_resolved
+
+            self.page.pop_dialog()
+            self._rebuild_tree_ui()
+            if _ctrl_on_page(self.tree_column):
+                self.tree_column.update()
+            self._refresh_compare_tab_candidate_ui()
+            self._refresh_title_bar()
+            self._snack("File moved.")
+
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Move file", weight=ft.FontWeight.W_600),
+                content=folder_dd,
+                actions=[
+                    ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
+                    ft.TextButton("Move", on_click=lambda _e: self.page.run_task(apply_move)),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )
@@ -329,12 +715,20 @@ class MarkdownStudioExplorer:
         menu_btn = ft.PopupMenuButton(
             icon=ft.Icons.MORE_VERT,
             icon_size=18,
-            icon_color=ft.Colors.GREY_500,
+            icon_color=config.ON_SURFACE_VARIANT,
             tooltip="File actions",
             items=[
                 ft.PopupMenuItem(
                     content=ft.Text("Import new version…", size=13),
                     on_click=lambda _e, p=fp: self.page.run_task(self._tree_import_version_clicked, p),
+                ),
+                ft.PopupMenuItem(
+                    content=ft.Text("Move to folder…", size=13),
+                    on_click=lambda _e, p=fp: self._show_move_file_dialog(p),
+                ),
+                ft.PopupMenuItem(
+                    content=ft.Text("Delete file…", size=13),
+                    on_click=lambda _e, p=fp: self._show_delete_file_dialog(p),
                 ),
             ],
         )
@@ -347,6 +741,48 @@ class MarkdownStudioExplorer:
                 on_double_tap=lambda _e, p=fp: self._show_rename_path_dialog(p, is_dir=False),
                 content=ft.Container(
                     content=ft.Text(fname, size=12, font_family="monospace"),
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+                ),
+            ),
+        )
+        row_inner = ft.Row(
+            [name_hit, menu_wrap],
+            spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            expand=True,
+        )
+        return ft.Container(
+            content=row_inner,
+            padding=ft.padding.only(right=2),
+            on_hover=lambda e: self._on_tree_file_row_hover(e, menu_wrap),
+        )
+
+    def _make_tree_folder_title_row(self, dirname: str, folder_path: Path) -> ft.Control:
+        fp = folder_path
+        menu_btn = ft.PopupMenuButton(
+            icon=ft.Icons.MORE_VERT,
+            icon_size=18,
+            icon_color=config.ON_SURFACE_VARIANT,
+            tooltip="Folder actions",
+            items=[
+                ft.PopupMenuItem(
+                    content=ft.Text("Rename…", size=13),
+                    on_click=lambda _e, p=fp: self._show_rename_path_dialog(p, is_dir=True),
+                ),
+                ft.PopupMenuItem(
+                    content=ft.Text("Delete folder…", size=13),
+                    on_click=lambda _e, p=fp: self._show_delete_folder_dialog(p),
+                ),
+            ],
+        )
+        menu_wrap = ft.Container(content=menu_btn, opacity=0.0, animate_opacity=150)
+        name_hit = ft.Container(
+            expand=True,
+            content=ft.GestureDetector(
+                mouse_cursor=ft.MouseCursor.CLICK,
+                on_double_tap=lambda _e, p=fp: self._show_rename_path_dialog(p, is_dir=True),
+                content=ft.Container(
+                    content=ft.Text(dirname, size=13, color=config.ON_SURFACE),
                     padding=ft.Padding.symmetric(horizontal=8, vertical=2),
                 ),
             ),
@@ -378,7 +814,7 @@ class MarkdownStudioExplorer:
             tree = filter_md_tree(tree, q)
             if not tree:
                 self.tree_column.controls.append(
-                    ft.Text("No matching files.", size=12, color=ft.Colors.GREY_500)
+                    ft.Text("No matching files.", size=12, color=config.ON_SURFACE_VARIANT)
                 )
                 return
 
@@ -392,11 +828,7 @@ class MarkdownStudioExplorer:
                 inner = render_level(sub, folder_path, depth + 1)
                 ctrls.append(
                     ft.ExpansionTile(
-                        title=ft.GestureDetector(
-                            mouse_cursor=ft.MouseCursor.CLICK,
-                            on_double_tap=lambda _e, p=folder_path: self._show_rename_path_dialog(p, is_dir=True),
-                            content=ft.Text(dirname, size=13, color=ft.Colors.GREY_200),
-                        ),
+                        title=self._make_tree_folder_title_row(dirname, folder_path),
                         controls=[
                             ft.Container(
                                 content=ft.Column(inner, tight=True, spacing=0),
@@ -407,8 +839,8 @@ class MarkdownStudioExplorer:
                         dense=True,
                         show_trailing_icon=True,
                         leading=None,
-                        icon_color=ft.Colors.GREY_500,
-                        collapsed_icon_color=ft.Colors.GREY_500,
+                        icon_color=config.ON_SURFACE_VARIANT,
+                        collapsed_icon_color=config.ON_SURFACE_VARIANT,
                     )
                 )
             files = node.get("_files", [])
@@ -436,6 +868,8 @@ class MarkdownStudioExplorer:
             return
         self._compare_candidate_source = "draft"
         self._compare_snapshot_version_id = None
+        self._compare_newer_version_id = None
+        self._compare_newer_cached_body = ""
         self._pending_ai_accept_action_id = None
         self._compare_pdf_peer_snapshot_id = None
         self._latest_ai_proposal_vid = None
@@ -458,8 +892,6 @@ class MarkdownStudioExplorer:
             self._main_tab_index = TAB_HISTORY
             self._select_snapshot_as_candidate(after_import_vid)
             self._refresh_compare_tab_candidate_ui()
-            if _ctrl_on_page(self._compare_candidate_dropdown):
-                self._compare_candidate_dropdown.update()
             if _ctrl_on_page(self._main_tabs):
                 self._main_tabs.update()
             self._refresh_compare_diff_immediate()

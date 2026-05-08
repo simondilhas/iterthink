@@ -34,6 +34,11 @@ def _scan_excluded(path: Path) -> bool:
     return False
 
 
+def is_excluded_from_doc_tree(path: Path) -> bool:
+    """True for store paths and other dirs hidden from the documents file tree."""
+    return _scan_excluded(path)
+
+
 def filter_md_tree(node: dict[str, Any], query: str) -> dict[str, Any]:
     """Return a copy of the tree subtree containing only paths that match ``query``."""
     q = query.strip().lower()

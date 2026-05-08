@@ -29,8 +29,10 @@
   3. [Right] Context/Diff: `ft.Column` showing paragraph-level changes and chat.
 
 ## Minimalistic UI Style
-- **Theme:** Dark mode by default (`page.theme_mode = ft.ThemeMode.DARK`).
-- **Colors:** Deep grays and slate. Primary accent: `#007BFF` (Fedora Blue).
+- **Theme:** `appearance` in `iterthink/defaults/config.yaml` selects dark vs light (`appearance: dark` default). Map to `page.theme_mode` and `theme.dark` / `theme.light` tokens (not hardcoded Fedora blue).
+- **Colors (seed / `defaults/config.yaml`):**
+  - **Dark:** page `#1A1A1A`, surface `#230F33`, sidebar `#1A0A26`, primary & highlight `#B38FC1`, on-surface `#FFFFFF`, on-surface soft `#B8CEE8`, sidebar/on-outline `#959799`, success `#C8E4C4`, selection overlay `#88B38FC1`.
+  - **Light:** page & surface `#FFFFFF`, sidebar `#F8F9FA`, primary `#312F8A`, highlight `#B38FC1`, on-surface & on-surface soft `#230F33`, sidebar/outline `#959799`, success `#C8E4C4`, selection overlay `#55312F8A`.
 - **Typography:** Monospace for the editor, Sans-serif for the UI.
 - **Diff Styling:** - Unchanged paragraphs: Hidden (as per user requirement).
   - Word changes: Green/Red `ft.TextSpan` backgrounds.

@@ -7,7 +7,7 @@ from typing import Any
 
 import flet as ft
 
-from iterthink import config
+from iterthink import config, ui_theme
 from iterthink.studio_constants import (
     COMPARE_ACTION_GRID_CELL,
     COMPARE_ACTION_H_PAD,
@@ -41,7 +41,7 @@ def action_rail_play_icon_button(
     return ft.IconButton(
         ft.Icons.PLAY_ARROW,
         icon_size=icon_size,
-        icon_color=config.FEDORA_BLUE,
+        icon_color=config.PRIMARY_COLOR,
         tooltip=tooltip or PROJECT_PAGE_TOOLTIP,
         style=action_rail_icon_button_style(),
         on_click=on_click,
@@ -57,7 +57,7 @@ def action_rail_approve_icon_button(
     return ft.IconButton(
         ft.Icons.CHECK_ROUNDED,
         icon_size=icon_size,
-        icon_color=config.FEDORA_BLUE,
+        icon_color=config.PRIMARY_COLOR,
         tooltip=tooltip or ACTION_APPROVE_PARAGRAPH_TOOLTIP,
         style=action_rail_icon_button_style(),
         on_click=on_click,
@@ -73,7 +73,7 @@ def action_rail_reject_icon_button(
     return ft.IconButton(
         ft.Icons.CLOSE_ROUNDED,
         icon_size=icon_size,
-        icon_color=ft.Colors.GREY_400,
+        icon_color=config.ON_SURFACE_VARIANT,
         tooltip=tooltip or ACTION_REJECT_PARAGRAPH_TOOLTIP,
         style=action_rail_icon_button_style(),
         on_click=on_click,
@@ -96,7 +96,7 @@ def sparkle_margin_menu_chrome(
         else (2 if compact else 4)
     )
     style = ft.ButtonStyle(
-        color=ft.Colors.with_opacity(0.45, ft.Colors.WHITE),
+        color=ft.Colors.with_opacity(0.5, config.ON_SURFACE),
         padding=(
             ft.padding.symmetric(horizontal=2, vertical=1)
             if for_compare
@@ -104,7 +104,7 @@ def sparkle_margin_menu_chrome(
         ),
         visual_density=ft.VisualDensity.COMPACT,
     )
-    icon_color = ft.Colors.with_opacity(0.85, config.FEDORA_BLUE)
+    icon_color = ft.Colors.with_opacity(0.85, config.PRIMARY_COLOR)
     return icon_size, pad, style, icon_color
 
 
@@ -177,8 +177,8 @@ def build_action_square(
         spacing=0,
     )
     return ft.Container(
-        bgcolor=ft.Colors.with_opacity(0.12, ft.Colors.WHITE),
-        border=ft.border.all(1, ft.Colors.with_opacity(0.45, ft.Colors.GREY_600)),
+        bgcolor=ft.Colors.with_opacity(0.1, config.ON_SURFACE),
+        border=ft.border.all(1, ui_theme.outline_muted(alpha=0.45)),
         border_radius=8,
         padding=ft.padding.symmetric(horizontal=COMPARE_ACTION_H_PAD, vertical=COMPARE_ACTION_V_PAD),
         content=ft.Container(width=inner_w, content=row),
@@ -205,8 +205,8 @@ def build_action_compose_vertical_strip(
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
     )
     return ft.Container(
-        bgcolor=ft.Colors.with_opacity(0.12, ft.Colors.WHITE),
-        border=ft.border.all(1, ft.Colors.with_opacity(0.45, ft.Colors.GREY_600)),
+        bgcolor=ft.Colors.with_opacity(0.1, config.ON_SURFACE),
+        border=ft.border.all(1, ui_theme.outline_muted(alpha=0.45)),
         border_radius=8,
         padding=ft.padding.symmetric(horizontal=COMPARE_ACTION_H_PAD, vertical=COMPARE_ACTION_V_PAD),
         content=ft.Container(width=cw, height=2 * ch, content=col),
@@ -250,8 +250,8 @@ def build_action_rectangle(
         tight=True,
     )
     return ft.Container(
-        bgcolor=ft.Colors.with_opacity(0.12, ft.Colors.WHITE),
-        border=ft.border.all(1, ft.Colors.with_opacity(0.45, ft.Colors.GREY_600)),
+        bgcolor=ft.Colors.with_opacity(0.1, config.ON_SURFACE),
+        border=ft.border.all(1, ui_theme.outline_muted(alpha=0.45)),
         border_radius=8,
         padding=ft.padding.symmetric(horizontal=COMPARE_ACTION_H_PAD, vertical=COMPARE_ACTION_V_PAD),
         content=ft.Container(width=inner_w, content=col),

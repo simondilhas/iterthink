@@ -8,6 +8,7 @@ from pathlib import Path
 import flet as ft
 
 from iterthink import (
+    config,
     document_import,
     pdf_visual_diff,
     plan_compare_panel,
@@ -350,7 +351,7 @@ class MarkdownStudioAssetCompare:
                                 selectable=True,
                                 font_family="monospace",
                                 size=COMPARE_COL_FONT_SIZE,
-                                color=ft.Colors.GREY_200,
+                                color=config.ON_SURFACE,
                             ),
                         )
                     )

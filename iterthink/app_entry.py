@@ -5,7 +5,7 @@ import sys
 import flet as ft
 from flet.controls.types import PagePlatform
 
-from iterthink import config
+from iterthink import config, ui_theme
 from iterthink.db import bootstrap
 from iterthink.ollama_util import ollama_error_message
 from iterthink.studio import MarkdownStudio
@@ -16,10 +16,10 @@ async def main(page: ft.Page) -> None:
     if page.web:
         await page.browser_context_menu.disable()
     if not page.web:
-        sym = config.APP_SYMBOL_PNG
+        sym = config.APP_SYMBOL_PNG if config.APP_SYMBOL_PNG.is_file() else config.APP_SYMBOL_SVG
         if sym.is_file():
             page.window.icon = str(sym.resolve())
-    page.theme_mode = ft.ThemeMode.DARK
+    page.theme_mode = ft.ThemeMode.LIGHT if config.IS_LIGHT else ft.ThemeMode.DARK
 
     pl = getattr(page, "platform", None)
     use_native_csd = pl in (PagePlatform.LINUX, PagePlatform.WINDOWS)
@@ -32,16 +32,8 @@ async def main(page: ft.Page) -> None:
     else:
         page.padding = 12
 
-    page.bgcolor = "#121212"
-    page.theme = ft.Theme(
-        color_scheme=ft.ColorScheme(
-            primary=config.FEDORA_BLUE,
-            on_primary=ft.Colors.WHITE,
-            surface=config.SURFACE_VARIANT,
-            on_surface=ft.Colors.GREY_100,
-            surface_container=config.SURFACE,
-        ),
-    )
+    page.bgcolor = config.PAGE_BG
+    page.theme = ft.Theme(color_scheme=ui_theme.page_color_scheme())
 
     bootstrap.bootstrap_database()
 
@@ -55,6 +47,7 @@ async def main(page: ft.Page) -> None:
         page.update()
 
     async def _save_on_boundary() -> None:
+        studio._flush_review_edits_if_changed()
         if studio.current_path and studio._is_dirty():
             await studio.save_file(silent=True, snapshot_reason="pre_switch")
 

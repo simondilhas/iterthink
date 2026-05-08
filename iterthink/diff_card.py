@@ -33,10 +33,12 @@ def build_unified_spans(
     base_color: str = ft.Colors.GREY_400,
     font_family: str | None = None,
     insert_color: str | None = None,
+    insert_bgcolor: str | None = None,
     line_height: float | None = None,
 ) -> list[ft.TextSpan]:
     """Word-level inline diff: deletions (red + strikethrough), insertions (green tint / green text)."""
     ins_color = insert_color if insert_color is not None else ft.Colors.GREY_200
+    ins_bg = insert_bgcolor if insert_bgcolor is not None else _BG_NEW
     style_kw: dict[str, Any] = {}
     if font_family:
         style_kw["font_family"] = font_family
@@ -77,7 +79,7 @@ def build_unified_spans(
                 spans.append(
                     ft.TextSpan(
                         text=chunk,
-                        style=ft.TextStyle(size=base_size, color=ins_color, bgcolor=_BG_NEW, **style_kw),
+                        style=ft.TextStyle(size=base_size, color=ins_color, bgcolor=ins_bg, **style_kw),
                     )
                 )
         else:  # replace
@@ -99,7 +101,7 @@ def build_unified_spans(
                 spans.append(
                     ft.TextSpan(
                         text=t,
-                        style=ft.TextStyle(size=base_size, color=ins_color, bgcolor=_BG_NEW, **style_kw),
+                        style=ft.TextStyle(size=base_size, color=ins_color, bgcolor=ins_bg, **style_kw),
                     )
                 )
 
@@ -174,13 +176,15 @@ def build_new_side_spans(
     base_color: str = ft.Colors.GREY_400,
     font_family: str | None = None,
     insert_color: str | None = None,
+    insert_bgcolor: str | None = None,
     line_height: float | None = None,
 ) -> list[ft.TextSpan]:
     """New side only: equal tokens (base) + insertions (green). Skips deletions."""
     ins_color = insert_color if insert_color is not None else ft.Colors.GREY_200
+    ins_bg = insert_bgcolor if insert_bgcolor is not None else _BG_NEW
     style_kw = _diff_style_kwargs(font_family=font_family, line_height=line_height)
     base = ft.TextStyle(size=base_size, color=base_color, **style_kw)
-    ins_style = ft.TextStyle(size=base_size, color=ins_color, bgcolor=_BG_NEW, **style_kw)
+    ins_style = ft.TextStyle(size=base_size, color=ins_color, bgcolor=ins_bg, **style_kw)
     a = _tokenize(old_text)
     b = _tokenize(new_text)
     if not a and not b:

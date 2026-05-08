@@ -11,7 +11,7 @@ from pathlib import Path
 import flet as ft
 from flet.controls.types import PagePlatform
 
-from iterthink import config
+from iterthink import config, ui_theme
 from iterthink import licensing
 from iterthink import settings_ui
 from iterthink.studio_constants import (
@@ -148,13 +148,13 @@ class MarkdownStudioShell:
             "Free for personal use — Get Commercial License",
             size=12,
             weight=ft.FontWeight.W_500,
-            color=config.FEDORA_BLUE,
+            color=config.PRIMARY_COLOR,
         )
         inner = ft.Container(
             content=txt,
             padding=ft.padding.symmetric(horizontal=10, vertical=4),
             border_radius=12,
-            bgcolor=ft.Colors.with_opacity(0.10, config.FEDORA_BLUE),
+            bgcolor=ft.Colors.with_opacity(0.10, config.PRIMARY_COLOR),
         )
         return ft.GestureDetector(
             mouse_cursor=ft.MouseCursor.CLICK,
@@ -171,7 +171,7 @@ class MarkdownStudioShell:
             host.update()
 
     def _open_about(self, _e: ft.ControlEvent | None = None) -> None:
-        _rule = ft.Colors.with_opacity(0.35, ft.Colors.GREY_500)
+        _rule = ui_theme.outline_muted(alpha=0.38)
 
         def _h_rule() -> ft.Container:
             return ft.Container(
@@ -180,18 +180,23 @@ class MarkdownStudioShell:
                 bgcolor=_rule,
             )
 
-        _body_lo = ft.TextStyle(size=14, height=1.55, weight=ft.FontWeight.W_400, color=ft.Colors.GREY_200)
+        _body_lo = ft.TextStyle(
+            size=14,
+            height=1.55,
+            weight=ft.FontWeight.W_400,
+            color=config.ON_SURFACE,
+        )
         _section_hd = ft.TextStyle(
             size=14,
             height=1.4,
             weight=ft.FontWeight.W_600,
-            color=ft.Colors.GREY_200,
+            color=config.ON_SURFACE,
         )
 
         license_link_btn = ft.TextButton(
             "[View BUSL-1.1 License]",
             style=ft.ButtonStyle(
-                color=config.FEDORA_BLUE,
+                color=config.PRIMARY_COLOR,
                 padding=ft.Padding.symmetric(horizontal=0, vertical=0),
                 visual_density=ft.VisualDensity.COMPACT,
             ),
@@ -203,7 +208,7 @@ class MarkdownStudioShell:
                 "Iterthink",
                 size=28,
                 weight=ft.FontWeight.W_700,
-                color=ft.Colors.GREY_100,
+                color=config.ON_SURFACE,
             ),
             ft.Container(height=10),
             ft.Text(
@@ -211,7 +216,7 @@ class MarkdownStudioShell:
                 size=16,
                 height=1.45,
                 weight=ft.FontWeight.W_600,
-                color=ft.Colors.GREY_200,
+                color=config.ON_SURFACE,
             ),
             ft.Container(height=8),
             ft.Text(
@@ -220,7 +225,7 @@ class MarkdownStudioShell:
                 height=1.5,
                 weight=ft.FontWeight.W_400,
                 italic=True,
-                color=ft.Colors.GREY_300,
+                color=config.ON_SURFACE_VARIANT,
             ),
             _h_rule(),
             ft.Text("Local AI Intelligence", style=_section_hd),
@@ -251,7 +256,12 @@ class MarkdownStudioShell:
         self.page.show_dialog(
             ft.AlertDialog(
                 modal=True,
-                title=ft.Text("About", size=13, weight=ft.FontWeight.W_500, color=ft.Colors.GREY_500),
+                title=ft.Text(
+                    "About",
+                    size=13,
+                    weight=ft.FontWeight.W_500,
+                    color=config.ON_SURFACE_VARIANT,
+                ),
                 content=ft.Container(
                     width=440,
                     padding=ft.padding.only(top=4, bottom=8, left=4, right=4),
@@ -280,7 +290,8 @@ class MarkdownStudioShell:
         none_side = ft.BorderSide(style=ft.BorderStyle.NONE)
         return ft.ButtonStyle(
             side=none_side,
-            overlay_color=ft.Colors.with_opacity(0.07, ft.Colors.WHITE),
+            color=config.ON_SURFACE,
+            overlay_color=ft.Colors.with_opacity(0.08, config.ON_SURFACE),
         )
 
     def _submenu_dropdown_style(self) -> ft.MenuStyle:
@@ -323,7 +334,7 @@ class MarkdownStudioShell:
 
         def _top_submenu(label: str, items: list[ft.Control]) -> ft.SubmenuButton:
             return ft.SubmenuButton(
-                content=ft.Text(label),
+                content=ft.Text(label, color=config.ON_SURFACE, size=14),
                 style=bar_btn,
                 menu_style=drop,
                 alignment_offset=ft.Offset(0, 0),
@@ -340,15 +351,15 @@ class MarkdownStudioShell:
                     "File",
                     [
                         ft.MenuItemButton(
-                            content=ft.Text("Save"),
+                            content=ft.Text("Save", color=config.ON_SURFACE, size=14),
                             on_click=lambda e: self.page.run_task(self.save_file, e),
                         ),
                         ft.MenuItemButton(
-                            content=ft.Text("Settings…"),
+                            content=ft.Text("Settings…", color=config.ON_SURFACE, size=14),
                             on_click=lambda e: self.page.run_task(settings_ui.open_settings_dialog, self),
                         ),
                         ft.MenuItemButton(
-                            content=ft.Text("Quit"),
+                            content=ft.Text("Quit", color=config.ON_SURFACE, size=14),
                             on_click=lambda e: self.page.run_task(self._win_close_async, e),
                         ),
                     ],
@@ -357,11 +368,11 @@ class MarkdownStudioShell:
                     "View",
                     [
                         ft.MenuItemButton(
-                            content=ft.Text("Toggle explorer"),
+                            content=ft.Text("Toggle explorer", color=config.ON_SURFACE, size=14),
                             on_click=lambda e: self.toggle_left(e),
                         ),
                         ft.MenuItemButton(
-                            content=ft.Text("Toggle KI panel"),
+                            content=ft.Text("Toggle KI panel", color=config.ON_SURFACE, size=14),
                             on_click=lambda e: self.toggle_right(e),
                         ),
                     ],
@@ -370,15 +381,15 @@ class MarkdownStudioShell:
                     "Help",
                     [
                         ft.MenuItemButton(
-                            content=ft.Text("Help…"),
+                            content=ft.Text("Help…", color=config.ON_SURFACE, size=14),
                             on_click=self._open_help,
                         ),
                         ft.MenuItemButton(
-                            content=ft.Text("License…"),
+                            content=ft.Text("License…", color=config.ON_SURFACE, size=14),
                             on_click=self._open_license_dialog,
                         ),
                         ft.MenuItemButton(
-                            content=ft.Text("About"),
+                            content=ft.Text("About", color=config.ON_SURFACE, size=14),
                             on_click=self._open_about,
                         ),
                     ],
@@ -396,7 +407,7 @@ class MarkdownStudioShell:
     ) -> ft.Control:
         """Collapsed rail: wide strip + light pill. Expanded: SURFACE bar, blue on hover."""
         if compact_rail:
-            pill_idle = ft.Colors.with_opacity(0.24, ft.Colors.WHITE)
+            pill_idle = ft.Colors.with_opacity(0.28, config.ON_SURFACE)
             pill = ft.Container(
                 width=float(PANE_HANDLE_WIDTH_PX),
                 height=float(PANE_HANDLE_HEIGHT_PX),
@@ -404,7 +415,7 @@ class MarkdownStudioShell:
             )
 
             def _on_strip_hover(e: ft.ControlEvent) -> None:
-                pill.bgcolor = config.FEDORA_BLUE if e.data else pill_idle
+                pill.bgcolor = config.PRIMARY_COLOR if e.data else pill_idle
                 if _ctrl_on_page(pill):
                     pill.update()
 
@@ -423,7 +434,7 @@ class MarkdownStudioShell:
             )
 
             def _on_strip_hover_exp(e: ft.ControlEvent) -> None:
-                bar.bgcolor = config.FEDORA_BLUE if e.data else config.SURFACE
+                bar.bgcolor = config.PRIMARY_COLOR if e.data else config.SURFACE
                 if _ctrl_on_page(bar):
                     bar.update()
 
@@ -506,21 +517,21 @@ class MarkdownStudioShell:
                             ft.Icons.MINIMIZE,
                             icon_size=18,
                             tooltip="Minimize",
-                            icon_color=ft.Colors.GREY_300,
+                            icon_color=config.ON_SURFACE_VARIANT,
                             on_click=self._win_minimize,
                         ),
                         ft.IconButton(
                             ft.Icons.CROP_SQUARE,
                             icon_size=18,
                             tooltip="Maximize",
-                            icon_color=ft.Colors.GREY_300,
+                            icon_color=config.ON_SURFACE_VARIANT,
                             on_click=self._win_toggle_max,
                         ),
                         ft.IconButton(
                             ft.Icons.CLOSE,
                             icon_size=18,
                             tooltip="Close",
-                            icon_color=ft.Colors.GREY_300,
+                            icon_color=config.ON_SURFACE_VARIANT,
                             on_click=lambda e: self.page.run_task(self._win_close_async, e),
                         ),
                     ],
@@ -535,7 +546,7 @@ class MarkdownStudioShell:
                     right=0,
                     top=0,
                     bgcolor=config.SURFACE_VARIANT,
-                    border=ft.border.only(bottom=ft.BorderSide(1, ft.Colors.GREY_900)),
+                    border=ft.border.only(bottom=ft.BorderSide(1, ui_theme.outline_muted(alpha=0.55))),
                     padding=0,
                     on_hover=self._on_header_chrome_hover,
                     content=ft.Row(
@@ -553,7 +564,7 @@ class MarkdownStudioShell:
                     right=0,
                     top=0,
                     bgcolor=config.SURFACE_VARIANT,
-                    border=ft.border.only(bottom=ft.BorderSide(1, ft.Colors.GREY_900)),
+                    border=ft.border.only(bottom=ft.BorderSide(1, ui_theme.outline_muted(alpha=0.55))),
                     padding=0,
                     on_hover=self._on_header_chrome_hover,
                     content=ft.Row(
@@ -597,4 +608,5 @@ class MarkdownStudioShell:
         self._margin_gen += 1
         self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)
         self._refresh_compare_diff_immediate()
+        self._refresh_tab_toolbar()
         return ft.Stack(stack_children, expand=True, clip_behavior=ft.ClipBehavior.NONE)

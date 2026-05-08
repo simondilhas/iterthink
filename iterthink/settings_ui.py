@@ -20,7 +20,7 @@ from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS, TOPIC_EVALUATE, VALID
 from iterthink.ollama_models import classify_installed_models
 from iterthink.ollama_util import ollama_error_message
 from iterthink.studio_constants import KI_TIER_TAB_ICON_PX, SIDEBAR_TOOLBAR_ROW_H_PX
-from iterthink.studio_llm import build_ki_tier_tabs
+from iterthink.studio_llm_backend import build_llm_tier_tabs
 from iterthink.studio_util import (
     CLOUD_VENDOR_ANTHROPIC,
     CLOUD_VENDOR_GOOGLE,
@@ -114,6 +114,7 @@ async def open_settings_dialog(studio: Any) -> None:
             status_txt.update()
 
     async def save_local_models(_e: ft.ControlEvent | None = None) -> None:
+        nonlocal ollama
         cm = (chat_dd.value or "").strip()
         em = (embed_dd.value or "").strip()
         if not cm:
@@ -128,10 +129,32 @@ async def open_settings_dialog(studio: Any) -> None:
             studio._snack(f"Embedding model not usable: {ollama_error_message(ex)}")
             return
 
+        try:
+            data = _bootstrap_data()
+        except (OSError, yaml.YAMLError) as ex:
+            studio._snack(f"Could not read app config: {ex}")
+            return
+        host_raw = (ollama_host_tf.value or "").strip()
+        data["ollama_host"] = host_raw if host_raw else None
+        try:
+            text = yaml.safe_dump(
+                data,
+                default_flow_style=False,
+                allow_unicode=True,
+                sort_keys=False,
+                width=88,
+            )
+            config.write_bootstrap_yaml_text(text)
+        except (OSError, ValueError, yaml.YAMLError) as ex:
+            studio._snack(f"Could not save Ollama host: {ex}")
+            return
+
         store_db.settings_set(studio._db, store_db.SETTINGS_CHAT, cm)
         store_db.settings_set(studio._db, store_db.SETTINGS_EMBED, em)
         studio.ollama_model = cm
         studio.ollama_embed_model = em
+        studio.refresh_ollama_client()
+        ollama = studio.ollama
         studio._refresh_chat_model_button()
         studio._snack("Local Ollama models saved.")
 
@@ -512,15 +535,18 @@ async def open_settings_dialog(studio: Any) -> None:
         dense=True,
     )
 
-    higlight_color_tf = ft.TextField(label="Accent (higlight_color)", value=_s("higlight_color", "#007BFF"), dense=True, expand=True)
-    surface_tf = ft.TextField(label="Surface", value=_s("surface", "#1E1E1E"), dense=True, expand=True)
-    surface_variant_tf = ft.TextField(label="Surface variant", value=_s("surface_variant", "#2D2D2D"), dense=True, expand=True)
-    sidebar_surface_tf = ft.TextField(label="Sidebar surface", value=_s("sidebar_surface", "#2A2D32"), dense=True, expand=True)
-    selection_overlay_tf = ft.TextField(
-        label="Selection overlay (ARGB hex)",
-        value=_s("selection_overlay", "#59007BFF"),
+    _ap0 = (_bd0.get("appearance") or "dark").strip().lower()
+    if _ap0 not in ("dark", "light"):
+        _ap0 = "dark"
+    appearance_dd = ft.Dropdown(
+        label="Appearance",
+        value=_ap0,
+        options=[
+            ft.dropdown.Option("dark", "Dark (focus)"),
+            ft.dropdown.Option("light", "Light (clean)"),
+        ],
         dense=True,
-        expand=True,
+        width=220,
     )
     chat_system_tf = ft.TextField(
         label="Chat system prompt",
@@ -531,6 +557,29 @@ async def open_settings_dialog(studio: Any) -> None:
         expand=True,
     )
 
+    _sdl0 = _bd0.get("startup_daily_log", True)
+    if not isinstance(_sdl0, bool):
+        _sdl0 = True
+    daily_log_sw = ft.Switch(
+        label="Open today's daily log on startup",
+        value=_sdl0,
+    )
+    new_note_template_tf = ft.TextField(
+        label="New note name template (when daily log is off)",
+        value=_s("new_note_name_template", "unnamed-{n}.md"),
+        hint_text='Must contain exactly one "{n}" (e.g. unnamed-{n}.md)',
+        expand=True,
+        dense=True,
+        disabled=_sdl0,
+    )
+
+    def _on_daily_log_switch(_e: ft.ControlEvent | None = None) -> None:
+        new_note_template_tf.disabled = bool(daily_log_sw.value)
+        if _ctrl_on_page(new_note_template_tf):
+            new_note_template_tf.update()
+
+    daily_log_sw.on_change = _on_daily_log_switch
+
     async def save_app_fields(_e: ft.ControlEvent | None = None) -> None:
         before_store = studio._store_dir_resolved
         try:
@@ -538,14 +587,15 @@ async def open_settings_dialog(studio: Any) -> None:
         except (OSError, yaml.YAMLError) as ex:
             studio._snack(f"Could not read app config: {ex}")
             return
-        host_raw = (ollama_host_tf.value or "").strip()
-        data["ollama_host"] = host_raw if host_raw else None
-        data["higlight_color"] = (higlight_color_tf.value or "").strip() or "#007BFF"
-        data["surface"] = (surface_tf.value or "").strip() or "#1E1E1E"
-        data["surface_variant"] = (surface_variant_tf.value or "").strip() or "#2D2D2D"
-        data["sidebar_surface"] = (sidebar_surface_tf.value or "").strip() or "#2A2D32"
-        data["selection_overlay"] = (selection_overlay_tf.value or "").strip() or "#59007BFF"
+        ap = (appearance_dd.value or "dark").strip().lower()
+        data["appearance"] = ap if ap in ("dark", "light") else "dark"
         data["chat_system"] = (chat_system_tf.value or "").strip() or config.CHAT_SYSTEM
+        tmpl = (new_note_template_tf.value or "").strip()
+        if tmpl.count("{n}") != 1:
+            studio._snack('New note name template must contain exactly one "{n}" (e.g. unnamed-{n}.md).')
+            return
+        data["new_note_name_template"] = tmpl
+        data["startup_daily_log"] = bool(daily_log_sw.value)
         try:
             text = yaml.safe_dump(
                 data,
@@ -566,9 +616,16 @@ async def open_settings_dialog(studio: Any) -> None:
             studio._snack("Appearance & chat defaults saved.")
         docs_tf.value = str(config.DOCUMENTS)
         store_tf.value = str(config.STORE_DIR)
+        new_note_template_tf.value = config.NEW_NOTE_NAME_TEMPLATE
+        daily_log_sw.value = config.STARTUP_DAILY_LOG
+        new_note_template_tf.disabled = config.STARTUP_DAILY_LOG
         if _ctrl_on_page(docs_tf):
             docs_tf.update()
             store_tf.update()
+        if _ctrl_on_page(new_note_template_tf):
+            new_note_template_tf.update()
+        if _ctrl_on_page(daily_log_sw):
+            daily_log_sw.update()
         _apply_paths_and_theme(studio, store_changed=store_changed)
 
     margin_rows: list[dict[str, Any]] = []
@@ -724,6 +781,7 @@ async def open_settings_dialog(studio: Any) -> None:
                     size=11,
                     color=ft.Colors.GREY_500,
                 ),
+                ollama_host_tf,
                 chat_dd,
                 embed_dd,
                 status_txt,
@@ -912,7 +970,7 @@ async def open_settings_dialog(studio: Any) -> None:
     cloud_vendor_seg.on_change = _on_cloud_vendor_ui
 
     _settings_tier_ix = KI_TIERS.index(normalize_ki_tier(studio.ki_tier))
-    settings_ki_tier_tabs = build_ki_tier_tabs(
+    settings_ki_tier_tabs = build_llm_tier_tabs(
         selected_index=_settings_tier_ix,
         on_change=_on_settings_ki_tier_tabs_wrapped,
         icon_size=KI_TIER_TAB_ICON_PX,
@@ -976,16 +1034,24 @@ async def open_settings_dialog(studio: Any) -> None:
         content=ft.Column(
             [
                 ft.Text(
-                    "Theme, optional Ollama host, and chat system string. "
+                    "Appearance (dark / light), chat system string, and startup note behavior. "
+                    "Ollama host is under Models → Home (Local). "
+                    "Edit bundled palette tokens in config.yaml under theme.dark / theme.light. "
                     "Document paths live under Paths; default models under Models.",
                     size=12,
-                    color=ft.Colors.GREY_500,
+                    color=config.ON_SURFACE_VARIANT,
                 ),
-                ollama_host_tf,
+                ft.Text("Notes & startup", weight=ft.FontWeight.W_500, size=13),
+                daily_log_sw,
+                new_note_template_tf,
+                ft.Text(
+                    "When daily log is on, the app opens or creates one YYYYMMDD-n.md per day in the documents folder. "
+                    "When off, it opens the first note in the tree (same order as the sidebar) or creates the next file from the template.",
+                    size=11,
+                    color=config.ON_SURFACE_VARIANT,
+                ),
                 ft.Text("Theme", weight=ft.FontWeight.W_500, size=13),
-                higlight_color_tf,
-                ft.Row([surface_tf, surface_variant_tf], spacing=8, expand=True),
-                ft.Row([sidebar_surface_tf, selection_overlay_tf], spacing=8, expand=True),
+                appearance_dd,
                 chat_system_tf,
                 ft.FilledButton("Save app settings", on_click=lambda e: page.run_task(save_app_fields, e)),
             ],
@@ -1034,19 +1100,23 @@ async def open_settings_dialog(studio: Any) -> None:
         visible=not licensing.is_licensed(),
         padding=ft.padding.all(12),
         border_radius=8,
-        bgcolor=ft.Colors.with_opacity(0.12, config.FEDORA_BLUE),
-        border=ft.border.all(1, ft.Colors.with_opacity(0.4, config.FEDORA_BLUE)),
+        bgcolor=ft.Colors.with_opacity(0.12, config.PRIMARY_COLOR),
+        border=ft.border.all(1, ft.Colors.with_opacity(0.4, config.PRIMARY_COLOR)),
         content=ft.Text(
             spans=[
                 ft.TextSpan(
                     "Buy a licence ",
-                    style=ft.TextStyle(color=ft.Colors.GREY_200, size=14, weight=ft.FontWeight.W_500),
+                    style=ft.TextStyle(
+                        color=config.ON_SURFACE,
+                        size=14,
+                        weight=ft.FontWeight.W_500,
+                    ),
                 ),
                 ft.TextSpan(
                     "www.iterthink.com/#pricing",
                     url=licensing.PRICING_URL,
                     style=ft.TextStyle(
-                        color=config.FEDORA_BLUE,
+                        color=config.PRIMARY_COLOR,
                         size=14,
                         weight=ft.FontWeight.W_600,
                         decoration=ft.TextDecoration.UNDERLINE,
@@ -1082,12 +1152,15 @@ async def open_settings_dialog(studio: Any) -> None:
         licensed = licensing.is_licensed()
         license_remove_btn.visible = licensed
         license_buy_block.visible = not licensed
+        license_entry_block.visible = not licensed
         if _ctrl_on_page(license_status_txt):
             license_status_txt.update()
         if _ctrl_on_page(license_remove_btn):
             license_remove_btn.update()
         if _ctrl_on_page(license_buy_block):
             license_buy_block.update()
+        if _ctrl_on_page(license_entry_block):
+            license_entry_block.update()
 
     def activate_license(_e: ft.ControlEvent | None = None) -> None:
         phrase = (license_passphrase_tf.value or _license_phrase_mirror[0] or "").strip()
@@ -1132,14 +1205,23 @@ async def open_settings_dialog(studio: Any) -> None:
 
     license_remove_btn.on_click = remove_license
 
+    license_activate_btn = ft.FilledButton("Activate", on_click=activate_license)
+    license_entry_block = ft.Container(
+        visible=not licensing.is_licensed(),
+        content=ft.Column(
+            [license_passphrase_tf, license_activate_btn],
+            tight=True,
+            spacing=10,
+        ),
+    )
+
     tab_license = ft.Container(
         padding=8,
         content=ft.Column(
             [
                 license_status_txt,
                 license_buy_block,
-                license_passphrase_tf,
-                ft.FilledButton("Activate", on_click=activate_license),
+                license_entry_block,
                 license_feedback_txt,
                 license_remove_btn,
             ],

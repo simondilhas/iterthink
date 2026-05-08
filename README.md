@@ -2,28 +2,53 @@
 
 See every change. Understand the impact. Act on what matters.
 
-iterthink is a local review layer for documents and models. Most tools rewrite everything at once — you get back something clean, but you can't see what changed or whether the meaning held. iterthink shows you exactly what the AI touched, word by word, and tells you whether the intent shifted. When a change matters, you can trigger a workflow directly in [{yourcompany}os](https://yourcompanyos.io).
+iterthink is a local review layer for documents. Most AI tools rewrite everything at once — you get back something clean, but you can't see what changed or whether the meaning held. iterthink shows you exactly what the AI touched, word by word, and tells you whether the intent shifted. When a change matters, you can trigger a workflow directly in [{yourcompany}os](https://yourcompanyos.io).
 
-Nothing leaves your machine.
 
 ---
 
 ## What it does
 
-- Write or import documents in plain markdown
-- Send any paragraph to a local AI (via Ollama — private, no API key)
-- See word-level diff: what was added, what was removed
-- Get a semantic signal: `STABLE` (intent held) or `NEW` (meaning shifted)
+- Write or import documents in plain Markdown
+- Run **margin actions** on any paragraph (Discuss / Edit / Evaluate)—**Ollama** by default, no API key; optional cloud backends
+- See paragraph and word-level diff: what was added, what was removed
+- See **per-paragraph change kinds** (coloured pills in History / Review): alignment and word-level diff, then embeddings (and an LLM in the ambiguous band) to split heavy edits:
+  - **`unchanged`** — shown as `—` when the matched paragraph is effectively the same
+  - **`minor`** — matched paragraph, lighter edit
+  - **`major`** — matched paragraph, same core intent but heavily rephrased or reordered
+  - **`rewritten`** — matched paragraph where the main point, facts, recommendation, or stance materially changed
+  - **`new`** / **`deleted`** — paragraph exists only in the newer or only in the older version
+- Where evaluation runs, an **intent judge** labels pairs **`STABLE`** (core meaning and intent held) or **`NEW`** (main message, recommendation, or stance changed)
 - Accept, reject, or edit — you stay in control
 - Every AI action auto-saves a version snapshot
 - Compare any two versions side by side
-- Trigger workflows in {yourcompany}os when a change needs action
+- Start a [{yourcompany}os](https://yourcompanyos.io) process from the editor when a change needs action
+
+---
+
+## Getting started (quick reference)
+
+This is the shortest path from zero to a useful session—no architecture, just what to click.
+
+1. **Install** — You need **Python 3.11+**. Create a virtual environment if you like, then `pip install iterthink` and start the app with `iterthink`. For **local** AI, install [Ollama](https://ollama.com), run it (`ollama serve`), and pull at least one **chat** model (for example `ollama pull llama3.2`). Exact copy-paste commands are in [Install](#install) below.
+
+2. **Set up your working folder** — Open **File → Settings…**, then the **Paths** section in the sidebar. Point **documents** to where you want your Markdown files (for example your notes or project folder). The app also uses a small **store** folder next to it (by default under `Documents/.iterthink`) for settings, prompts, and version history—change it here if you need a different disk or layout.
+
+3. **Connect Ollama or cloud models** — Still in **Settings**, open **Models**. Use the **Home · Office · Cloud** strip: **Home** is Ollama on your machine (pick chat and embedding models, and set **Ollama host** if it is not the default). **Cloud** is for remote providers when you use that tier; configure the vendor and models there. The same tier choice appears next to the AI panel in the main window so you can switch context without reopening Settings.
+
+4. **Write your first text in Focus Area** — The center column is the **Focus Area** tab (between **History** and **Review**). Pick or create a `.md` file in the tree on the left, then type in the editor. That buffer is what the app compares to the last saved file and to each version snapshot.
+
+5. **Use LLM support** — On the right, use the **topic** tabs and **action** pills to run paragraph-level actions (discuss, edit, evaluate—labels depend on your prompts). Use the **chat** area for free-form help. Actions use the tier you selected (**Home** / **Office** / **Cloud**). You can customize margin prompts under **Settings → Prompts** and the chat tone under **Settings → App**.
+
+6. **Review and history in the tabs** — **History** shows an older snapshot next to your current draft, with diffs and semantic hints so you see what changed. **Focus Area** is where you compose. **Review** is where you work through pending AI-suggested edits (accept or decline) before they become your new baseline. Save when you are happy; AI actions also create snapshots automatically.
+
+When something does not connect (especially Ollama), check that the service is running and that the model names in **Settings → Models** match what you pulled.
 
 ---
 
 ## Install
 
-**Prerequisites:** Python **3.11+** and [Ollama](https://ollama.com) installed and running locally.
+**Prerequisites:** Python **3.11+**. For **local** models (Settings → Models → **Home**), install [Ollama](https://ollama.com) and keep it running; cloud-only setups can skip Ollama.
 
 Use a virtual environment (recommended):
 
@@ -89,7 +114,7 @@ No cloud. No account. No API key. Your files stay on your machine. The AI runs l
 
 Every document keeps a full version timeline. Every AI action creates a snapshot. You can also save manually with a label.
 
-Compare any two versions — your edit vs. the AI's, Tuesday's draft vs. today's. Same diff, same semantic signal.
+Compare any two versions — your edit vs. the AI's, Tuesday's draft vs. today's. Same diff, same paragraph pills (**unchanged** through **deleted**), and the same **`STABLE`** / **`NEW`** intent judge when that path is used.
 
 ---
 

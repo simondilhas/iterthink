@@ -4,20 +4,6 @@ import flet as ft
 
 COMPARE_COL_FONT_SIZE = 14
 
-# Compare-tab version dropdown: dark menu rows, inverted selected row (light chip + dark text).
-COMPARE_CANDIDATE_DROPDOWN_OPTION_STYLE = ft.ButtonStyle(
-    color={
-        ft.ControlState.DEFAULT: ft.Colors.GREY_300,
-        ft.ControlState.HOVERED: ft.Colors.WHITE,
-        ft.ControlState.SELECTED: ft.Colors.BLACK,
-    },
-    bgcolor={
-        ft.ControlState.DEFAULT: ft.Colors.TRANSPARENT,
-        ft.ControlState.SELECTED: ft.Colors.GREY_400,
-    },
-    overlay_color=ft.Colors.with_opacity(0.10, ft.Colors.WHITE),
-)
-
 # KI sidebar / analyse pills
 KI_PILL_TEXT_SIZE = 10
 
@@ -73,6 +59,8 @@ COMPARE_ACTION_V_PAD = 2
 COMPARE_ACTION_COL_W = COMPARE_ACTION_INNER_W + 2 * COMPARE_ACTION_H_PAD
 # Eval column on Compare/Review rows mirrors the action column width so the row stays symmetric.
 COMPARE_EVAL_COL_W = COMPARE_ACTION_COL_W
+# Wider eval column when showing symbol + truncated paragraph summary.
+COMPARE_EVAL_COL_W_WIDE = 176
 
 PROJECT_PAGE_URL = "https://www.yourcompanyos.io"
 PROJECT_PAGE_TOOLTIP = "Start workflow on {yourcompany}os."
