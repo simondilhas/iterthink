@@ -35,6 +35,7 @@ APP_CONFIG_PATH = app_config_dir() / "config.yaml"
 DOCUMENTS: Path = Path.home() / "Documents"
 STORE_DIR: Path = DOCUMENTS / ".iterthink"
 STORE_DB_PATH: Path = STORE_DIR / "store.sqlite3"
+IMPORT_ASSETS_DIR: Path = DOCUMENTS / "iterthink_import_assets"
 DEFAULT_OLLAMA_MODEL: str = "llama3:8B"
 OLLAMA_HOST: str | None = None
 
@@ -137,7 +138,7 @@ def _legacy_dark_palette_overrides(merged: dict[str, Any]) -> dict[str, str]:
 
 def refresh() -> None:
     """Reload bootstrap YAML into module-level settings (paths, colors, defaults)."""
-    global DOCUMENTS, STORE_DIR, STORE_DB_PATH
+    global DOCUMENTS, STORE_DIR, STORE_DB_PATH, IMPORT_ASSETS_DIR
     global DEFAULT_OLLAMA_MODEL, OLLAMA_HOST
     global APPEARANCE, IS_LIGHT
     global PAGE_BG, PRIMARY_COLOR, HIGHLIGHT, ON_PRIMARY, ON_SURFACE, ON_SURFACE_SOFT
@@ -149,6 +150,7 @@ def refresh() -> None:
     DOCUMENTS = _as_path("documents_root", merged)
     STORE_DIR = _as_path("store_dir", merged)
     STORE_DB_PATH = STORE_DIR / "store.sqlite3"
+    IMPORT_ASSETS_DIR = DOCUMENTS / "iterthink_import_assets"
 
     dm = merged.get("default_ollama_model")
     if not isinstance(dm, str) or not dm.strip():

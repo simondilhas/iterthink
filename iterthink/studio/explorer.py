@@ -947,7 +947,7 @@ class MarkdownStudioExplorer:
             tooltip="File actions",
             items=[
                 ft.PopupMenuItem(
-                    content=ft.Text("Export to Word…", size=13),
+                    content=ft.Text("Export…", size=13),
                     on_click=lambda _e, p=fp: self.page.run_task(self.begin_export_to_word, p),
                 ),
                 ft.PopupMenuItem(

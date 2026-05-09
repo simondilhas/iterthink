@@ -1705,17 +1705,27 @@ class MarkdownStudio(
         self.page.show_dialog(
             ft.AlertDialog(
                 modal=True,
-                title=ft.Text("Export to Word", weight=ft.FontWeight.W_600),
+                title=ft.Text("Export", weight=ft.FontWeight.W_600),
                 content=ft.Container(
-                    content=ft.Column(
-                        [
-                            ft.Text(md_path.name, size=12, font_family="monospace"),
-                            tpl_dd,
+                    width=560,
+                    content=ft.Tabs(
+                        selected_index=0,
+                        tabs=[
+                            ft.Tab(
+                                text="Export to Word",
+                                content=ft.Container(
+                                    content=ft.Column(
+                                        [
+                                            ft.Text(md_path.name, size=12, font_family="monospace"),
+                                            tpl_dd,
+                                        ],
+                                        tight=True,
+                                    ),
+                                    padding=ft.padding.only(top=8),
+                                ),
+                            ),
                         ],
-                        tight=True,
-                        width=420,
                     ),
-                    padding=ft.padding.only(top=4),
                 ),
                 actions=[
                     ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),

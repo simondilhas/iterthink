@@ -360,7 +360,7 @@ class MarkdownStudioShell:
                             on_click=lambda e: self.page.run_task(self.save_file, e),
                         ),
                         ft.MenuItemButton(
-                            content=ft.Text("Export to Word…", color=config.ON_SURFACE, size=14),
+                            content=ft.Text("Export…", color=config.ON_SURFACE, size=14),
                             on_click=lambda e: self.page.run_task(self.begin_export_to_word, None),
                         ),
                         ft.MenuItemButton(

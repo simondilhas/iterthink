@@ -1783,6 +1783,7 @@ class MarkdownStudioCompareText:
         self._hide_prompt_footer(footer)
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)
+        self._review_subtab_index = 0
         await self._request_tab_switch_async(TAB_FUTURE)
         if _ctrl_on_page(self._compare_editor):
             self._compare_editor.update()

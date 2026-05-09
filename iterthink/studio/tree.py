@@ -58,8 +58,12 @@ def _scan_excluded(path: Path) -> bool:
     try:
         if path.is_relative_to(config.STORE_DIR):
             return True
+        if path.is_relative_to(config.IMPORT_ASSETS_DIR):
+            return True
     except (ValueError, AttributeError):
         if config.STORE_DIR.name in path.parts or ".iterthink" in path.parts:
+            return True
+        if config.IMPORT_ASSETS_DIR.name in path.parts:
             return True
     return False
 

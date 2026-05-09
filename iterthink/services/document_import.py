@@ -463,7 +463,7 @@ def import_file_to_markdown(src: Path, md_path: Path) -> str:
         raise ValueError(f"Unsupported import type: {src.suffix}")
 
     if ext == "docx":
-        asset_dir = md_path.parent / f"{md_path.stem}_assets"
+        asset_dir = config.IMPORT_ASSETS_DIR / md_path.stem
         return docx_to_markdown(src, asset_dir)
 
     return pdf_to_markdown(src)
