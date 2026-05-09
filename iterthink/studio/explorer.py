@@ -13,7 +13,7 @@ from iterthink import config
 from iterthink.persistence import version_storage
 from iterthink.services import document_import
 from iterthink.db.session import session_scope
-from .constants import TAB_HISTORY, TAB_PRESENT
+from .constants import TAB_FUTURE, TAB_PRESENT
 from .util import ctrl_on_page as _ctrl_on_page
 from .tree import (
     PROJECT_CONTEXT_BASENAME,
@@ -763,20 +763,40 @@ class MarkdownStudioExplorer:
         )
 
     async def _tree_import_new_clicked(self, _e: ft.ControlEvent | None = None) -> None:
-        await self._run_import_pick(new_document=True, target_md=None)
+        await self._run_import_pick(new_document=True, target_md=None, dest_parent=None)
+
+    async def _tree_import_new_into_folder(self, folder_path: Path) -> None:
+        await self._run_import_pick(new_document=True, target_md=None, dest_parent=folder_path)
 
     async def _tree_import_version_clicked(self, fp: Path) -> None:
         await self._run_import_pick(new_document=False, target_md=fp)
 
-    async def _run_import_pick(self, *, new_document: bool, target_md: Path | None) -> None:
+    async def _run_import_pick(
+        self,
+        *,
+        new_document: bool,
+        target_md: Path | None,
+        dest_parent: Path | None = None,
+    ) -> None:
         if not new_document and target_md is None:
             self._snack("No target file.")
             return
         self.ensure_file_pickers()
+        pick_initial: str | None = None
+        if config.DOCUMENTS.is_dir():
+            if dest_parent is not None:
+                cand = dest_parent.resolve()
+                try:
+                    cand.relative_to(config.DOCUMENTS.resolve())
+                except ValueError:
+                    cand = config.DOCUMENTS.resolve()
+                pick_initial = str(cand if cand.is_dir() else config.DOCUMENTS)
+            else:
+                pick_initial = str(config.DOCUMENTS)
         try:
             files = await self._fp_import.pick_files(
                 dialog_title="Import Word or PDF",
-                initial_directory=str(config.DOCUMENTS) if config.DOCUMENTS.is_dir() else None,
+                initial_directory=pick_initial,
                 file_type=ft.FilePickerFileType.CUSTOM,
                 allowed_extensions=["docx", "pdf"],
             )
@@ -790,11 +810,20 @@ class MarkdownStudioExplorer:
             self._snack("Unsupported file. Choose a .docx or .pdf file.")
             return
         if new_document:
-            await self._import_finish_new_document_dialog(src)
+            await self._import_finish_new_document_dialog(src, dest_parent=dest_parent)
         else:
             await self._write_import_result(src, target_md.resolve())
 
-    async def _import_finish_new_document_dialog(self, src: Path) -> None:
+    async def _import_finish_new_document_dialog(
+        self, src: Path, *, dest_parent: Path | None = None
+    ) -> None:
+        root = config.DOCUMENTS.resolve()
+        base = (dest_parent if dest_parent is not None else config.DOCUMENTS).resolve()
+        try:
+            base.relative_to(root)
+        except ValueError:
+            self._snack("Cannot import outside the documents folder.")
+            return
         stem = src.stem
         name_tf = ft.TextField(label="Save as (name without .md)", value=stem, dense=True, autofocus=True)
         ext = document_import.validate_extension(src)
@@ -817,9 +846,9 @@ class MarkdownStudioExplorer:
             if not safe:
                 self._snack("Invalid file name.")
                 return
-            dest = config.DOCUMENTS / f"{safe}.md"
+            dest = base / f"{safe}.md"
             if dest.exists():
-                self._snack("A file with that name already exists.")
+                self._snack("A file with that name already exists in that folder.")
                 return
             self.page.pop_dialog()
             pf = plan_cb.value if ext == "pdf" else None
@@ -876,7 +905,7 @@ class MarkdownStudioExplorer:
         self._rebuild_tree_ui()
         if _ctrl_on_page(self.tree_column):
             self.tree_column.update()
-        # PDF import: open History on the import snapshot. Word: land on Focus (Present).
+        # PDF import: open Review on the import snapshot. Word: land on Focus (Present).
         select_vid = new_vid if ext == "pdf" else None
         await self.open_file(dest, after_import_vid=select_vid)
         self._snack("Imported.")
@@ -1041,6 +1070,10 @@ class MarkdownStudioExplorer:
                     content=ft.Text("New subfolder…", size=13),
                     on_click=lambda _e, p=fp: self._show_new_folder_dialog(p),
                 ),
+                ft.PopupMenuItem(
+                    content=ft.Text("Import…", size=13),
+                    on_click=lambda _e, p=fp: self.page.run_task(self._tree_import_new_into_folder, p),
+                ),
             ],
         )
         menu_btn = ft.PopupMenuButton(
@@ -1190,11 +1223,10 @@ class MarkdownStudioExplorer:
             self._compare_editor.update()
 
         if after_import_vid is not None:
-            # Jump straight to the History tab showing the imported version.
+            # PDF import: Review tab with PDF + editable markdown (see _rebuild_future_pdf_import_ui).
             self._select_snapshot_as_candidate(after_import_vid)
             self._refresh_compare_tab_candidate_ui()
-            self._pending_post_import_history_vid = after_import_vid
-            await self._request_tab_switch_async(TAB_HISTORY)
+            await self._request_tab_switch_async(TAB_FUTURE)
             self._refresh_compare_diff_immediate()
         else:
             # Normal open: land on the Compose (Present) tab.

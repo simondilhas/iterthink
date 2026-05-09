@@ -70,6 +70,9 @@ iterthink = [
     "templates/*.docx",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.flet]
 product = "Iterthink"
 org = "dev.iterthink.local"

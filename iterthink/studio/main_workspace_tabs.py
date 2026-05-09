@@ -118,6 +118,8 @@ class MainWorkspaceTabsMixin:
             return
         self._review_subtab_index = idx
         self._apply_active_tab_ui_state()
+        if self._main_tab_index == TAB_FUTURE and hasattr(self, "_sync_future_pdf_layers_visibility"):
+            self._sync_future_pdf_layers_visibility()
         # Impact → Difference: visibility alone does not always relayout the ListView; rebuild once.
         if self._main_tab_index == TAB_FUTURE and idx == 0:
             self._refresh_compare_diff_immediate()
@@ -148,6 +150,14 @@ class MainWorkspaceTabsMixin:
             self._review_change_panel.update()
         if _ctrl_on_page(self._review_impact_panel):
             self._review_impact_panel.update()
+        # Keep impact file-selector expansions in sync with active subtab.
+        if hasattr(self, "_refresh_impact_expansion_visibility"):
+            self._refresh_impact_expansion_visibility()
+        # Re-render Impact tab results when switching into the Impact subtab.
+        if impact_active and hasattr(self, "_impact_results_check_id"):
+            cid = self._impact_results_check_id
+            if cid is not None and hasattr(self, "_refresh_impact_tab_results"):
+                self._refresh_impact_tab_results(cid)
         sub_col = getattr(self, "_review_subpanels_column", None)
         if sub_col is not None and _ctrl_on_page(sub_col):
             sub_col.update()
@@ -338,7 +348,8 @@ class MainWorkspaceTabsMixin:
                 and self._pending_ai_accept_action_id
                 and self._compare_snapshot_version_id is not None
             )
-            if not already_staged:
+            pdf_import_review = self._compare_candidate_source == "pdf_original"
+            if not already_staged and not pdf_import_review:
                 target_vid = self._latest_ai_proposal_vid
                 if target_vid is None and self.current_path:
                     with session_scope() as s:

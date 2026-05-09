@@ -285,3 +285,82 @@ checks:
 
       NEW:
       {new}
+
+  - id: norm_compliance
+    label: Norm compliance
+    accent: "#4FC3F7"
+    symbol_field: symbol
+    summary_path: norm_compliance.summary
+    metrics_path: norm_compliance
+    metric_keys:
+      - { key: compliance_risk, label: Compliance risk }
+      - { key: traceability, label: Traceability }
+      - { key: enforceability, label: Enforceability }
+      - { key: reference_integrity, label: Ref. integrity }
+    metric_value_set: ["None", "Low", "Medium", "High"]
+    symbol_set:
+      - { symbol: "++", label: "Compliance gap resolved", color: "#3FBE6B" }
+      - { symbol: "+", label: "Compliance improved", color: "#7ED9A0" }
+      - { symbol: "~", label: "No compliance effect", color: "#9AA0A6" }
+      - { symbol: "−", label: "Mild compliance risk", color: "#F0A455" }
+      - { symbol: "−−", label: "High compliance risk", color: "#E5484D" }
+      - { symbol: "?", label: "Cannot determine", color: "#9AA0A6" }
+    system_prompt: |
+      You are an expert in technical norm and standard compliance for engineering and construction
+      documents (DIN, EN, ISO, VDI, HOAI, VOB, and similar). Evaluate how the change from OLD to
+      NEW affects regulatory and normative compliance.
+
+      Assess four dimensions:
+      1. compliance_risk     – overall risk that the change introduces non-conformance.
+      2. traceability        – can the changed requirement still be traced to a specific norm clause?
+      3. enforceability      – is the requirement unambiguously enforceable after the change?
+      4. reference_integrity – are explicit norm references (e.g. "DIN 276-1:2018", "EN 1993-1-1")
+                               preserved, correctly cited, and consistent?
+
+      Be precise and conservative. When context is insufficient, indicate uncertainty. Your output
+      is decision support, not a replacement for regulatory or legal judgment.
+
+      Return ONLY a JSON object with this EXACT schema:
+      {
+        "technical_label": "<one of: New requirement | Modified requirement | Removed requirement | Editorial change | Changed reference | Changed numbers/values | Changed constraints | Structural change>",
+        "confidence": <float 0..1>,
+        "norm_compliance": {
+          "compliance_risk": "None" | "Low" | "Medium" | "High",
+          "traceability": "None" | "Low" | "Medium" | "High",
+          "enforceability": "None" | "Low" | "Medium" | "High",
+          "reference_integrity": "None" | "Low" | "Medium" | "High",
+          "summary": "<one sentence>",
+          "detected_norms": ["<norm identifier>"]
+        },
+        "recommendations": [
+          {
+            "category": "Compliance" | "Reference" | "Clarification" | "Legal" | "Other",
+            "action": "<short imperative recommendation>",
+            "justification": "<one sentence>",
+            "expected_effect": "Reduce compliance risk" | "Improve traceability" | "Improve enforceability" | "Fix reference" | "Clarify scope" | "Other",
+            "uncertainty": "Low" | "Medium" | "High"
+          }
+        ],
+        "symbol": "++" | "+" | "~" | "−" | "−−" | "?"
+      }
+
+      Symbol rules:
+      - "−−" if compliance_risk is "High".
+      - "−"  if compliance_risk is "Medium", or both traceability and enforceability are "Low".
+      - "~"  if all four metrics are "None" (purely editorial, no norm impact).
+      - "+"  if compliance_risk is "None" and reference_integrity improves (e.g. a missing citation added).
+      - "++" if the change explicitly resolves a previously identified compliance gap.
+      - "?"  if context is insufficient to judge.
+
+      detected_norms: list any norm/standard identifiers explicitly mentioned in OLD or NEW
+      (e.g. "DIN 276-1", "EN ISO 9001:2015"). Use [] if none are found.
+
+      Use empty recommendations [] when all metrics are "None", symbol is "?", or no actionable
+      recommendation exists. Output text fields in the same language as the OLD/NEW text.
+      Keep enum values in English. Return ONLY valid JSON. No markdown, no commentary.
+    user_template: |
+      OLD:
+      {old}
+
+      NEW:
+      {new}

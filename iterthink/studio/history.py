@@ -464,15 +464,16 @@ class MarkdownStudioCompareText:
             if row is not None and row.reason in ("ai_proposal", "ai_staged"):
                 self._select_proposal_as_review_candidate(vid)
             else:
-                # Imports: load as candidate, then treat as ai_preview so accept goes through AI flow.
+                # Imports: text-only snapshots use ai_preview for accept flow; PDF/Word keep asset sources.
                 self._select_snapshot_as_candidate(vid)
-                self._compare_candidate_source = "ai_preview"
-                self._pending_ai_accept_action_id = (
-                    self._pending_ai_accept_action_id or "ai_proposal"
-                )
-                self._loaded_proposal_sha = version_storage.content_sha256(
-                    self._compare_editor.value or ""
-                )
+                if self._compare_candidate_source == "snapshot":
+                    self._compare_candidate_source = "ai_preview"
+                    self._pending_ai_accept_action_id = (
+                        self._pending_ai_accept_action_id or "ai_proposal"
+                    )
+                    self._loaded_proposal_sha = version_storage.content_sha256(
+                        self._compare_editor.value or ""
+                    )
             self._rebuild_future_paragraph_ui()
             self._refresh_compare_tab_candidate_ui()
             self._refresh_compare_diff_immediate()
@@ -1094,6 +1095,23 @@ class MarkdownStudioCompareText:
         with the visible row order. ``_future_row_kinds`` / ``_future_row_cand_idx`` /
         ``_future_row_stable_texts`` track per-row metadata for buffer sync and decline.
         """
+        if self._compare_candidate_source == "pdf_original":
+            self._compare_pill_gen += 1
+            self._future_rows_listview.controls.clear()
+            self._future_left_diff_texts.clear()
+            self._future_row_pill_hosts.clear()
+            self._compare_right_fields.clear()
+            self._compare_eval_hosts.clear()
+            self._future_row_kinds = []
+            self._future_row_cand_idx = []
+            self._future_row_stable_texts = []
+            self._hide_all_result_card_overlays()
+            self._rebuild_future_pdf_import_panes()
+            self._sync_future_pdf_layers_visibility()
+            self._refresh_compare_bulk_buttons()
+            return
+
+        self._sync_future_pdf_layers_visibility()
         self._compare_pill_gen += 1
         current_text = self.editor.value or ""
         ai_text = self._compare_editor.value or ""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 import flet as ft
@@ -31,6 +32,14 @@ class MarkdownStudioChecksUi:
         self._analyse_buttons.clear()
         self._analyse_button_progress.clear()
         self._analyse_button_count.clear()
+
+        # Clear expansion host and per-check state.
+        expansion_host = getattr(self, "_analyse_expansion_host", None)
+        if expansion_host is not None:
+            expansion_host.controls.clear()
+        impact_expansions: dict[str, ft.Container] = {}
+        impact_checkboxes: dict[str, list[tuple[Path, ft.Checkbox]]] = {}
+
         for c in checks_mod.CHECKS:
             spinner = ft.ProgressRing(
                 width=10,
@@ -67,13 +76,320 @@ class MarkdownStudioChecksUi:
                     padding=ft.padding.symmetric(horizontal=8, vertical=4),
                 ),
                 tooltip=f"Run {c.label} on every paragraph (cached results reused).",
-                on_click=lambda _e, cid=c.id: self.page.run_task(self._run_check_async, cid),
+                on_click=lambda _e, cid=c.id: self._on_analyse_pill_click(cid),
             )
             self._analyse_buttons[c.id] = btn
             self._analyse_button_progress[c.id] = spinner
             self._analyse_button_count[c.id] = counter
             self._pill_row_analyse.controls.append(btn)
+
+            # Build the per-check impact file selector expansion (hidden by default).
+            expansion, checkboxes = self._build_impact_file_selector(c.id)
+            impact_expansions[c.id] = expansion
+            impact_checkboxes[c.id] = checkboxes
+            if expansion_host is not None:
+                expansion_host.controls.append(expansion)
+
+        if hasattr(self, "_impact_file_expansions"):
+            self._impact_file_expansions = impact_expansions
+        if hasattr(self, "_impact_file_checkboxes"):
+            self._impact_file_checkboxes = impact_checkboxes
+
         self._refresh_analyse_button_state()
+
+    # ------------------------------------------------------------------
+    # Impact: file selector expansion helpers
+    # ------------------------------------------------------------------
+
+    def _collect_project_md_files(self) -> list[Path]:
+        """Return all .md files under config.DOCUMENTS, sorted by relative path."""
+        from iterthink import config as _cfg
+        from iterthink.studio.tree import build_md_tree
+
+        root = _cfg.DOCUMENTS
+        if not root.is_dir():
+            return []
+
+        result: list[Path] = []
+
+        def _walk(node: dict, parent: Path) -> None:
+            for fname, fpath in node.get("_files", []):
+                result.append(fpath)
+            for key, sub in node.items():
+                if key != "_files" and isinstance(sub, dict):
+                    _walk(sub, parent / key)
+
+        try:
+            tree = build_md_tree(root)
+            _walk(tree, root)
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Exclude the currently open file so users don't compare a file against itself.
+        current = getattr(self, "current_path", None)
+        if current is not None:
+            result = [p for p in result if p != current]
+
+        result.sort(key=lambda p: str(p).lower())
+        return result
+
+    def _build_impact_file_selector(
+        self, check_id: str
+    ) -> tuple[ft.Container, list[tuple[Path, ft.Checkbox]]]:
+        """Build the hidden expansion panel (file list + Run button) for *check_id*."""
+        md_files = self._collect_project_md_files()
+        checkboxes: list[tuple[Path, ft.Checkbox]] = []
+
+        file_controls: list[ft.Control] = []
+        for fpath in md_files:
+            cb = ft.Checkbox(
+                value=False,
+                label=fpath.name,
+                label_style=ft.TextStyle(
+                    size=11,
+                    color=config.ON_SURFACE,
+                ),
+                fill_color=config.PRIMARY_COLOR,
+                check_color=config.ON_PRIMARY,
+                scale=0.85,
+                tooltip=str(fpath),
+            )
+            checkboxes.append((fpath, cb))
+            file_controls.append(
+                ft.Container(
+                    content=cb,
+                    padding=ft.padding.only(left=4, top=0, bottom=0),
+                    height=28,
+                )
+            )
+
+        no_files_label = ft.Text(
+            "No .md files found in project.",
+            size=11,
+            color=config.ON_SURFACE_VARIANT,
+            italic=True,
+        )
+
+        run_spinner = ft.ProgressRing(
+            width=12, height=12, stroke_width=2,
+            color=config.ON_PRIMARY,
+            visible=False,
+        )
+        run_btn = ft.FilledButton(
+            content=ft.Row(
+                [run_spinner, ft.Text("Run", size=KI_PILL_TEXT_SIZE, color=config.ON_PRIMARY)],
+                tight=True,
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            elevation=0,
+            style=ft.ButtonStyle(
+                bgcolor=config.PRIMARY_COLOR,
+                color=config.ON_PRIMARY,
+                overlay_color=ft.Colors.with_opacity(0.14, config.ON_PRIMARY),
+                visual_density=ft.VisualDensity.COMPACT,
+                padding=ft.padding.symmetric(horizontal=10, vertical=4),
+            ),
+            tooltip="Run impact analysis using selected files as context.",
+            on_click=lambda _e, cid=check_id: self.page.run_task(
+                self._run_impact_check_async, cid
+            ),
+        )
+
+        inner_col: list[ft.Control] = []
+        if file_controls:
+            file_list = ft.Column(
+                file_controls,
+                spacing=0,
+                tight=True,
+                scroll=ft.ScrollMode.AUTO,
+                height=min(len(file_controls) * 28, 180),
+            )
+            inner_col.append(file_list)
+        else:
+            inner_col.append(no_files_label)
+
+        inner_col.append(
+            ft.Container(
+                content=run_btn,
+                padding=ft.padding.only(top=6, bottom=4),
+            )
+        )
+
+        panel = ft.Container(
+            visible=False,
+            padding=ft.padding.only(left=4, right=4, top=6, bottom=4),
+            border=ft.border.only(
+                left=ft.BorderSide(2, ft.Colors.with_opacity(0.35, config.PRIMARY_COLOR))
+            ),
+            margin=ft.margin.only(top=6),
+            content=ft.Column(inner_col, spacing=2, tight=True),
+        )
+
+        return panel, checkboxes
+
+    def _on_analyse_pill_click(self, check_id: str) -> None:
+        """Route pill click: normal check run OR impact file-selector toggle."""
+        impact_active = (
+            getattr(self, "_main_tab_index", -1) == TAB_FUTURE
+            and getattr(self, "_review_subtab_index", 0) == 1
+        )
+        if impact_active:
+            self._toggle_impact_expansion(check_id)
+        else:
+            self.page.run_task(self._run_check_async, check_id)
+
+    def _toggle_impact_expansion(self, check_id: str) -> None:
+        """Show the expansion for *check_id*; hide all others."""
+        expansions: dict[str, ft.Container] = getattr(self, "_impact_file_expansions", {})
+        for cid, panel in expansions.items():
+            want = cid == check_id and not panel.visible
+            if panel.visible != want:
+                panel.visible = want
+                if _ctrl_on_page(panel):
+                    panel.update()
+
+    def _refresh_impact_expansion_visibility(self) -> None:
+        """Hide all expansion panels when not in Impact subtab."""
+        impact_active = (
+            getattr(self, "_main_tab_index", -1) == TAB_FUTURE
+            and getattr(self, "_review_subtab_index", 0) == 1
+        )
+        if not impact_active:
+            for panel in getattr(self, "_impact_file_expansions", {}).values():
+                if panel.visible:
+                    panel.visible = False
+                    if _ctrl_on_page(panel):
+                        panel.update()
+
+    async def _run_impact_check_async(self, check_id: str) -> None:
+        """Run a check with selected project files as per-paragraph RAG context."""
+        from iterthink.services.impact_rag import ingest_project_file, retrieve_context_for_paragraph
+        from iterthink.compare.paragraph_semantics import embed_texts_cached
+
+        check = checks_mod.get_check(check_id)
+        if check is None:
+            self._snack(f"Check '{check_id}' is not configured.")
+            return
+
+        # Collect selected file paths.
+        checkboxes: list[tuple[Path, ft.Checkbox]] = getattr(
+            self, "_impact_file_checkboxes", {}
+        ).get(check_id, [])
+        selected_files = [p for p, cb in checkboxes if cb.value]
+        if not selected_files:
+            self._snack("Select at least one file in the Analyse sidebar.")
+            return
+
+        # Ensure we have a candidate to analyse.
+        if not self._compare_right_fields:
+            self._rebuild_compare_paragraph_ui()
+        buffers = self._active_compare_buffers()
+        if not buffers.candidate.strip():
+            self._snack("Open a note first to analyse it.")
+            return
+
+        pairs = aligned_compare_pairs(buffers.baseline, buffers.candidate)
+        n = len(pairs)
+        self._check_para_hashes = [compute_hash(new) for _, new in pairs]
+        self._check_results[check_id] = [None] * n
+        self._active_check_id = check_id
+        if hasattr(self, "_impact_results_check_id"):
+            self._impact_results_check_id = check_id
+
+        self._check_run_gen[check_id] = self._check_run_gen.get(check_id, 0) + 1
+        my_gen = self._check_run_gen[check_id]
+        self._check_running[check_id] = True
+        self._refresh_analyse_button_state()
+        self._refresh_all_eval_cells()
+
+        # Update impact tab status.
+        if hasattr(self, "_impact_status_text") and self._impact_status_text is not None:
+            self._impact_status_text.value = (
+                f"Ingesting {len(selected_files)} file(s)…"
+            )
+            if _ctrl_on_page(self._impact_status_text):
+                self._impact_status_text.update()
+
+        # Ingest selected files into the embedding cache.
+        conn = getattr(self, "_db", None)
+        file_chunks: dict[Path, list[tuple[str, int]]] = {}
+        if conn is not None:
+            for fpath in selected_files:
+                try:
+                    chunks = await ingest_project_file(fpath, conn)
+                    file_chunks[fpath] = chunks
+                except Exception as exc:  # noqa: BLE001
+                    self._snack(f"Ingest failed for {fpath.name}: {exc}")
+
+        # Build per-paragraph context strings.
+        context_per_pair: list[str | None] = []
+        if file_chunks and conn is not None:
+            if hasattr(self, "_impact_status_text") and self._impact_status_text is not None:
+                self._impact_status_text.value = "Building context…"
+                if _ctrl_on_page(self._impact_status_text):
+                    self._impact_status_text.update()
+
+            candidate_texts = [new for _, new in pairs]
+            try:
+                cand_vecs = await embed_texts_cached(conn, None, candidate_texts)
+            except Exception:  # noqa: BLE001
+                cand_vecs = [[] for _ in candidate_texts]
+
+            for i, vec in enumerate(cand_vecs):
+                if vec:
+                    ctx = retrieve_context_for_paragraph(vec, file_chunks, conn)
+                else:
+                    ctx = ""
+                context_per_pair.append(ctx if ctx else None)
+        else:
+            context_per_pair = [None] * n
+
+        # Update status.
+        if hasattr(self, "_impact_status_text") and self._impact_status_text is not None:
+            self._impact_status_text.value = f"Running {check.label} with context…"
+            if _ctrl_on_page(self._impact_status_text):
+                self._impact_status_text.update()
+
+        async def on_progress(idx: int, payload: dict | None, err: str | None) -> None:
+            if my_gen != self._check_run_gen.get(check_id):
+                return
+            if 0 <= idx < len(self._check_results.get(check_id, [])):
+                self._check_results[check_id][idx] = payload
+            if self._main_tab_index in (TAB_HISTORY, TAB_FUTURE):
+                self._refresh_eval_cell(idx)
+                self._refresh_analyse_button_state()
+
+        run_ok = False
+        try:
+            await checks_runner.run_check_for_document(
+                self._make_llm_backend(),
+                model=self.chat_model_for_requests(),
+                check=check,
+                pairs=pairs,
+                on_progress=on_progress,
+                use_cache=False,
+                context_per_pair=context_per_pair,
+            )
+            run_ok = True
+        except BaseException as exc:  # noqa: BLE001
+            self._snack(f"Impact analysis failed: {ollama_error_message(exc)}")
+        finally:
+            if my_gen == self._check_run_gen.get(check_id):
+                self._check_running[check_id] = False
+                self._refresh_analyse_button_state()
+                if self._main_tab_index in (TAB_HISTORY, TAB_FUTURE):
+                    self._refresh_all_eval_cells()
+                if run_ok:
+                    results = self._check_results.get(check_id) or []
+                    summary = self._build_document_check_summary_text(check, results)
+                    self._append_chat_line("assistant", summary)
+                    self._refresh_impact_tab_results(check_id)
+                else:
+                    if hasattr(self, "_impact_status_text") and self._impact_status_text is not None:
+                        self._impact_status_text.value = "Analysis failed — check the chat log."
+                        if _ctrl_on_page(self._impact_status_text):
+                            self._impact_status_text.update()
 
     def _refresh_analyse_button_state(self) -> None:
         """Highlight the active check's button; show spinner+counter while running."""
@@ -586,6 +902,118 @@ class MarkdownStudioChecksUi:
                 snip = snip[:117] + "…"
             lines.append(f"- Para {i + 1} ({sym}): {snip or '—'}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Impact tab results rendering
+    # ------------------------------------------------------------------
+
+    def _refresh_impact_tab_results(self, check_id: str) -> None:
+        """Re-render the Impact tab's per-paragraph list and summary from check results."""
+        results_list = getattr(self, "_impact_results_list", None)
+        summary_container = getattr(self, "_impact_summary_container", None)
+        summary_text_ctrl = getattr(self, "_impact_summary_text", None)
+        status_text = getattr(self, "_impact_status_text", None)
+
+        check = checks_mod.get_check(check_id)
+        results: list[dict | None] = self._check_results.get(check_id) or []
+        pairs = []
+        try:
+            buffers = self._active_compare_buffers()
+            from iterthink.compare.layout import aligned_compare_pairs
+            pairs = aligned_compare_pairs(buffers.baseline, buffers.candidate)
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Per-paragraph rows.
+        if results_list is not None:
+            results_list.controls.clear()
+            for i, payload in enumerate(results):
+                if payload is None:
+                    continue
+                sym = checks_mod.extract_symbol(check, payload) if check else "?"
+                color = check.color_for_symbol(sym) if check else config.ON_SURFACE_VARIANT
+                summary_raw = checks_mod.extract_summary(check, payload) if check else ""
+
+                # Paragraph snippet from the candidate (new) text.
+                snip = ""
+                if i < len(pairs):
+                    _, new_text = pairs[i]
+                    snip = new_text.strip().replace("\n", " ")
+                    if len(snip) > 120:
+                        snip = snip[:117] + "…"
+
+                sym_chip = ft.Container(
+                    content=ft.Text(
+                        sym,
+                        size=16,
+                        weight=ft.FontWeight.W_700,
+                        color=color,
+                        no_wrap=True,
+                    ),
+                    width=32,
+                    height=32,
+                    alignment=ft.Alignment.CENTER,
+                    border_radius=6,
+                    bgcolor=ft.Colors.with_opacity(0.15, color),
+                )
+
+                row = ft.Container(
+                    content=ft.Row(
+                        [
+                            sym_chip,
+                            ft.Column(
+                                [
+                                    ft.Text(
+                                        f"¶ {i + 1}"
+                                        + (f"  {snip}" if snip else ""),
+                                        size=11,
+                                        color=config.ON_SURFACE_VARIANT,
+                                        max_lines=1,
+                                        overflow=ft.TextOverflow.ELLIPSIS,
+                                    ),
+                                    ft.Text(
+                                        summary_raw,
+                                        size=12,
+                                        color=config.ON_SURFACE,
+                                        max_lines=2,
+                                        overflow=ft.TextOverflow.ELLIPSIS,
+                                        selectable=True,
+                                    ),
+                                ],
+                                spacing=2,
+                                tight=True,
+                                expand=True,
+                            ),
+                        ],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    ),
+                    padding=ft.padding.symmetric(horizontal=8, vertical=6),
+                    border_radius=6,
+                    bgcolor=ft.Colors.with_opacity(0.06, color),
+                    margin=ft.margin.only(bottom=2),
+                )
+                results_list.controls.append(row)
+
+            results_list.visible = bool(results_list.controls)
+            if _ctrl_on_page(results_list):
+                results_list.update()
+
+        # Document-level summary.
+        if check is not None and summary_text_ctrl is not None and summary_container is not None:
+            summary_body = self._build_document_check_summary_text(check, results)
+            summary_text_ctrl.value = summary_body
+            summary_container.visible = bool(summary_body)
+            if _ctrl_on_page(summary_container):
+                summary_container.update()
+
+        # Update status text.
+        if status_text is not None:
+            label = check.label if check else check_id
+            n_done = sum(1 for r in results if r is not None)
+            status_text.value = f"{label} — {n_done}/{len(results)} paragraph(s) analysed."
+            if _ctrl_on_page(status_text):
+                status_text.update()
 
     # ------------------------------------------------------------------
     # Invalidation: drop per-paragraph cache when candidate text changes.

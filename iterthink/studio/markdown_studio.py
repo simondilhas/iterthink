@@ -141,7 +141,7 @@ class MarkdownStudio(
         self._compare_newer_version_id: int | None = None
         self._compare_newer_cached_body: str = ""
         self._compare_newer_dropdown_hover: bool = False
-        # Set before switching to History after Word/PDF import so tab sync does not clobber baseline.
+        # Optional: set before switching to History so tab sync picks a specific snapshot (legacy paths).
         self._pending_post_import_history_vid: int | None = None
         self._pending_ai_accept_action_id: str | None = None
         # AI proposal book-keeping: every change-topic reply persists an ai_proposal snapshot;
@@ -569,9 +569,66 @@ class MarkdownStudio(
             padding=ft.padding.symmetric(horizontal=4, vertical=2),
         )
         self._future_paragraph_layer = ft.Container(content=self._future_rows_listview, expand=True)
+        self._future_pdf_left_lv = ft.ListView(
+            expand=True,
+            spacing=8,
+            padding=ft.padding.all(8),
+            on_scroll=self._on_future_pdf_scroll_left,
+        )
+        self._future_pdf_right_lv = ft.ListView(
+            expand=True,
+            spacing=6,
+            padding=ft.padding.all(8),
+            on_scroll=self._on_future_pdf_scroll_right,
+        )
+        self._future_pdf_split_row = ft.Row(
+            [
+                ft.Container(
+                    content=self._future_pdf_left_lv,
+                    expand=True,
+                    border=ft.border.all(1, ui_theme.outline_muted(alpha=0.38)),
+                    border_radius=8,
+                ),
+                ft.Container(
+                    content=self._future_pdf_right_lv,
+                    expand=True,
+                    border=ft.border.all(1, ui_theme.outline_muted(alpha=0.38)),
+                    border_radius=8,
+                ),
+            ],
+            expand=True,
+            spacing=8,
+        )
+        self._future_pdf_layer = ft.Container(
+            content=self._future_pdf_split_row,
+            expand=True,
+            visible=False,
+        )
+        self._future_pdf_import_md_tf = ft.TextField(
+            multiline=True,
+            max_lines=None,
+            min_lines=1,
+            border=ft.InputBorder.NONE,
+            filled=False,
+            dense=True,
+            text_size=COMPARE_COL_FONT_SIZE,
+            text_style=ft.TextStyle(
+                font_family="monospace",
+                size=COMPARE_COL_FONT_SIZE,
+                height=COMPARE_COL_LINE_HEIGHT,
+                color=ui_theme.editor_text_color(),
+            ),
+            cursor_color=config.PRIMARY_COLOR,
+            selection_color=config.SELECTION_OVERLAY,
+            content_padding=ft.padding.all(8),
+            expand=True,
+            enable_interactive_selection=True,
+            on_change=self._on_future_pdf_import_md_change,
+        )
         self._future_body_stack = ft.Stack(
             controls=[
                 self._future_paragraph_layer,
+                self._future_pdf_layer,
                 self._future_result_card_overlay,
             ],
             expand=True,
@@ -584,14 +641,59 @@ class MarkdownStudio(
                 spacing=0,
             ),
         )
+        self._impact_status_text = ft.Text(
+            "Select files in the Analyse sidebar, then run a check",
+            size=13,
+            color=config.ON_SURFACE_VARIANT,
+            text_align=ft.TextAlign.CENTER,
+        )
+        self._impact_results_list = ft.ListView(
+            expand=True,
+            spacing=4,
+            padding=ft.padding.symmetric(horizontal=8, vertical=4),
+            visible=False,
+        )
+        self._impact_summary_text = ft.Text(
+            "",
+            size=12,
+            color=config.ON_SURFACE,
+            selectable=True,
+        )
+        self._impact_summary_container = ft.Container(
+            visible=False,
+            padding=ft.padding.all(10),
+            border=ft.border.all(1, config.OUTLINE),
+            border_radius=8,
+            margin=ft.margin.only(top=4, left=8, right=8, bottom=8),
+            content=ft.Column(
+                [
+                    ft.Text(
+                        "Summary",
+                        size=11,
+                        weight=ft.FontWeight.W_600,
+                        color=config.ON_SURFACE_VARIANT,
+                    ),
+                    self._impact_summary_text,
+                ],
+                spacing=4,
+                tight=True,
+            ),
+        )
         self._review_impact_panel = ft.Container(
             expand=False,
             visible=False,
-            alignment=ft.Alignment.CENTER,
-            content=ft.Text(
-                "Impact analysis coming soon",
-                size=13,
-                color=config.ON_SURFACE_VARIANT,
+            content=ft.Column(
+                [
+                    ft.Container(
+                        content=self._impact_status_text,
+                        alignment=ft.Alignment.CENTER,
+                        padding=ft.padding.symmetric(vertical=20),
+                    ),
+                    self._impact_results_list,
+                    self._impact_summary_container,
+                ],
+                expand=True,
+                spacing=0,
             ),
         )
 
@@ -1071,6 +1173,12 @@ class MarkdownStudio(
         self._analyse_buttons: dict[str, ft.FilledButton] = {}
         self._analyse_button_progress: dict[str, ft.ProgressRing] = {}
         self._analyse_button_count: dict[str, ft.Text] = {}
+        # Impact file selector: per-check expansion panels and checkbox lists.
+        self._analyse_expansion_host: ft.Column = ft.Column([], spacing=0, tight=True)
+        self._impact_file_expansions: dict[str, ft.Container] = {}
+        self._impact_file_checkboxes: dict[str, list[tuple[Path, ft.Checkbox]]] = {}
+        # Impact tab results state.
+        self._impact_results_check_id: str | None = None
         self._ki_tab_body_heights: list[float] = [
             float(KI_TAB_BODY_MIN_HEIGHT_PX),
             float(KI_TAB_BODY_MIN_HEIGHT_PX),
@@ -1099,7 +1207,11 @@ class MarkdownStudio(
                         horizontal=4,
                         vertical=KI_TAB_PAGE_PAD_V_PX,
                     ),
-                    content=self._pill_row_analyse,
+                    content=ft.Column(
+                        [self._pill_row_analyse, self._analyse_expansion_host],
+                        spacing=0,
+                        tight=True,
+                    ),
                 ),
                 self._ki_act_container,
             ],

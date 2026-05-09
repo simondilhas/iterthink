@@ -20,7 +20,11 @@ def _minimal_template(tmp_path: Path) -> Path:
     return p
 
 
-def test_list_docx_templates_includes_bundled_when_present() -> None:
+def test_list_docx_templates_includes_bundled_when_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Avoid writing under real Documents/.iterthink (blocked in sandbox CI)."""
+    from iterthink import config
+
+    monkeypatch.setattr(config, "STORE_DIR", tmp_path / "iterthink_store")
     names = [lbl for lbl, _ in markdown_docx_export.list_docx_templates()]
     assert "Iterthink Standard" in names
 

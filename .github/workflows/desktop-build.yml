@@ -121,13 +121,33 @@ jobs:
             -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
           git config --system core.longpaths true
 
+      # serious_python / Dart hit MAX_PATH when bundling onnxruntime (fastembed); default
+      # GITHUB_WORKSPACE (D:\a\org\repo\...) pushes paths over 260 chars. Mirror to C:\b\w.
+      - name: Mirror repo to short path (Windows)
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path 'C:\b\w' | Out-Null
+          robocopy $env:GITHUB_WORKSPACE 'C:\b\w' /E /MT:16 /NFL /NDL /NJH /NJS /nc /ns /np
+          $code = $LASTEXITCODE
+          if ($code -ge 8) { exit $code }
+          "ITER_REPO=C:\b\w" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Set build repo path (non-Windows)
+        if: matrix.name != 'windows'
+        shell: bash
+        run: echo "ITER_REPO=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
+
       - name: Sync dependencies
+        working-directory: ${{ env.ITER_REPO }}
         run: uv sync
 
       - name: Prefetch embedding model
+        working-directory: ${{ env.ITER_REPO }}
         run: uv run python scripts/prefetch_embed_model.py
 
       - name: Verify sqlite-vec embedding cache
+        working-directory: ${{ env.ITER_REPO }}
         run: uv run python scripts/verify_embedding_cache.py
 
       - name: Set build version
@@ -140,6 +160,7 @@ jobs:
           fi
 
       - name: Flet build
+        working-directory: ${{ env.ITER_REPO }}
         shell: bash
         run: |
           set -euo pipefail
@@ -148,12 +169,13 @@ jobs:
             --build-number "${GITHUB_RUN_NUMBER}"
 
       - name: Zip build output
+        working-directory: ${{ env.ITER_REPO }}
         shell: bash
         run: |
           set -euo pipefail
           uv run python -c "
           import os, shutil
-          ws = os.environ['GITHUB_WORKSPACE']
+          ws = os.environ['ITER_REPO']
           bv = os.environ['BUILD_VERSION']
           suf = os.environ['SUFFIX']
           sub = os.environ['SUBDIR']
@@ -162,6 +184,7 @@ jobs:
           shutil.make_archive(dst, 'zip', src)
           "
         env:
+          ITER_REPO: ${{ env.ITER_REPO }}
           SUFFIX: ${{ matrix.artifact_suffix }}
           SUBDIR: ${{ matrix.build_subdir }}
 
@@ -169,7 +192,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.name }}
-          path: ${{ github.workspace }}/iterthink-${{ env.BUILD_VERSION }}-${{ matrix.artifact_suffix }}.zip
+          path: ${{ env.ITER_REPO }}/iterthink-${{ env.BUILD_VERSION }}-${{ matrix.artifact_suffix }}.zip
           if-no-files-found: error
 
   release:
