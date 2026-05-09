@@ -329,7 +329,8 @@ def _render_inline_styled(ctx: _Ctx, paragraph: Any, children: list[Any]) -> Non
                     r.italic = True
             i += 1
         elif t.type == "softbreak":
-            paragraph.add_run("\n")
+            # Word ignores newline characters inside <w:t>; use an explicit line break.
+            paragraph.add_run().add_break()
             i += 1
         elif t.type == "hardbreak":
             paragraph.add_run().add_break()
@@ -426,12 +427,16 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: tuple[bool, int] | N
         if t.type == "fence":
             body = (t.content or "").rstrip("\n")
             p = ctx.doc.add_paragraph(style=ctx.styles.code_block)
-            r = p.add_run(body)
-            if ctx.styles.code_char:
-                r.style = ctx.styles.code_char
-            else:
-                r.font.name = "Courier New"
-                r.font.size = Pt(10)
+            lines = body.split("\n")
+            for li, line in enumerate(lines):
+                if li:
+                    p.add_run().add_break()
+                r = p.add_run(line)
+                if ctx.styles.code_char:
+                    r.style = ctx.styles.code_char
+                else:
+                    r.font.name = "Courier New"
+                    r.font.size = Pt(10)
             i += 1
             continue
         if t.type == "bullet_list_open":
@@ -492,7 +497,9 @@ def markdown_to_docx(
     from markdown_it import MarkdownIt
     from mdit_py_plugins.footnote import footnote_plugin
 
-    md = MarkdownIt("commonmark").use(footnote_plugin)
+    # breaks=True: single newlines in the markdown file become softbreak tokens and render as
+    # Word line breaks (CommonMark otherwise treats them like spaces in one paragraph).
+    md = MarkdownIt("commonmark", {"breaks": True}).use(footnote_plugin)
     tokens = md.parse(markdown_src)
     main_toks, fn_block = _split_footnote_block(tokens)
     defs = _collect_footnote_defs(fn_block)
@@ -517,6 +524,8 @@ def markdown_to_docx(
         "{Titel}": meta.title_stem,
         "{Date}": meta.date_iso,
         "{Author}": meta.author,
+        # Same value as export "Author" in settings (templates often use {Name}).
+        "{Name}": meta.author,
     }
     docx_placeholders.apply_docx_placeholders(doc, mapping)
     output_path.parent.mkdir(parents=True, exist_ok=True)

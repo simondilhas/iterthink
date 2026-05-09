@@ -2,6 +2,22 @@ name: Desktop build
 
 on:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Optional commit SHA, branch, or tag to checkout (leave empty for HEAD of the branch chosen in Use workflow from)"
+        required: false
+        default: ""
+        type: string
+      platforms:
+        description: "Desktop targets to build (version tag pushes always build all three)"
+        required: false
+        type: choice
+        options:
+          - all
+          - linux
+          - windows
+          - macos
+        default: all
   push:
     tags:
       - "v*"
@@ -16,31 +32,66 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  prepare:
+    name: Prepare build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix_json: ${{ steps.matrix.outputs.matrix_json }}
+    steps:
+      - id: matrix
+        shell: bash
+        env:
+          PLATFORMS: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'all' }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+
+          platforms = os.environ["PLATFORMS"]
+          all_rows = [
+              {
+                  "name": "linux",
+                  "runner": "ubuntu-latest",
+                  "flet_target": "linux",
+                  "build_subdir": "linux",
+                  "artifact_suffix": "linux",
+              },
+              {
+                  "name": "windows",
+                  "runner": "windows-latest",
+                  "flet_target": "windows",
+                  "build_subdir": "windows",
+                  "artifact_suffix": "windows",
+              },
+              {
+                  "name": "macos",
+                  "runner": "macos-latest",
+                  "flet_target": "macos",
+                  "build_subdir": "macos",
+                  "artifact_suffix": "macos",
+              },
+          ]
+          if platforms == "all":
+              rows = all_rows
+          else:
+              rows = [r for r in all_rows if r["name"] == platforms]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"matrix_json={json.dumps(rows)}\n")
+          PY
+
   build:
     name: Build (${{ matrix.name }})
+    needs: prepare
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux
-            runner: ubuntu-latest
-            flet_target: linux
-            build_subdir: linux
-            artifact_suffix: linux
-          - name: windows
-            runner: windows-latest
-            flet_target: windows
-            build_subdir: windows
-            artifact_suffix: windows
-          - name: macos
-            runner: macos-latest
-            flet_target: macos
-            build_subdir: macos
-            artifact_suffix: macos
+        include: ${{ fromJSON(needs.prepare.outputs.matrix_json) }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref != '' && inputs.ref || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6

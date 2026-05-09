@@ -29,6 +29,18 @@ pip install -e ".[dev]"
 pytest tests/
 ```
 
+## GitHub Actions desktop builds
+
+Maintainers can produce **Linux**, **Windows**, and **macOS** desktop bundles (Flet) from CI.
+
+1. Open **Actions** → workflow **Desktop build** → **Run workflow**.
+2. Under **Use workflow from**, pick the **branch** (or default branch) that contains the workflow and the commit you want; that branch’s **HEAD** is checked out unless you override the next field.
+3. Optionally set **ref** to a specific commit SHA, branch name, or tag to check out instead of that HEAD.
+4. Optionally set **platforms** to build only one OS (`linux`, `windows`, or `macos`) or **all**. Pushes of version tags (`v*`) always build all three platforms for the release job.
+5. When the run finishes, download the **Artifacts** (`desktop-linux`, `desktop-windows`, `desktop-macos`; only the jobs that ran appear for partial builds).
+
+Manual runs use zip names like `iterthink-0.0.0+<run>-<os>.zip`. Tag pushes attach the same zips to a GitHub Release. Details: [docs/PACKAGING.md](docs/PACKAGING.md).
+
 ## Pull requests
 
 1. **Fork** the repository and create a **branch** for your change.

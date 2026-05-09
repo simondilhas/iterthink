@@ -30,12 +30,52 @@ def test_apply_docx_placeholders_replaces_in_body(tmp_path: Path) -> None:
     doc = Document(str(tpl))
     docx_placeholders.apply_docx_placeholders(
         doc,
-        {"{Titel}": "X", "{Date}": "2099-01-01", "{Author}": "Y"},
+        {"{Titel}": "X", "{Date}": "2099-01-01", "{Author}": "Y", "{Name}": "Y"},
     )
     out = tmp_path / "out.docx"
     doc.save(out)
     assert "{Titel}" not in _document_xml_text(out)
     assert "Title: X on 2099-01-01 by Y" in _document_xml_text(out)
+
+
+def test_markdown_to_docx_inserts_line_breaks_for_single_newlines(tmp_path: Path) -> None:
+    """Single newlines inside a paragraph become w:br (Word), not collapsed spaces."""
+    tpl = _minimal_template(tmp_path)
+    md = tmp_path / "note.md"
+    md.write_text("first line\nsecond line\n\nnew paragraph", encoding="utf-8")
+    out = tmp_path / "out.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="A", date_iso="2099-02-02"),
+    )
+    body = _document_xml_text(out)
+    assert "first line" in body
+    assert "second line" in body
+    assert "new paragraph" in body
+    assert "<w:br" in body
+
+
+def test_markdown_to_docx_placeholders_include_name(tmp_path: Path) -> None:
+    tpl = tmp_path / "tpl.docx"
+    d = Document()
+    d.add_paragraph("By {Name} on {Date}")
+    d.save(tpl)
+    md = tmp_path / "note.md"
+    md.write_text("Hi", encoding="utf-8")
+    out = tmp_path / "out.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="Pat", date_iso="2099-03-03"),
+    )
+    body = _document_xml_text(out)
+    assert "{Name}" not in body
+    assert "Pat" in body
 
 
 def _document_xml_text(docx: Path) -> str:

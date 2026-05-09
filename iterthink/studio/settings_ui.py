@@ -1017,7 +1017,7 @@ async def open_settings_dialog(studio: Any) -> None:
         value=store_db.settings_get(studio._db, store_db.SETTINGS_EXPORT_AUTHOR) or "",
         expand=True,
         dense=True,
-        hint_text="Used for {Author} in export templates",
+        hint_text="Used for {Author} and {Name} in export templates",
     )
 
     async def save_export_settings(_e: ft.ControlEvent | None = None) -> None:
@@ -1035,7 +1035,7 @@ async def open_settings_dialog(studio: Any) -> None:
                 ft.Text("Word export", weight=ft.FontWeight.W_500, size=13),
                 export_author_tf,
                 ft.Text(
-                    "Fills the {Author} placeholder in .docx templates (e.g. bundled “Iterthink Standard”). "
+                    "Fills the {Author} and {Name} placeholders in .docx templates (same stored value). "
                     "{Titel} and {Date} come from the document name and export date.",
                     size=11,
                     color=config.ON_SURFACE_VARIANT,
