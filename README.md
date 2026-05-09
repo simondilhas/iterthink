@@ -23,7 +23,7 @@ Most AI tools rewrite your documents silently — you get something clean, but y
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -U pip
-pip install "git+https://github.com/iterthink/iterthink.git"
+pip install "git+https://github.com/simondilhas/iterthink.git"
 iterthink
 ```
 
@@ -54,7 +54,7 @@ iterthink
 
 This is early software. Defaults and behavior may change between releases.
 
-- **Platform:** Primarily developed and tested on **Fedora Linux**. Windows and macOS may work but are not regularly QA'd — [open an issue](https://github.com/iterthink/iterthink/issues) if something breaks.
+- **Platform:** Primarily developed and tested on **Fedora Linux**. Windows and macOS may work but are not regularly QA'd — [open an issue](https://github.com/simondilhas/iterthink/issues) if something breaks.
 - **AI backend:** Ollama is the most tested backend. OpenAI, Claude, and Gemini work but get less QA.
 - **Privacy:** Local-first by default — no account, no cloud sync, files stay on your disk. Using a cloud API key sends your text to that provider.
 
