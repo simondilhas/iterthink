@@ -18,7 +18,7 @@ Most AI tools rewrite your documents silently — you get something clean, but y
 
 ## Get started
 
-**You'll need:** [Python 3.11+](https://www.python.org/downloads/) and an AI backend (see below).
+**You'll need:** [Python 3.11+](https://www.python.org/downloads/) and an AI backend either API Key or ollama(see below).
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
