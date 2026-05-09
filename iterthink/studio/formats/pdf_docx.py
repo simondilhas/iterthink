@@ -12,15 +12,17 @@ from iterthink.persistence import version_storage
 from iterthink.services import document_import
 from iterthink.tools.pdf_visual_diff import diff_pdfs_to_overlay_paths
 
-from .. import plan_compare_panel, plan_picture_viewer
+from .. import plan_compare_panel, plan_picture_viewer, ui_theme
 from iterthink.db.session import session_scope
-from ..constants import COMPARE_COL_FONT_SIZE
+from ..constants import COMPARE_COL_FONT_SIZE, COMPARE_COL_LINE_HEIGHT, TAB_HISTORY
 from ..util import ctrl_on_page as _ctrl_on_page
+
+_PDF_COMPARE_SCROLL_SOURCES = ("pdf_original", "docx_original")
 
 
 class MarkdownStudioAssetCompare:
     def _on_compare_pdf_scroll_left(self, e: ft.OnScrollEvent) -> None:
-        if self._compare_pdf_scroll_guard or self._compare_candidate_source not in ("pdf_original", "docx_original"):
+        if self._compare_pdf_scroll_guard or self._compare_candidate_source not in _PDF_COMPARE_SCROLL_SOURCES:
             return
         if e.event_type != ft.ScrollType.UPDATE:
             return
@@ -40,7 +42,7 @@ class MarkdownStudioAssetCompare:
             self._compare_pdf_scroll_guard = False
 
     def _on_compare_pdf_scroll_right(self, e: ft.OnScrollEvent) -> None:
-        if self._compare_pdf_scroll_guard or self._compare_candidate_source not in ("pdf_original", "docx_original"):
+        if self._compare_pdf_scroll_guard or self._compare_candidate_source not in _PDF_COMPARE_SCROLL_SOURCES:
             return
         if e.event_type != ft.ScrollType.UPDATE:
             return
@@ -57,13 +59,41 @@ class MarkdownStudioAssetCompare:
             self._compare_pdf_scroll_guard = False
 
     def _sync_compare_pdf_layers_visibility(self) -> None:
-        show_side_by_side = self._compare_candidate_source in ("pdf_original", "docx_original")
+        show_side_by_side = self._compare_candidate_source in _PDF_COMPARE_SCROLL_SOURCES
         self._compare_paragraph_layer.visible = not show_side_by_side
         self._compare_pdf_layer.visible = show_side_by_side
         if _ctrl_on_page(self._compare_paragraph_layer):
             self._compare_paragraph_layer.update()
         if _ctrl_on_page(self._compare_pdf_layer):
             self._compare_pdf_layer.update()
+
+    def _set_plan_compare_dropdown_focused(self, focused: bool) -> None:
+        self._plan_compare_dropdown_focused = focused
+        self._apply_plan_compare_dropdown_chrome()
+
+    def _on_plan_baseline_dropdown_hover(self, e: ft.ControlEvent) -> None:
+        self._plan_baseline_dd_hover = str(e.data).lower() == "true"
+        self._apply_plan_compare_dropdown_chrome()
+
+    def _on_plan_candidate_dropdown_hover(self, e: ft.ControlEvent) -> None:
+        self._plan_candidate_dd_hover = str(e.data).lower() == "true"
+        self._apply_plan_compare_dropdown_chrome()
+
+    def _apply_plan_compare_dropdown_chrome(self) -> None:
+        """Rim around plan PDF dropdowns (match History Older/Newer hover/focus)."""
+        selected = self._main_tab_index == TAB_HISTORY
+        for wrap, own_hover in (
+            (self._plan_compare.baseline_wrap, self._plan_baseline_dd_hover),
+            (self._plan_compare.candidate_wrap, self._plan_candidate_dd_hover),
+        ):
+            accent = selected and (own_hover or self._plan_compare_dropdown_focused)
+            rim = config.PRIMARY_COLOR if accent else ui_theme.outline_muted()
+            wrap.border = ft.Border.all(1, rim)
+        if self._main_tab_index == TAB_HISTORY:
+            if _ctrl_on_page(self._plan_compare.baseline_wrap):
+                self._plan_compare.baseline_wrap.update()
+            if _ctrl_on_page(self._plan_compare.candidate_wrap):
+                self._plan_compare.candidate_wrap.update()
 
     def _refresh_compose_plan_surface(self) -> None:
         """Show zoom/pan PDF strip on Compose when latest stored PDF is profile ``plan``."""
@@ -114,14 +144,23 @@ class MarkdownStudioAssetCompare:
             self._plan_compare.set_bar_visible(False)
             return
         with session_scope() as s:
-            pairs = version_storage.list_pdf_version_options(s, self.current_path.resolve())
+            pairs = version_storage.list_plan_pdf_version_options(s, self.current_path.resolve())
         opts = [(str(vid), lbl) for vid, lbl in pairs]
-        plan_compare_panel.fill_pdf_dropdowns(self._plan_compare.baseline_dd, self._plan_compare.candidate_dd, opts)
-        has_pdf = len(opts) > 0
-        self._plan_compare.baseline_dd.disabled = not has_pdf
-        self._plan_compare.candidate_dd.disabled = not has_pdf
-        self._plan_compare.overlay_switch.disabled = len(opts) < 2
-        self._plan_compare.set_bar_visible(has_pdf)
+        plan_compare_panel.fill_pdf_dropdowns(
+            self._plan_compare.baseline_dd,
+            self._plan_compare.candidate_dd,
+            opts,
+            option_button_style=ui_theme.compare_candidate_dropdown_option_style(),
+        )
+        # Bar only in History PDF asset mode with two or more plan/drawing PDF snapshots.
+        show_bar = len(opts) >= 2 and self._compare_candidate_source == "pdf_original"
+        if not show_bar:
+            self._plan_compare.overlay_switch.value = False
+        self._plan_compare.baseline_dd.disabled = not show_bar
+        self._plan_compare.candidate_dd.disabled = not show_bar
+        self._plan_compare.overlay_switch.disabled = not show_bar
+        self._plan_compare.set_bar_visible(show_bar)
+        self._sync_plan_overlay_pane_visibility()
         if _ctrl_on_page(self._plan_compare.baseline_dd):
             self._plan_compare.baseline_dd.update()
         if _ctrl_on_page(self._plan_compare.candidate_dd):
@@ -223,18 +262,20 @@ class MarkdownStudioAssetCompare:
         self._compare_pdf_left_lv.controls.clear()
         self._compare_pdf_right_lv.controls.clear()
         body = self._compare_editor.value or ""
-        self._compare_pdf_left_lv.controls.append(
-            ft.Container(
-                padding=ft.padding.all(4),
-                content=ft.Text(
-                    body,
-                    selectable=True,
-                    font_family="monospace",
-                    size=COMPARE_COL_FONT_SIZE,
-                ),
-            )
+        _md_style = ft.TextStyle(
+            font_family="monospace",
+            size=COMPARE_COL_FONT_SIZE,
+            height=COMPARE_COL_LINE_HEIGHT,
+            color=ui_theme.editor_text_color(),
         )
         if self._plan_overlay_mode:
+            # Extracted markdown reference on the left; PDF overlay occupies the right column.
+            self._compare_pdf_left_lv.controls.append(
+                ft.Container(
+                    padding=ft.padding.all(4),
+                    content=ft.Text(body, selectable=True, style=_md_style),
+                )
+            )
             if _ctrl_on_page(self._compare_pdf_left_lv):
                 self._compare_pdf_left_lv.update()
             if _ctrl_on_page(self._compare_pdf_right_lv):
@@ -244,7 +285,7 @@ class MarkdownStudioAssetCompare:
 
         resolved = self._compare_resolve_pdf_asset_right()
         if resolved is None:
-            self._compare_pdf_right_lv.controls.append(
+            self._compare_pdf_left_lv.controls.append(
                 ft.Container(
                     padding=ft.padding.all(12),
                     content=ft.Text(
@@ -261,7 +302,7 @@ class MarkdownStudioAssetCompare:
             except (ValueError, OSError):
                 pdf_abs = None
             if pdf_abs is None or not pdf_abs.is_file():
-                self._compare_pdf_right_lv.controls.append(
+                self._compare_pdf_left_lv.controls.append(
                     ft.Container(
                         padding=ft.padding.all(12),
                         content=ft.Text("PDF file missing on disk.", color=ft.Colors.RED_200, size=13),
@@ -271,95 +312,67 @@ class MarkdownStudioAssetCompare:
                 try:
                     pages = document_import.render_pdf_to_png_pages(pdf_abs)
                     pic_col = plan_picture_viewer.plan_picture_column(pages, inner_scroll=False)
-                    self._compare_pdf_right_lv.controls.append(
+                    self._compare_pdf_left_lv.controls.append(
                         ft.Container(content=pic_col, expand=True)
                     )
                 except BaseException as ex:
-                    self._compare_pdf_right_lv.controls.append(
+                    self._compare_pdf_left_lv.controls.append(
                         ft.Container(
                             padding=ft.padding.all(12),
                             content=ft.Text(f"Could not render PDF: {ex}", color=ft.Colors.RED_200, size=12),
                         )
                     )
+
+        self._compare_pdf_right_lv.controls.append(
+            ft.Container(
+                padding=ft.padding.all(8),
+                content=ft.Text(
+                    body,
+                    selectable=True,
+                    expand=True,
+                    style=_md_style,
+                ),
+            )
+        )
         if _ctrl_on_page(self._compare_pdf_left_lv):
             self._compare_pdf_left_lv.update()
         if _ctrl_on_page(self._compare_pdf_right_lv):
             self._compare_pdf_right_lv.update()
 
-    def _compare_resolve_docx_asset(self) -> tuple[int, str] | None:
-        if not self.current_path:
-            return None
-        rp = self.current_path.resolve()
-        with session_scope() as s:
-            if self._compare_pdf_peer_snapshot_id is not None:
-                rel = version_storage.get_version_docx_relpath(s, self._compare_pdf_peer_snapshot_id)
-                if rel:
-                    return (self._compare_pdf_peer_snapshot_id, rel)
-                return None
-            return version_storage.latest_docx_version_for_document(s, rp)
-
     def _rebuild_compare_docx_panes(self) -> None:
+        """History: older snapshot extraction left, History newer-side text right."""
         self._compare_pdf_left_lv.controls.clear()
         self._compare_pdf_right_lv.controls.clear()
-        body = self._compare_editor.value or ""
+        _md_style = ft.TextStyle(
+            font_family="monospace",
+            size=COMPARE_COL_FONT_SIZE,
+            height=COMPARE_COL_LINE_HEIGHT,
+            color=ui_theme.editor_text_color(),
+        )
+        older = self._compare_editor.value or ""
+        newer = self._history_newer_side_text() or ""
         self._compare_pdf_left_lv.controls.append(
             ft.Container(
-                padding=ft.padding.all(4),
+                padding=ft.padding.all(8),
                 content=ft.Text(
-                    body,
+                    older,
                     selectable=True,
-                    font_family="monospace",
-                    size=COMPARE_COL_FONT_SIZE,
+                    expand=True,
+                    style=_md_style,
                 ),
             )
         )
-        resolved = self._compare_resolve_docx_asset()
-        if resolved is None:
-            self._compare_pdf_right_lv.controls.append(
-                ft.Container(
-                    padding=ft.padding.all(12),
-                    content=ft.Text(
-                        "No Word file stored for this comparison.",
-                        color=ft.Colors.ORANGE_200,
-                        size=13,
-                    ),
-                )
+        self._compare_pdf_right_lv.controls.append(
+            ft.Container(
+                padding=ft.padding.all(8),
+                content=ft.Text(
+                    newer,
+                    selectable=True,
+                    expand=True,
+                    style=_md_style,
+                ),
             )
-        else:
-            _, rel = resolved
-            try:
-                docx_abs = version_storage.docx_asset_abs_path(rel)
-            except (ValueError, OSError):
-                docx_abs = None
-            if docx_abs is None or not docx_abs.is_file():
-                self._compare_pdf_right_lv.controls.append(
-                    ft.Container(
-                        padding=ft.padding.all(12),
-                        content=ft.Text(".docx file missing on disk.", color=ft.Colors.RED_200, size=13),
-                    )
-                )
-            else:
-                try:
-                    preview = document_import.plain_text_preview_from_docx(docx_abs)
-                    self._compare_pdf_right_lv.controls.append(
-                        ft.Container(
-                            padding=ft.padding.all(8),
-                            content=ft.Text(
-                                preview,
-                                selectable=True,
-                                font_family="monospace",
-                                size=COMPARE_COL_FONT_SIZE,
-                                color=config.ON_SURFACE,
-                            ),
-                        )
-                    )
-                except BaseException as ex:
-                    self._compare_pdf_right_lv.controls.append(
-                        ft.Container(
-                            padding=ft.padding.all(12),
-                            content=ft.Text(f"Could not read Word file: {ex}", color=ft.Colors.RED_200, size=12),
-                        )
-                    )
+        )
         if _ctrl_on_page(self._compare_pdf_left_lv):
             self._compare_pdf_left_lv.update()
         if _ctrl_on_page(self._compare_pdf_right_lv):

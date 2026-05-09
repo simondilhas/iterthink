@@ -29,6 +29,41 @@ def compare_candidate_dropdown_option_style() -> ft.ButtonStyle:
     )
 
 
+def compare_slot_pill_colors(kind: str) -> tuple[str, str]:
+    """History/Future compare column: (bgcolor, fgcolor) from config tokens + appearance."""
+    fg = config.ON_SURFACE
+    ph = config.PRIMARY_COLOR
+    hi = config.HIGHLIGHT
+    hl_is_primary = ph.strip().lower() == hi.strip().lower()
+
+    def wash(color: str, alpha_light: float, alpha_dark: float) -> str:
+        a = alpha_light if config.IS_LIGHT else alpha_dark
+        return ft.Colors.with_opacity(a, color)
+
+    if kind == "stable":
+        return wash(config.OUTLINE, 0.18, 0.18), config.ON_SURFACE_VARIANT
+    if kind == "added":
+        return wash(config.SUCCESS, 0.45, 0.38), fg
+    if kind == "removed":
+        red = "#EF5350"
+        return wash(red, 0.32, 0.28), fg
+    if kind == "refined":
+        return wash(ph, 0.26, 0.30), fg
+    if kind == "rephrased":
+        accent = hi if not hl_is_primary else config.ON_SURFACE_SOFT
+        return wash(accent, 0.28, 0.32), fg
+    if kind == "modified":
+        return wash(config.OUTLINE, 0.35, 0.42), fg
+    return wash(config.OUTLINE, 0.22, 0.22), config.ON_SURFACE_VARIANT
+
+
+def compare_moved_pill_colors() -> tuple[str, str]:
+    """Neutral 'Moved' badge on compare rows (displacement), theme-aware."""
+    if config.IS_LIGHT:
+        return ft.Colors.with_opacity(0.32, config.OUTLINE), config.ON_SURFACE
+    return ft.Colors.with_opacity(0.28, config.PRIMARY_COLOR), config.ON_SURFACE
+
+
 def outline_muted(*, alpha: float | None = None) -> str:
     a = alpha if alpha is not None else (0.32 if config.IS_LIGHT else 0.42)
     return ft.Colors.with_opacity(a, config.OUTLINE)
@@ -56,6 +91,21 @@ def result_card_border() -> str:
     return ft.Colors.with_opacity(0.55, config.OUTLINE)
 
 
+def soft_elevation_shadow() -> ft.BoxShadow:
+    """Card / overlay shadow: black in dark mode, outline-tinted in light (avoids grey smudge)."""
+    c = (
+        ft.Colors.with_opacity(0.22, config.OUTLINE)
+        if config.IS_LIGHT
+        else ft.Colors.with_opacity(0.45, ft.Colors.BLACK)
+    )
+    return ft.BoxShadow(
+        blur_radius=18,
+        spread_radius=0,
+        color=c,
+        offset=ft.Offset(0, 6),
+    )
+
+
 def page_color_scheme() -> ft.ColorScheme:
     """Full M3-style surfaces so filled TextFields / menus follow the active palette (esp. light)."""
     return ft.ColorScheme(
@@ -65,6 +115,7 @@ def page_color_scheme() -> ft.ColorScheme:
         on_surface=config.ON_SURFACE,
         on_surface_variant=config.ON_SURFACE_VARIANT,
         outline=config.OUTLINE,
+        surface_tint=ft.Colors.TRANSPARENT,
         surface_container=config.SURFACE,
         surface_container_lowest=config.PAGE_BG,
         surface_container_low=config.SURFACE_VARIANT,

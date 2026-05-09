@@ -118,18 +118,39 @@ class MainWorkspaceTabsMixin:
             return
         self._review_subtab_index = idx
         self._apply_active_tab_ui_state()
+        # Impact → Difference: visibility alone does not always relayout the ListView; rebuild once.
+        if self._main_tab_index == TAB_FUTURE and idx == 0:
+            self._refresh_compare_diff_immediate()
+
+    def _discard_future_tab_loading_spinner(self) -> None:
+        """If we bailed out of a Review tab switch after showing the placeholder ring, clear it."""
+        ctrl = self._future_rows_listview.controls
+        if len(ctrl) != 1 or not isinstance(ctrl[0], ft.Container):
+            return
+        inner = ctrl[0].content
+        if isinstance(inner, ft.ProgressRing):
+            ctrl.clear()
+            if _ctrl_on_page(self._future_rows_listview):
+                self._future_rows_listview.update()
 
     def _apply_active_tab_ui_state(self) -> None:
         self._main_tabs.selected_index = self._main_tab_index
         if _ctrl_on_page(self._main_tabs):
             self._main_tabs.update()
         on_review = self._main_tab_index == TAB_FUTURE
-        self._review_change_panel.visible = on_review and self._review_subtab_index == 0
-        self._review_impact_panel.visible = on_review and self._review_subtab_index == 1
+        diff_active = on_review and self._review_subtab_index == 0
+        impact_active = on_review and self._review_subtab_index == 1
+        self._review_change_panel.visible = diff_active
+        self._review_change_panel.expand = diff_active
+        self._review_impact_panel.visible = impact_active
+        self._review_impact_panel.expand = impact_active
         if _ctrl_on_page(self._review_change_panel):
             self._review_change_panel.update()
         if _ctrl_on_page(self._review_impact_panel):
             self._review_impact_panel.update()
+        sub_col = getattr(self, "_review_subpanels_column", None)
+        if sub_col is not None and _ctrl_on_page(sub_col):
+            sub_col.update()
         self._refresh_tab_toolbar()
 
     def _refresh_review_subtab_strip(self) -> None:
@@ -166,11 +187,17 @@ class MainWorkspaceTabsMixin:
                 else self._toolbar_review_spacer
             )
         )
-        tb_h = 44 if on_hist else 0
+        # History toolbar stacks Older/Newer + plan PDF row; height follows content.
+        tb_h = None if on_hist else 0
         tb_vis = on_hist
+        inner_h = self._tab_toolbar_inner.height
+        if tb_h is None:
+            height_changed = inner_h is not None
+        else:
+            height_changed = (inner_h or 0) != tb_h
         tb_changed = (
             self._tab_toolbar_inner.content is not new_tool
-            or int(self._tab_toolbar_inner.height or 0) != tb_h
+            or height_changed
             or self._tab_toolbar.visible != tb_vis
         )
         self._tab_toolbar_inner.content = new_tool
@@ -192,12 +219,16 @@ class MainWorkspaceTabsMixin:
         on_history = self._main_tab_index == TAB_HISTORY
         on_review = self._main_tab_index == TAB_FUTURE and self._review_subtab_index == 0
         lack_older = on_history and not bool(self._compare_candidate_dropdown.options)
-        self._compare_candidate_dropdown.visible = on_history
+        asset_compare = on_history and self._compare_candidate_source in ("pdf_original", "ifc_original")
+        md_visible = on_history and not asset_compare
+        if hasattr(self, "_toolbar_history_md_row"):
+            self._toolbar_history_md_row.visible = md_visible
+        self._compare_candidate_dropdown.visible = md_visible
         self._compare_candidate_dropdown.disabled = (
-            not on_history or self.current_path is None or lack_older
+            not md_visible or self.current_path is None or lack_older
         )
-        self._compare_newer_dropdown.visible = on_history
-        self._compare_newer_dropdown.disabled = not on_history or self.current_path is None
+        self._compare_newer_dropdown.visible = md_visible
+        self._compare_newer_dropdown.disabled = not md_visible or self.current_path is None
         self._review_candidate_dropdown.visible = on_review
         self._review_candidate_dropdown.disabled = not on_review or not bool(
             self._review_candidate_dropdown.options
@@ -206,6 +237,8 @@ class MainWorkspaceTabsMixin:
             self._compare_candidate_dropdown.update()
         if _ctrl_on_page(self._compare_newer_dropdown):
             self._compare_newer_dropdown.update()
+        if hasattr(self, "_toolbar_history_md_row") and _ctrl_on_page(self._toolbar_history_md_row):
+            self._toolbar_history_md_row.update()
         if _ctrl_on_page(self._review_candidate_dropdown):
             self._review_candidate_dropdown.update()
 
@@ -264,7 +297,10 @@ class MainWorkspaceTabsMixin:
                 self._compare_newer_version_id = None
                 self._compare_newer_cached_body = ""
             pick_vid: int | None = None
-            if self.current_path and prev != TAB_HISTORY:
+            pending_post_import = self._pending_post_import_history_vid
+            if pending_post_import is not None:
+                self._pending_post_import_history_vid = None
+            elif self.current_path and prev != TAB_HISTORY:
                 with session_scope() as s:
                     snaps = version_storage.list_snapshots(s, self.current_path.resolve())
                 pick_vid = version_storage.second_newest_history_autosave_version_id(snaps)
@@ -336,6 +372,7 @@ class MainWorkspaceTabsMixin:
                 self._future_rows_listview.update()
             await asyncio.sleep(0)  # yield so the client renders the spinner
             if self._is_tab_switch_stale(switch_seq):
+                self._discard_future_tab_loading_spinner()
                 self._main_tab_index = prev
                 self._apply_active_tab_ui_state()
                 return

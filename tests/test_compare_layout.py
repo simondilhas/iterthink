@@ -1,0 +1,46 @@
+"""Unit tests for iterthink.compare.layout (paired compare rows)."""
+
+from __future__ import annotations
+
+from iterthink.compare.layout import (
+    aligned_compare_pairs,
+    aligned_review_rows,
+    pair_paragraphs_for_compare,
+)
+
+
+def test_pair_paragraphs_for_compare_index_stable_extra_candidate_slots_empty_left() -> None:
+    pairs = pair_paragraphs_for_compare("One", "One\n\nTwo\n\nThree")
+    assert pairs == [("One", "One"), ("", "Two"), ("", "Three")]
+
+
+def test_pair_paragraphs_for_compare_empty_candidate_yields_placeholder_pair() -> None:
+    """``split_paragraphs('')`` is ``['']``, so one row compares baseline to an empty right slot."""
+    assert pair_paragraphs_for_compare("x", "") == [("x", "")]
+
+
+def test_aligned_compare_pairs_length_matches_candidate_paragraph_count() -> None:
+    baseline = "Old first\n\nOld second"
+    candidate = "New only"
+    pairs = aligned_compare_pairs(baseline, candidate)
+    assert len(pairs) == 1
+    assert pairs[0][1] == "New only"
+    assert isinstance(pairs[0][0], str)
+
+
+def test_aligned_review_rows_includes_delete_kind_with_none_cand_idx() -> None:
+    current = "Keep\n\nRemove me"
+    ai = "Keep\n\nInserted\n\nTail"
+    rows = aligned_review_rows(current, ai)
+    kinds = [r.kind for r in rows]
+    assert "delete" in kinds
+    delete_rows = [r for r in rows if r.kind == "delete"]
+    assert all(r.cand_idx is None for r in delete_rows)
+    assert any(r.old_text == "Remove me" for r in delete_rows)
+
+
+def test_aligned_review_rows_orders_by_candidate_with_deletes_before_target_slot() -> None:
+    """Every output row after deletes still ties to candidate indices where applicable."""
+    rows = aligned_review_rows("A\n\nB", "A\n\nX\n\nB")
+    cand_indices = [r.cand_idx for r in rows if r.kind != "delete"]
+    assert all(i is not None for i in cand_indices)

@@ -18,7 +18,8 @@ class MarkdownStudioSidebars:
         self.left_open = not self.left_open
         self.left_panel.content = self._build_left_column()
         self.reflow_columns()
-        self.left_panel.update()
+        if _ctrl_on_page(self.left_panel):
+            self.left_panel.update()
 
     def _explorer_collapse_handle_strip(self) -> ft.Control:
         """Right edge of tree card: hover pill; tap collapses."""

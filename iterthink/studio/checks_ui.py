@@ -33,13 +33,22 @@ class MarkdownStudioChecksUi:
         self._analyse_button_count.clear()
         for c in checks_mod.CHECKS:
             spinner = ft.ProgressRing(
-                width=10, height=10, stroke_width=2, color=config.PRIMARY_COLOR, visible=False
+                width=10,
+                height=10,
+                stroke_width=2,
+                color=config.ON_PRIMARY,
+                visible=False,
             )
-            counter = ft.Text("", size=KI_PILL_TEXT_SIZE, color=config.ON_SURFACE_VARIANT, visible=False)
+            counter = ft.Text(
+                "",
+                size=KI_PILL_TEXT_SIZE,
+                color=ft.Colors.with_opacity(0.92, config.ON_PRIMARY),
+                visible=False,
+            )
             label_row = ft.Row(
                 [
                     spinner,
-                    ft.Text(c.label, size=KI_PILL_TEXT_SIZE),
+                    ft.Text(c.label, size=KI_PILL_TEXT_SIZE, color=config.ON_PRIMARY),
                     counter,
                 ],
                 tight=True,
@@ -50,7 +59,10 @@ class MarkdownStudioChecksUi:
                 content=label_row,
                 elevation=0,
                 style=ft.ButtonStyle(
-                    text_style=ft.TextStyle(size=KI_PILL_TEXT_SIZE),
+                    text_style=ft.TextStyle(size=KI_PILL_TEXT_SIZE, color=config.ON_PRIMARY),
+                    bgcolor=config.PRIMARY_COLOR,
+                    color=config.ON_PRIMARY,
+                    overlay_color=ft.Colors.with_opacity(0.14, config.ON_PRIMARY),
                     visual_density=ft.VisualDensity.COMPACT,
                     padding=ft.padding.symmetric(horizontal=8, vertical=4),
                 ),
@@ -81,9 +93,12 @@ class MarkdownStudioChecksUi:
                 total = max(len(results), len(self._check_para_hashes))
                 counter.value = f"{done}/{total}" if running else ""
                 counter.visible = running and total > 0
-            # Match Edit/Discuss pills: default theme primary; active gets an outline.
+            # Keep full filled style on every refresh (partial ButtonStyle → dark M3 fallbacks).
             btn.style = ft.ButtonStyle(
-                text_style=ft.TextStyle(size=KI_PILL_TEXT_SIZE),
+                text_style=ft.TextStyle(size=KI_PILL_TEXT_SIZE, color=config.ON_PRIMARY),
+                bgcolor=config.PRIMARY_COLOR,
+                color=config.ON_PRIMARY,
+                overlay_color=ft.Colors.with_opacity(0.14, config.ON_PRIMARY),
                 visual_density=ft.VisualDensity.COMPACT,
                 padding=ft.padding.symmetric(horizontal=8, vertical=4),
                 side=(

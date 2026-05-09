@@ -296,7 +296,10 @@ class MarkdownStudioKiSidebar:
         if self._main_tab_index in (TAB_HISTORY, TAB_FUTURE):
             self._compare_diff_gen += 1
             self.page.run_task(self._debounced_compare_diff, self._compare_diff_gen)
-        self.page.update()
+        # build() calls reflow_columns() before page.add(); page.update() would flush
+        # child controls that are not mounted yet ("Control must be added to the page first").
+        if _ctrl_on_page(self.left_panel):
+            self.page.update()
 
     async def _refresh_ki_chat_model_dropdown(self) -> None:
         try:

@@ -35,6 +35,11 @@ def docx_to_markdown(src: Path, asset_dir: Path) -> str:
     stem_safe = re.sub(r"[^\w\-]+", "_", src.stem)[:80] or "doc"
     image_counter = 0
 
+    def _blank_line_before_heading() -> None:
+        """Markdown needs a blank line before a heading when following body text."""
+        if markdown_lines and markdown_lines[-1] != "":
+            markdown_lines.append("")
+
     for para in doc.paragraphs:
         text = para.text.strip()
         name = para.style.name if para.style else ""
@@ -42,10 +47,13 @@ def docx_to_markdown(src: Path, asset_dir: Path) -> str:
             markdown_lines.append("")
             continue
         if name.startswith("Heading 1"):
+            _blank_line_before_heading()
             markdown_lines.append(f"# {text}")
         elif name.startswith("Heading 2"):
+            _blank_line_before_heading()
             markdown_lines.append(f"## {text}")
         elif name.startswith("Heading 3"):
+            _blank_line_before_heading()
             markdown_lines.append(f"### {text}")
         else:
             markdown_lines.append(text)
@@ -446,22 +454,6 @@ def render_pdf_to_png_pages(pdf_abs: Path) -> list[Path]:
 
     marker.write_text(src_tag, encoding="utf-8")
     return out
-
-
-def plain_text_preview_from_docx(path: Path, *, max_chars: int = 600_000) -> str:
-    """Paragraph text from a Word file for Compare preview (plain text, not Markdown)."""
-    from docx import Document as DocxDocument
-
-    doc = DocxDocument(str(path))
-    parts: list[str] = []
-    for para in doc.paragraphs:
-        t = para.text.strip()
-        if t:
-            parts.append(t)
-    body = "\n\n".join(parts)
-    if len(body) > max_chars:
-        body = body[:max_chars].rstrip() + "\n\n…"
-    return body if body.strip() else "(No paragraph text in document)"
 
 
 def import_file_to_markdown(src: Path, md_path: Path) -> str:

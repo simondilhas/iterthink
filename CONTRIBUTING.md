@@ -20,6 +20,15 @@ iterthink
 # or: python -m iterthink
 ```
 
+## Tests
+
+Install the optional dev extra (includes pytest), then run the suite from the repository root:
+
+```bash
+pip install -e ".[dev]"
+pytest tests/
+```
+
 ## Pull requests
 
 1. **Fork** the repository and create a **branch** for your change.

@@ -14,6 +14,7 @@ from ollama import AsyncClient
 from iterthink import config
 from iterthink.ai import passphrase_keyring
 from iterthink.persistence import store_db, vault_store, version_storage
+from iterthink.services import markdown_docx_export
 
 from . import ui_theme
 
@@ -68,7 +69,7 @@ CompareCandidateSource = Literal[
     "ai_preview",
     "snapshot",
     "pdf_original",   # PDF asset attached to a snapshot (e.g. an uploaded plan)
-    "docx_original",  # Word document attached to a snapshot
+    "docx_original",  # Word import: extracted snapshot text left, newer text right
     "ifc_original",   # IFC BIM model — renderer in studio.formats.ifc (placeholder)
 ]
 
@@ -140,6 +141,8 @@ class MarkdownStudio(
         self._compare_newer_version_id: int | None = None
         self._compare_newer_cached_body: str = ""
         self._compare_newer_dropdown_hover: bool = False
+        # Set before switching to History after Word/PDF import so tab sync does not clobber baseline.
+        self._pending_post_import_history_vid: int | None = None
         self._pending_ai_accept_action_id: str | None = None
         # AI proposal book-keeping: every change-topic reply persists an ai_proposal snapshot;
         # action_id is kept in-memory so accept can label the apply correctly. _latest_ai_proposal_vid
@@ -186,6 +189,7 @@ class MarkdownStudio(
         self._plan_overlay_mode: bool = False
         self._plan_overlay_gen: int = 0
         self._fp_import = ft.FilePicker()
+        self._fp_export_docx = ft.FilePicker()
         self._import_kind: str | None = None
         self._import_flow: str | None = None
         self._import_target_md: Path | None = None
@@ -312,7 +316,7 @@ class MarkdownStudio(
         )
 
         _dd_menu_style = ft.MenuStyle(
-            bgcolor=config.SURFACE,
+            bgcolor={ft.ControlState.DEFAULT: config.SURFACE},
             elevation=12,
             shadow_color=ft.Colors.with_opacity(0.45, ft.Colors.BLACK),
             visual_density=ft.VisualDensity.COMPACT,
@@ -321,6 +325,26 @@ class MarkdownStudio(
         # trailing chevron; the tab strip below must be tall enough for Material input (~36px+).
         _tb_dd_text_style = ft.TextStyle(size=12, height=1.0, color=config.ON_SURFACE)
         _dd_opt_st = ui_theme.compare_candidate_dropdown_option_style()
+        _tb_label_style = ft.TextStyle(size=12, color=config.ON_SURFACE_VARIANT)
+        self._plan_baseline_dd_hover = False
+        self._plan_candidate_dd_hover = False
+        self._plan_compare_dropdown_focused = False
+        self._plan_compare = plan_compare_panel.build_plan_compare_panel(
+            on_baseline=lambda e: self.page.run_task(self._on_plan_pdf_baseline_async, e),
+            on_candidate=lambda e: self.page.run_task(self._on_plan_pdf_candidate_async, e),
+            on_overlay=self._on_plan_overlay_changed,
+            on_hover_baseline=self._on_plan_baseline_dropdown_hover,
+            on_hover_candidate=self._on_plan_candidate_dropdown_hover,
+            on_baseline_focus=lambda _e: self._set_plan_compare_dropdown_focused(True),
+            on_baseline_blur=lambda _e: self._set_plan_compare_dropdown_focused(False),
+            on_candidate_focus=lambda _e: self._set_plan_compare_dropdown_focused(True),
+            on_candidate_blur=lambda _e: self._set_plan_compare_dropdown_focused(False),
+            dropdown_text_style=_tb_dd_text_style,
+            menu_style=_dd_menu_style,
+            option_button_style=_dd_opt_st,
+            label_text_style=_tb_label_style,
+            border_radius=float(SIDEBAR_INNER_BORDER_RADIUS_PX),
+        )
         self._compare_candidate_dropdown = ft.Dropdown(
             expand=True,
             dense=True,
@@ -449,11 +473,6 @@ class MarkdownStudio(
             padding=ft.padding.all(8),
             on_scroll=self._on_compare_pdf_scroll_right,
         )
-        self._plan_compare = plan_compare_panel.build_plan_compare_panel(
-            on_baseline=lambda e: self.page.run_task(self._on_plan_pdf_baseline_async, e),
-            on_candidate=lambda e: self.page.run_task(self._on_plan_pdf_candidate_async, e),
-            on_overlay=self._on_plan_overlay_changed,
-        )
         self._plan_compare.overlay_list.visible = False
         self._plan_compare.overlay_list.on_scroll = self._on_compare_pdf_scroll_right
         self._compare_pdf_right_column = ft.Column(
@@ -489,12 +508,7 @@ class MarkdownStudio(
                 border=ft.border.all(1, ui_theme.result_card_border()),
                 border_radius=10,
                 padding=ft.padding.all(12),
-                shadow=ft.BoxShadow(
-                    blur_radius=18,
-                    spread_radius=0,
-                    color=ft.Colors.with_opacity(0.45, ft.Colors.BLACK),
-                    offset=ft.Offset(0, 6),
-                ),
+                shadow=ui_theme.soft_elevation_shadow(),
                 top=0,
                 left=4,
                 on_hover=self._on_result_card_hover,
@@ -513,10 +527,9 @@ class MarkdownStudio(
             ],
             expand=True,
         )
-        # History tab body
+        # History tab body (plan PDF bar lives in _toolbar_history under the main tabs)
         self._compare_tab_body = ft.Column(
             [
-                self._plan_compare.host,
                 ft.Row(
                     [self._compare_body_stack],
                     expand=True,
@@ -572,7 +585,7 @@ class MarkdownStudio(
             ),
         )
         self._review_impact_panel = ft.Container(
-            expand=True,
+            expand=False,
             visible=False,
             alignment=ft.Alignment.CENTER,
             content=ft.Text(
@@ -635,63 +648,59 @@ class MarkdownStudio(
         self._workspace_filename_band = ft.Container(
             bgcolor=config.SURFACE,
             padding=ft.padding.symmetric(horizontal=12, vertical=6),
-            content=ft.Column(
+            content=ft.Row(
                 [
-                    ft.Row(
-                        [
-                            ft.Container(expand=True),
-                            self._compose_tab_filename_row,
-                            ft.Container(expand=True),
-                        ],
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        expand=True,
-                    ),
-                    ft.Divider(
-                        height=1,
-                        thickness=1,
-                        color=ui_theme.outline_muted(alpha=0.22),
-                    ),
+                    ft.Container(expand=True),
+                    self._compose_tab_filename_row,
+                    ft.Container(expand=True),
                 ],
-                spacing=0,
-                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                expand=True,
             ),
         )
         # ── Tab-specific toolbar (below tab bar) ─────────────────────────────
         _tb_pad = ft.padding.symmetric(horizontal=12, vertical=4)
 
-        _tb_label_style = ft.TextStyle(size=12, color=config.ON_SURFACE_VARIANT)
-
-        # History: older (left) + newer (right) version dropdowns
+        # History: markdown version row + plan PDF row (same toolbar band)
+        self._toolbar_history_md_row = ft.Row(
+            [
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Text("Older:", style=_tb_label_style),
+                            self._compare_dropdown_hover_wrap,
+                        ],
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        expand=True,
+                    ),
+                    expand=1,
+                ),
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Text("Newer:", style=_tb_label_style),
+                            self._compare_newer_dropdown_hover_wrap,
+                        ],
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        expand=True,
+                    ),
+                    expand=1,
+                ),
+            ],
+            spacing=HISTORY_COMPARE_DROPDOWN_COLUMNS_GAP_PX,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            expand=True,
+        )
         self._toolbar_history = ft.Container(
-            content=ft.Row(
+            content=ft.Column(
                 [
-                    ft.Container(
-                        content=ft.Row(
-                            [
-                                ft.Text("Older:", style=_tb_label_style),
-                                self._compare_dropdown_hover_wrap,
-                            ],
-                            spacing=6,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            expand=True,
-                        ),
-                        expand=1,
-                    ),
-                    ft.Container(
-                        content=ft.Row(
-                            [
-                                ft.Text("Newer:", style=_tb_label_style),
-                                self._compare_newer_dropdown_hover_wrap,
-                            ],
-                            spacing=6,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            expand=True,
-                        ),
-                        expand=1,
-                    ),
+                    self._toolbar_history_md_row,
+                    self._plan_compare.host,
                 ],
-                spacing=HISTORY_COMPARE_DROPDOWN_COLUMNS_GAP_PX,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=4,
+                tight=True,
                 expand=True,
             ),
             padding=_tb_pad,
@@ -765,16 +774,20 @@ class MarkdownStudio(
                 tight=True,
             ),
         )
+        # Column (not Stack): two expand=True siblings in a Stack can starve the ListView of height
+        # when toggling Difference vs Impact. Only the active subpanel gets expand=True.
+        self._review_subpanels_column = ft.Column(
+            [self._review_change_panel, self._review_impact_panel],
+            expand=True,
+            spacing=0,
+        )
         self._future_tab_body = ft.Container(
             expand=True,
             content=ft.Column(
                 [
                     self._review_subtab_strip,
                     self._review_difference_chrome_row,
-                    ft.Stack(
-                        [self._review_change_panel, self._review_impact_panel],
-                        expand=True,
-                    ),
+                    self._review_subpanels_column,
                 ],
                 expand=True,
                 spacing=0,
@@ -1026,7 +1039,7 @@ class MarkdownStudio(
                     "Ready to act on this change?",
                     size=13,
                     weight=ft.FontWeight.W_600,
-                    color=config.ON_SURFACE,
+                    color=config.PRIMARY_COLOR,
                 ),
                 ft.Text(
                     "Connect {yourcompany}os to turn document changes into structured workflows — automatically routed to the right people.",
@@ -1289,6 +1302,7 @@ class MarkdownStudio(
             self.page.services.append(self._fp_documents)
             self.page.services.append(self._fp_store)
             self.page.services.append(self._fp_import)
+            self.page.services.append(self._fp_export_docx)
             self.page.update()
 
     def refresh_ollama_client(self) -> None:
@@ -1352,11 +1366,35 @@ class MarkdownStudio(
         )
         self._compare_newer_dropdown.menu_style = self._compare_candidate_dropdown.menu_style
         self._review_candidate_dropdown.menu_style = self._compare_candidate_dropdown.menu_style
+        _lbl = ft.TextStyle(size=12, color=config.ON_SURFACE_VARIANT)
+        self._plan_compare.baseline_dd.text_style = dd_ts
+        self._plan_compare.candidate_dd.text_style = dd_ts
+        self._plan_compare.baseline_dd.bgcolor = config.SURFACE
+        self._plan_compare.candidate_dd.bgcolor = config.SURFACE
+        self._plan_compare.baseline_dd.menu_style = self._compare_candidate_dropdown.menu_style
+        self._plan_compare.candidate_dd.menu_style = self._compare_candidate_dropdown.menu_style
+        self._plan_compare.baseline_wrap.bgcolor = config.SURFACE
+        self._plan_compare.candidate_wrap.bgcolor = config.SURFACE
+        self._plan_compare.baseline_label.style = _lbl
+        self._plan_compare.candidate_label.style = _lbl
         self._sync_side_panel_chrome()
         self.center_panel.bgcolor = config.SURFACE
         self._apply_compare_candidate_dropdown_tab_chrome()
         self._ki_topic_top_bar.bgcolor = config.SIDEBAR_SURFACE
         self._ki_sidebar_well.bgcolor = config.SURFACE
+        _sh = ui_theme.soft_elevation_shadow()
+        self._result_card_overlay.shadow = _sh
+        self._future_result_card_overlay.shadow = _sh
+        self._result_card_overlay.bgcolor = ui_theme.result_card_bg()
+        self._result_card_overlay.border = ft.border.all(1, ui_theme.result_card_border())
+        self._future_result_card_overlay.bgcolor = ui_theme.result_card_bg()
+        self._future_result_card_overlay.border = ft.border.all(1, ui_theme.result_card_border())
+        if _ctrl_on_page(self._result_card_overlay):
+            self._result_card_overlay.update()
+        if _ctrl_on_page(self._future_result_card_overlay):
+            self._future_result_card_overlay.update()
+        if getattr(self, "_analyse_buttons", None):
+            self._refresh_analyse_button_state()
         if self._header_shell:
             self._header_shell.bgcolor = config.SURFACE_VARIANT
         if self._menu_bar:
@@ -1392,6 +1430,19 @@ class MarkdownStudio(
             self._compare_candidate_dropdown.update()
         if self._main_tab_index == TAB_HISTORY and _ctrl_on_page(self._compare_newer_dropdown):
             self._compare_newer_dropdown.update()
+        if self._main_tab_index == TAB_HISTORY:
+            pc = self._plan_compare
+            for c in (
+                pc.baseline_dd,
+                pc.candidate_dd,
+                pc.baseline_wrap,
+                pc.candidate_wrap,
+                pc.baseline_label,
+                pc.candidate_label,
+            ):
+                if _ctrl_on_page(c):
+                    c.update()
+            self._apply_plan_compare_dropdown_chrome()
         if self._main_tab_index == TAB_FUTURE and _ctrl_on_page(self._review_candidate_dropdown):
             self._review_candidate_dropdown.update()
         if _ctrl_on_page(self.left_panel):
@@ -1528,7 +1579,7 @@ class MarkdownStudio(
     ) -> None:
         if not self.current_path:
             if not silent:
-                self._snack("Open or create a note first.")
+                self._snack("Open or create a note first. Whatever you want to find")
             return
         self._flush_review_edits_if_changed()
         buf = self._working_document_text()
@@ -1568,6 +1619,111 @@ class MarkdownStudio(
         self._refresh_title_bar()
         if not silent:
             self._snack("Saved.")
+
+    async def begin_export_to_word(self, tree_path: Path | None = None) -> None:
+        self.ensure_file_pickers()
+        templates = markdown_docx_export.list_docx_templates()
+        if not templates:
+            self._snack(
+                "No Word templates found. Add .docx under the app templates folder or "
+                f"{markdown_docx_export.user_templates_dir()}."
+            )
+            return
+
+        if tree_path is None:
+            if not self.current_path:
+                self._snack("Open a markdown file first.")
+                return
+            md_path = self.current_path.resolve()
+            markdown_src = self.editor.value or ""
+        else:
+            md_path = tree_path.resolve()
+            cur = self.current_path.resolve() if self.current_path else None
+            if cur and md_path == cur:
+                markdown_src = self.editor.value or ""
+            else:
+                try:
+                    markdown_src = md_path.read_text(encoding="utf-8")
+                except OSError as ex:
+                    self._snack(f"Could not read file: {ex}")
+                    return
+
+        author = store_db.settings_get(self._db, store_db.SETTINGS_EXPORT_AUTHOR) or ""
+        paths_by_label = {label: path for label, path in templates}
+        labels = [lbl for lbl, _ in templates]
+
+        tpl_dd = ft.Dropdown(
+            label="Template",
+            options=[ft.dropdown.Option(l) for l in labels],
+            value=labels[0],
+            expand=True,
+        )
+
+        async def on_export(_e: ft.ControlEvent | None = None) -> None:
+            sel = (tpl_dd.value or "").strip()
+            tpl = paths_by_label.get(sel)
+            if tpl is None or not tpl.is_file():
+                self._snack("Choose a template.")
+                return
+            self.page.pop_dialog()
+            stem = md_path.stem
+            try:
+                dest = await self._fp_export_docx.save_file(
+                    dialog_title="Export Word document",
+                    file_name=f"{stem}.docx",
+                    initial_directory=str(config.DOCUMENTS) if config.DOCUMENTS.is_dir() else None,
+                    allowed_extensions=["docx"],
+                )
+            except BaseException as ex:
+                self._snack(f"Save dialog failed: {ex}")
+                return
+            if not dest:
+                return
+            out = Path(dest)
+            meta = markdown_docx_export.ExportMeta(
+                title_stem=md_path.stem,
+                author=author,
+                date_iso=date.today().isoformat(),
+            )
+
+            def _run() -> None:
+                markdown_docx_export.markdown_to_docx(
+                    markdown_src=markdown_src,
+                    md_path=md_path,
+                    template_path=tpl,
+                    output_path=out,
+                    meta=meta,
+                )
+
+            try:
+                await asyncio.to_thread(_run)
+            except BaseException as ex:
+                self._snack(f"Export failed: {ex}")
+                return
+            self._snack(f"Exported to {out.name}")
+
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Export to Word", weight=ft.FontWeight.W_600),
+                content=ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.Text(md_path.name, size=12, font_family="monospace"),
+                            tpl_dd,
+                        ],
+                        tight=True,
+                        width=420,
+                    ),
+                    padding=ft.padding.only(top=4),
+                ),
+                actions=[
+                    ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
+                    ft.TextButton("Continue…", on_click=lambda _e: self.page.run_task(on_export)),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        )
 
     async def _periodic_file_drift_loop(self) -> None:
         while True:

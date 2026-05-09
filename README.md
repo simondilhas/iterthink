@@ -81,7 +81,7 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -U pip iterthi
 
 **Where data lives:** settings under your OS config path (e.g. `~/.config/iterthink` on Linux, `~/Library/Application Support/iterthink` on macOS, `%APPDATA%\iterthink` on Windows); documents and the local database under `Documents/.iterthink`.
 
-**From a clone (developers):** `pip install -e .` (or `pip install -r requirements.txt`), then `iterthink` or `python -m iterthink`.
+**From a clone (developers):** `pip install -e .` (or `pip install -r requirements.txt`), then `iterthink` or `python -m iterthink`. For unit tests, use `pip install -e ".[dev]"` and run `pytest tests/`.
 
 ## Status
 

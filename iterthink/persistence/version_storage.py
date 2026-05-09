@@ -386,9 +386,39 @@ def list_pdf_version_options(session: Session, resolved_doc: Path) -> list[tuple
     ).scalars().all()
     out: list[tuple[int, str]] = []
     for v in rows:
+        # Legacy rows from removed Word→PDF layout import path.
+        if (v.pdf_profile or "").strip() == "docx_layout":
+            continue
         ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(v.created_at))
         prof = (v.pdf_profile or "").strip()
         prof_bit = f" · {prof}" if prof else ""
+        label = f"#{v.id}  {ts}  ({v.reason})  PDF{prof_bit}"
+        out.append((v.id, label))
+    return out
+
+
+def list_plan_pdf_version_options(session: Session, resolved_doc: Path) -> list[tuple[int, str]]:
+    """
+    Like ``list_pdf_version_options`` but only versions with ``pdf_profile == "plan"``.
+
+    Used for the History plan-compare bar (baseline / candidate / overlay), which only
+    applies when comparing two drawing-style PDF snapshots.
+    """
+    key = path_key_for(resolved_doc)
+    doc = session.execute(select(Document).where(Document.path_key == key)).scalar_one_or_none()
+    if doc is None:
+        return []
+    rows = session.execute(
+        select(DocumentVersion)
+        .where(DocumentVersion.document_id == doc.id)
+        .where(DocumentVersion.pdf_asset_relpath.isnot(None))
+        .where(DocumentVersion.pdf_profile == "plan")
+        .order_by(DocumentVersion.created_at.desc(), DocumentVersion.id.desc())
+    ).scalars().all()
+    out: list[tuple[int, str]] = []
+    for v in rows:
+        ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(v.created_at))
+        prof_bit = " · plan"
         label = f"#{v.id}  {ts}  ({v.reason})  PDF{prof_bit}"
         out.append((v.id, label))
     return out

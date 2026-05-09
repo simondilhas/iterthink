@@ -24,6 +24,7 @@ SETTINGS_COMPANY_OPENAI_BASE_URL = "company_openai_base_url"
 SETTINGS_CLOUD_ANTHROPIC_MODEL = "cloud_anthropic_model"
 SETTINGS_CLOUD_OPENAI_MODEL = "cloud_openai_model"
 SETTINGS_CLOUD_GOOGLE_MODEL = "cloud_google_model"
+SETTINGS_EXPORT_AUTHOR = "export_author"
 
 
 def ensure_store_dir() -> None:

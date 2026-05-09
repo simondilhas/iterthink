@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, NamedTuple
 
 import flet as ft
@@ -55,6 +56,8 @@ from .constants import (
     TAB_FUTURE,
 )
 from .util import ctrl_on_page as _ctrl_on_page
+
+_log = logging.getLogger(__name__)
 
 # Outer padding only on both History columns so Text and TextField share the same inner width.
 _COMPARE_HISTORY_CELL_PAD = ft.padding.all(8)
@@ -137,6 +140,7 @@ class MarkdownStudioCompareText:
         self._latest_ai_proposal_vid = None
         self._ai_proposal_action_ids.clear()
         self._loaded_proposal_sha = None
+        self._pending_post_import_history_vid = None
 
     # ------------------------------------------------------------------
     # Compare buffer accessor
@@ -197,6 +201,8 @@ class MarkdownStudioCompareText:
             self._sync_compare_pdf_layers_visibility()
         else:
             self._rebuild_compare_paragraph_ui()
+        if self._main_tab_index == TAB_HISTORY:
+            self._refresh_tab_toolbar()
 
     def _refresh_compare_tab_candidate_ui(self) -> None:
         _st = ui_theme.compare_candidate_dropdown_option_style()
@@ -207,14 +213,14 @@ class MarkdownStudioCompareText:
         if self._main_tab_index == TAB_HISTORY:
             # ── History: newer (right) + older (left) dropdowns ─────────────────────
 
-            def snapshot_option_rows(slist: list[SnapshotInfo]) -> list[ft.dropdown.Option]:
-                snap_opts: list[ft.dropdown.Option] = []
-                import_opts: list[ft.dropdown.Option] = []
-                for sn in slist:
+            def history_snapshot_dropdown_options(slist: list[SnapshotInfo]) -> list[ft.dropdown.Option]:
+                """Newest-first by wall time so imports are not listed after older autosaves."""
+                ordered = sorted(slist, key=lambda sn: (sn.created_at, sn.version_id), reverse=True)
+                out: list[ft.dropdown.Option] = []
+                for sn in ordered:
                     row_text = version_storage.snapshot_dropdown_text(sn)
-                    bucket = version_storage.snapshot_bucket(sn)
-                    if bucket == "import":
-                        import_opts.append(
+                    if version_storage.snapshot_bucket(sn) == "import":
+                        out.append(
                             ft.dropdown.Option(
                                 key=str(sn.version_id),
                                 text=f"Import - {row_text}",
@@ -222,15 +228,14 @@ class MarkdownStudioCompareText:
                             )
                         )
                     else:
-                        snap_opts.append(
+                        out.append(
                             ft.dropdown.Option(
                                 key=str(sn.version_id),
                                 text=row_text,
                                 style=_st,
                             )
                         )
-                snap_opts.extend(import_opts)
-                return snap_opts
+                return out
 
             snaps_all: list[SnapshotInfo] = []
             if self.current_path:
@@ -245,7 +250,7 @@ class MarkdownStudioCompareText:
                 newer_opts.append(
                     ft.dropdown.Option(key=_COMPARE_KEY_CURRENT, text="Current draft", style=_st)
                 )
-            newer_opts.extend(snapshot_option_rows(filt))
+            newer_opts.extend(history_snapshot_dropdown_options(filt))
             self._compare_newer_dropdown.options = newer_opts
             newer_keys = {o.key for o in newer_opts}
             if self._compare_newer_version_id is not None:
@@ -286,7 +291,7 @@ class MarkdownStudioCompareText:
                     self._compare_newer_cached_body = ""
 
             older_slice = self._snapshots_strictly_older_than(filt, self._compare_newer_version_id)
-            older_opts = snapshot_option_rows(older_slice)
+            older_opts = history_snapshot_dropdown_options(older_slice)
             self._compare_candidate_dropdown.options = older_opts
             o_keys = {o.key for o in older_opts}
 
@@ -389,6 +394,8 @@ class MarkdownStudioCompareText:
         if self._main_tab_index == TAB_HISTORY and _ctrl_on_page(self._compare_candidate_dropdown):
             self._compare_candidate_dropdown.update()
         self._refresh_compare_bulk_buttons()
+        if self._main_tab_index == TAB_HISTORY:
+            self._refresh_tab_toolbar()
 
     def _compare_has_pending_bulk_apply(self) -> bool:
         if not self.current_path or not self._compare_right_fields:
@@ -585,11 +592,11 @@ class MarkdownStudioCompareText:
         self._compare_editor.value = body
         if _ctrl_on_page(self._compare_editor):
             self._compare_editor.update()
-        if pdf_rel:
-            self._compare_candidate_source = "pdf_original"
-            self._compare_pdf_peer_snapshot_id = vid
-        elif docx_rel:
+        if docx_rel:
             self._compare_candidate_source = "docx_original"
+            self._compare_pdf_peer_snapshot_id = vid
+        elif pdf_rel:
+            self._compare_candidate_source = "pdf_original"
             self._compare_pdf_peer_snapshot_id = vid
         else:
             self._compare_candidate_source = "snapshot"
@@ -619,6 +626,7 @@ class MarkdownStudioCompareText:
                 self._compare_candidate_dropdown.update()
             if _ctrl_on_page(self._compare_newer_dropdown):
                 self._compare_newer_dropdown.update()
+        self._apply_plan_compare_dropdown_chrome()
 
     def _on_compare_dropdown_container_hover(self, e: ft.ControlEvent) -> None:
         self._compare_dropdown_hover = str(e.data).lower() == "true"
@@ -633,36 +641,13 @@ class MarkdownStudioCompareText:
             font_family="monospace",
             size=COMPARE_COL_FONT_SIZE,
             height=COMPARE_COL_LINE_HEIGHT,
-            color=config.ON_SURFACE,
+            color=ui_theme.editor_text_color(),
         )
 
-    def _compare_insertion_diff_colors(self) -> tuple[str, str | None]:
-        """Insertion spans: foreground always ``on_surface``; light uses ``success`` tint as bg."""
-        if config.IS_LIGHT:
-            return config.ON_SURFACE, ft.Colors.with_opacity(0.5, config.SUCCESS)
-        return config.ON_SURFACE, None
-
-    def _compare_pill_colors(self, kind: paragraph_compare.SlotKind) -> tuple[str, str]:
-        new_pill: tuple[str, str] = (
-            (ft.Colors.with_opacity(0.45, config.SUCCESS), config.ON_SURFACE)
-            if config.IS_LIGHT
-            else (ft.Colors.with_opacity(0.28, ft.Colors.GREEN_400), ft.Colors.GREEN_100)
-        )
-        m: dict[str, tuple[str, str]] = {
-            "stable": (
-                ft.Colors.with_opacity(0.18, config.OUTLINE),
-                config.ON_SURFACE_VARIANT,
-            ),
-            "refined":   (ft.Colors.with_opacity(0.28, ft.Colors.BLUE_400), ft.Colors.BLUE_100),
-            "modified":  (ft.Colors.with_opacity(0.28, ft.Colors.ORANGE_400), ft.Colors.ORANGE_100),
-            "rephrased": (ft.Colors.with_opacity(0.28, ft.Colors.PURPLE_400), ft.Colors.PURPLE_100),
-            "added":     new_pill,
-            "removed":   (ft.Colors.with_opacity(0.28, ft.Colors.RED_400), ft.Colors.RED_100),
-        }
-        return m.get(
-            kind,
-            (ft.Colors.with_opacity(0.22, config.OUTLINE), config.ON_SURFACE_VARIANT),
-        )
+    def _compare_insertion_diff_colors(self) -> tuple[str, str]:
+        """Insertion spans: same foreground as editor; green bg distinguishes them."""
+        bg_alpha = 0.5 if config.IS_LIGHT else 0.24
+        return ui_theme.editor_text_color(), ft.Colors.with_opacity(bg_alpha, config.SUCCESS)
 
     @staticmethod
     def _compare_displacement_arrow_text(displacement: int | None) -> str:
@@ -673,7 +658,7 @@ class MarkdownStudioCompareText:
 
     def _make_compare_pill(self, kind: paragraph_compare.SlotKind) -> ft.Container:
         label = paragraph_compare.slot_kind_label(kind)
-        bg, fg = self._compare_pill_colors(kind)
+        bg, fg = ui_theme.compare_slot_pill_colors(kind)
         return ft.Container(
             content=ft.Text(
                 label,
@@ -691,8 +676,7 @@ class MarkdownStudioCompareText:
         )
 
     def _make_moved_pill(self) -> ft.Container:
-        bg = ft.Colors.with_opacity(0.28, ft.Colors.TEAL_400)
-        fg = ft.Colors.TEAL_100
+        bg, fg = ui_theme.compare_moved_pill_colors()
         return ft.Container(
             content=ft.Text(
                 "Moved",
@@ -817,7 +801,7 @@ class MarkdownStudioCompareText:
             old_t,
             new_t,
             base_size=COMPARE_COL_FONT_SIZE,
-            base_color=config.ON_SURFACE,
+            base_color=ui_theme.editor_text_color(),
             font_family="monospace",
             insert_color=ins_fg,
             insert_bgcolor=ins_bg,
@@ -839,7 +823,7 @@ class MarkdownStudioCompareText:
             old_t,
             new_t,
             base_size=COMPARE_COL_FONT_SIZE,
-            base_color=config.ON_SURFACE,
+            base_color=ui_theme.editor_text_color(),
             font_family="monospace",
             line_height=COMPARE_COL_LINE_HEIGHT,
         )
@@ -861,7 +845,7 @@ class MarkdownStudioCompareText:
             old_t,
             new_t,
             base_size=COMPARE_COL_FONT_SIZE,
-            base_color=config.ON_SURFACE,
+            base_color=ui_theme.editor_text_color(),
             font_family="monospace",
             insert_color=ins_fg,
             insert_bgcolor=ins_bg,
@@ -981,15 +965,16 @@ class MarkdownStudioCompareText:
 
         _MOVED_OPACITY = 0.55
         para_style = self._compare_para_text_style()
-        # Ghost rows use the same ON_SURFACE colour + opacity as moved comparison rows
+        _ghost_fg = ui_theme.editor_text_color()
+        # Ghost rows use the same editor foreground + opacity as moved comparison rows
         # so both sides of a moved paragraph read at the same grey level.
         ghost_text_style = ft.TextStyle(
             font_family="monospace",
             size=COMPARE_COL_FONT_SIZE,
             height=COMPARE_COL_LINE_HEIGHT,
-            color=config.ON_SURFACE,
+            color=_ghost_fg,
             decoration=ft.TextDecoration.LINE_THROUGH,
-            decoration_color=config.ON_SURFACE,
+            decoration_color=_ghost_fg,
         )
         comp_idx = 0
 
@@ -1259,6 +1244,13 @@ class MarkdownStudioCompareText:
 
         if _ctrl_on_page(self._future_rows_listview):
             self._future_rows_listview.update()
+
+        _log.debug(
+            "review_future_rebuild row_specs=%s list_controls=%s change_panel_visible=%s",
+            len(rows),
+            len(self._future_rows_listview.controls),
+            self._review_change_panel.visible,
+        )
 
         if self._active_check_id is not None:
             self._refresh_all_eval_cells()

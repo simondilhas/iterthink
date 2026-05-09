@@ -25,7 +25,7 @@ def plan_picture_column(
     for i, p in enumerate(page_png_paths):
         img = ft.Image(
             src=str(p),
-            fit=ft.ImageFit.CONTAIN,
+            fit=ft.BoxFit.CONTAIN,
             filter_quality=ft.FilterQuality.MEDIUM,
         )
         viewer = ft.InteractiveViewer(
@@ -75,7 +75,7 @@ def plan_picture_single_viewport(
     p = page_png_paths[page_index]
     img = ft.Image(
         src=str(p),
-        fit=ft.ImageFit.CONTAIN,
+        fit=ft.BoxFit.CONTAIN,
         filter_quality=ft.FilterQuality.MEDIUM,
     )
     viewer = ft.InteractiveViewer(

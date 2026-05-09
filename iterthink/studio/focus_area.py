@@ -29,6 +29,7 @@ from .constants import (
     PROJECT_PAGE_URL as _PROJECT_PAGE_URL,
     READING_MAX_PX,
     TAB_FUTURE,
+    TAB_HISTORY,
     TAB_PRESENT,
 )
 from .util import ctrl_on_page as _ctrl_on_page
@@ -571,6 +572,12 @@ class MarkdownStudioCompose:
             self._margin_gen += 1
             gen = self._margin_gen
             self.page.run_task(self._debounced_compose_rebuild, gen)
+        if (
+            self._main_tab_index == TAB_HISTORY
+            and self._compare_candidate_source == "docx_original"
+            and self._compare_newer_version_id is None
+        ):
+            self._refresh_compare_diff_immediate()
         if not self.current_path:
             return
         self._kick_debounced_autosave()

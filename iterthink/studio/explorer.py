@@ -876,7 +876,8 @@ class MarkdownStudioExplorer:
         self._rebuild_tree_ui()
         if _ctrl_on_page(self.tree_column):
             self.tree_column.update()
-        select_vid = new_vid if ext in ("pdf", "docx") else None
+        # PDF import: open History on the import snapshot. Word: land on Focus (Present).
+        select_vid = new_vid if ext == "pdf" else None
         await self.open_file(dest, after_import_vid=select_vid)
         self._snack("Imported.")
 
@@ -945,6 +946,10 @@ class MarkdownStudioExplorer:
             icon_color=config.ON_SURFACE_VARIANT,
             tooltip="File actions",
             items=[
+                ft.PopupMenuItem(
+                    content=ft.Text("Export to Word…", size=13),
+                    on_click=lambda _e, p=fp: self.page.run_task(self.begin_export_to_word, p),
+                ),
                 ft.PopupMenuItem(
                     content=ft.Text("Rename…", size=13),
                     on_click=lambda _e, p=fp: self._begin_tree_file_inline_rename(p),
@@ -1188,6 +1193,7 @@ class MarkdownStudioExplorer:
             # Jump straight to the History tab showing the imported version.
             self._select_snapshot_as_candidate(after_import_vid)
             self._refresh_compare_tab_candidate_ui()
+            self._pending_post_import_history_vid = after_import_vid
             await self._request_tab_switch_async(TAB_HISTORY)
             self._refresh_compare_diff_immediate()
         else:

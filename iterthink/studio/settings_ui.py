@@ -904,7 +904,7 @@ async def open_settings_dialog(studio: Any) -> None:
         content=ft.Column(
             [
                 ft.Text("Cloud vendor", weight=ft.FontWeight.W_600, size=14),
-                ft.Text("Provider when Cloud is selected in the KI panel.", size=11, color=ft.Colors.GREY_500),
+                ft.Text("", size=11, color=ft.Colors.GREY_500),
                 cloud_vendor_seg,
                 cloud_anthropic_wrap,
                 cloud_openai_wrap,
@@ -965,7 +965,7 @@ async def open_settings_dialog(studio: Any) -> None:
         [
             ft.Text("Models", size=18, weight=ft.FontWeight.W_600),
             ft.Text(
-                "Default KI tier matches the KI panel (Home · Office · Cloud). Only the section for the selected tier is shown.",
+                "Default KI tier matches the KI panel (Home · Office · Cloud).",
                 size=11,
                 color=ft.Colors.GREY_500,
             ),
@@ -1012,18 +1012,50 @@ async def open_settings_dialog(studio: Any) -> None:
         ),
     )
 
+    export_author_tf = ft.TextField(
+        label="Author (Word export)",
+        value=store_db.settings_get(studio._db, store_db.SETTINGS_EXPORT_AUTHOR) or "",
+        expand=True,
+        dense=True,
+        hint_text="Used for {Author} in export templates",
+    )
+
+    async def save_export_settings(_e: ft.ControlEvent | None = None) -> None:
+        store_db.settings_set(
+            studio._db,
+            store_db.SETTINGS_EXPORT_AUTHOR,
+            (export_author_tf.value or "").strip(),
+        )
+        studio._snack("Export settings saved.")
+
+    tab_export = ft.Container(
+        padding=8,
+        content=ft.Column(
+            [
+                ft.Text("Word export", weight=ft.FontWeight.W_500, size=13),
+                export_author_tf,
+                ft.Text(
+                    "Fills the {Author} placeholder in .docx templates (e.g. bundled “Iterthink Standard”). "
+                    "{Titel} and {Date} come from the document name and export date.",
+                    size=11,
+                    color=config.ON_SURFACE_VARIANT,
+                ),
+                ft.FilledButton("Save export settings", on_click=lambda e: page.run_task(save_export_settings, e)),
+            ],
+            tight=True,
+            spacing=10,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
+        ),
+    )
+
     tab_app = ft.Container(
         padding=8,
         content=ft.Column(
             [
-                ft.Text(
-                    "Appearance (dark / light), chat system string, and startup note behavior. "
-                    "Ollama host is under Models → Home (Local). "
-                    "Edit bundled palette tokens in config.yaml under theme.dark / theme.light. "
-                    "Document paths live under Paths; default models under Models.",
-                    size=12,
-                    color=config.ON_SURFACE_VARIANT,
-                ),
+                ft.Text("Theme", weight=ft.FontWeight.W_500, size=13),
+                appearance_dd,
+                chat_system_tf,
                 ft.Text("Notes & startup", weight=ft.FontWeight.W_500, size=13),
                 daily_log_sw,
                 new_note_template_tf,
@@ -1033,9 +1065,6 @@ async def open_settings_dialog(studio: Any) -> None:
                     size=11,
                     color=config.ON_SURFACE_VARIANT,
                 ),
-                ft.Text("Theme", weight=ft.FontWeight.W_500, size=13),
-                appearance_dd,
-                chat_system_tf,
                 ft.FilledButton("Save app settings", on_click=lambda e: page.run_task(save_app_fields, e)),
             ],
             tight=True,
@@ -1214,7 +1243,7 @@ async def open_settings_dialog(studio: Any) -> None:
         ),
     )
 
-    panels = [tab_models, tab_paths, tab_app, tab_prompts, tab_license]
+    panels = [tab_app, tab_paths, tab_export, tab_license, tab_models, tab_prompts]
     tab_stack = ft.Stack(controls=panels, expand=True)
     for i, c in enumerate(panels):
         c.visible = i == 0
@@ -1237,11 +1266,12 @@ async def open_settings_dialog(studio: Any) -> None:
         min_extended_width=152,
         bgcolor=ft.Colors.with_opacity(0.06, ft.Colors.WHITE),
         destinations=[
-            ft.NavigationRailDestination(icon=ft.Icons.SMART_TOY_OUTLINED, label="Models"),
-            ft.NavigationRailDestination(icon=ft.Icons.FOLDER_OUTLINED, label="Paths"),
             ft.NavigationRailDestination(icon=ft.Icons.PALETTE_OUTLINED, label="App"),
-            ft.NavigationRailDestination(icon=ft.Icons.FORMAT_LIST_BULLETED, label="Prompts"),
+            ft.NavigationRailDestination(icon=ft.Icons.FOLDER_OUTLINED, label="Paths"),
+            ft.NavigationRailDestination(icon=ft.Icons.DESCRIPTION_OUTLINED, label="Export"),
             ft.NavigationRailDestination(icon=ft.Icons.KEY, label="License"),
+            ft.NavigationRailDestination(icon=ft.Icons.SMART_TOY_OUTLINED, label="Models"),
+            ft.NavigationRailDestination(icon=ft.Icons.FORMAT_LIST_BULLETED, label="Prompts"),
         ],
         on_change=on_rail_change,
     )
