@@ -22,6 +22,37 @@ _FENCE_SUFFIX = re.compile(r"\s*```\s*$")
 
 VALID_STATUSES = frozenset({"stable", "changed", "risk"})
 
+FINDINGS_CHECK_IDS = frozenset(
+    {
+        "norm_compliance",
+        "impact_consistency",
+        "scope_completeness",
+        "risk_assessment",
+        "design_intent",
+    }
+)
+
+FINDINGS_PARAGRAPH_STATUSES = frozenset({"ok", "warning", "error", "not_applicable"})
+
+NORM_TYPE_SEVERITY: dict[str, str] = {
+    "ok": "info",
+    "value_deviation": "error",
+    "missing_ref": "warning",
+    "wrong_ref": "error",
+    "outdated_ref": "warning",
+    "contradiction": "error",
+    "unverifiable": "info",
+}
+
+CONSISTENCY_TYPE_SEVERITY: dict[str, str] = {
+    "ok": "info",
+    "contradiction": "error",
+    "drift": "warning",
+    "duplicate": "warning",
+    "orphan": "warning",
+    "unverifiable": "info",
+}
+
 ProgressCb = Callable[[int, dict | None, str | None], Awaitable[None] | None]
 
 _persist_lock = asyncio.Lock()
@@ -80,7 +111,207 @@ def _normalize_paragraph_ref(para: Any) -> int | None:
     return None
 
 
-def _normalize_payload(raw: dict | None) -> tuple[dict | None, str | None]:
+def _as_bool(v: Any, *, default: bool = False) -> bool:
+    if isinstance(v, bool):
+        return v
+    return default
+
+
+def _nullable_str(v: Any) -> str | None:
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        return s if s else None
+    return None
+
+
+def _require_str(v: Any, label: str) -> tuple[str | None, str | None]:
+    if not isinstance(v, str) or not v.strip():
+        return None, f"Finding needs non-empty {label}."
+    return v.strip(), None
+
+
+def _derive_findings_paragraph_status(
+    not_applicable_reason: str | None,
+    findings: list[dict[str, Any]],
+) -> str:
+    na = (not_applicable_reason or "").strip()
+    if na:
+        return "not_applicable"
+    if not findings:
+        return "ok"
+    for f in findings:
+        if f.get("severity") == "error":
+            return "error"
+    for f in findings:
+        if f.get("severity") == "warning":
+            return "warning"
+    return "ok"
+
+
+def _findings_comment(
+    not_applicable_reason: str | None,
+    findings: list[dict[str, Any]],
+    derived_status: str,
+) -> str:
+    na = (not_applicable_reason or "").strip()
+    if derived_status == "not_applicable" and na:
+        return na[:200] + ("…" if len(na) > 200 else "")
+    for sev in ("error", "warning"):
+        for f in findings:
+            if f.get("severity") == sev:
+                act = f.get("action")
+                if isinstance(act, str) and act.strip():
+                    return act.strip()[:200] + ("…" if len(act.strip()) > 200 else "")
+    if findings:
+        return f"{len(findings)} finding(s)"
+    return "OK"
+
+
+def _normalize_norm_finding(raw: dict[str, Any], idx: int) -> tuple[dict[str, Any] | None, str | None]:
+    ftype = raw.get("type")
+    if not isinstance(ftype, str) or ftype.strip() not in NORM_TYPE_SEVERITY:
+        return None, f"findings[{idx}]: invalid type."
+    ftype = ftype.strip()
+    exp_sev = NORM_TYPE_SEVERITY[ftype]
+    sev = raw.get("severity")
+    if not isinstance(sev, str) or sev.strip() != exp_sev:
+        return None, f"findings[{idx}]: severity must be {exp_sev!r} for type {ftype!r}."
+    sev = sev.strip()
+    claim, err = _require_str(raw.get("claim"), "claim")
+    if err:
+        return None, f"findings[{idx}]: {err}"
+    act, err = _require_str(raw.get("action"), "action")
+    if err:
+        return None, f"findings[{idx}]: {err}"
+
+    norm_ref = _nullable_str(raw.get("norm_ref"))
+    expected = _nullable_str(raw.get("expected"))
+    found = _nullable_str(raw.get("found"))
+    src_doc = _nullable_str(raw.get("source_document"))
+    src_ex = _nullable_str(raw.get("source_excerpt"))
+
+    if ftype in ("missing_ref", "unverifiable"):
+        pass  # source_* may be null
+    else:
+        if src_doc is None or src_ex is None:
+            return None, f"findings[{idx}]: source_document and source_excerpt required for type {ftype!r}."
+
+    out: dict[str, Any] = {
+        "type": ftype,
+        "severity": sev,
+        "claim": claim,
+        "norm_ref": norm_ref,
+        "expected": expected,
+        "found": found,
+        "action": act,
+        "source_document": src_doc,
+        "source_excerpt": src_ex,
+    }
+    return out, None
+
+
+def _normalize_consistency_finding(raw: dict[str, Any], idx: int) -> tuple[dict[str, Any] | None, str | None]:
+    ftype = raw.get("type")
+    if not isinstance(ftype, str) or ftype.strip() not in CONSISTENCY_TYPE_SEVERITY:
+        return None, f"findings[{idx}]: invalid type."
+    ftype = ftype.strip()
+    exp_sev = CONSISTENCY_TYPE_SEVERITY[ftype]
+    sev = raw.get("severity")
+    if not isinstance(sev, str) or sev.strip() != exp_sev:
+        return None, f"findings[{idx}]: severity must be {exp_sev!r} for type {ftype!r}."
+    sev = sev.strip()
+    claim, err = _require_str(raw.get("claim"), "claim")
+    if err:
+        return None, f"findings[{idx}]: {err}"
+    act, err = _require_str(raw.get("action"), "action")
+    if err:
+        return None, f"findings[{idx}]: {err}"
+
+    this_states = _nullable_str(raw.get("this_states"))
+    context_states = _nullable_str(raw.get("context_states"))
+    src_doc = _nullable_str(raw.get("source_document"))
+    src_ex = _nullable_str(raw.get("source_excerpt"))
+
+    if ftype in ("orphan", "unverifiable"):
+        pass
+    else:
+        if src_doc is None or src_ex is None:
+            return None, f"findings[{idx}]: source_document and source_excerpt required for type {ftype!r}."
+
+    out: dict[str, Any] = {
+        "type": ftype,
+        "severity": sev,
+        "claim": claim,
+        "this_states": this_states,
+        "context_states": context_states,
+        "source_document": src_doc,
+        "source_excerpt": src_ex,
+        "action": act,
+    }
+    return out, None
+
+
+def _normalize_findings_envelope(
+    raw: dict | None,
+    *,
+    check: ImpactCheck,
+) -> tuple[dict | None, str | None]:
+    if raw is None:
+        return None, "Model did not return valid JSON."
+
+    na_raw = raw.get("not_applicable_reason")
+    na_reason = _nullable_str(na_raw) if na_raw is not None else None
+
+    findings_raw = raw.get("findings")
+    if not isinstance(findings_raw, list):
+        return None, "findings must be a JSON array."
+    findings_in: list[Any] = list(findings_raw)
+
+    if na_reason:
+        if findings_in:
+            return None, "not_applicable_reason set but findings is not empty."
+    low = _as_bool(raw.get("low_confidence"), default=False)
+
+    norm_mode = check.id == "norm_compliance"
+    findings_out: list[dict[str, Any]] = []
+    for i, item in enumerate(findings_in):
+        if not isinstance(item, dict):
+            return None, f"findings[{i}] must be an object."
+        if norm_mode:
+            one, err = _normalize_norm_finding(item, i)
+        else:
+            one, err = _normalize_consistency_finding(item, i)
+        if err or one is None:
+            return None, err or "Invalid finding."
+        findings_out.append(one)
+
+    derived = _derive_findings_paragraph_status(na_reason, findings_out)
+
+    reported = raw.get("paragraph_status")
+    reported_str: str | None = None
+    if isinstance(reported, str) and reported.strip() in FINDINGS_PARAGRAPH_STATUSES:
+        reported_str = reported.strip()
+
+    details: dict[str, Any] = {
+        "low_confidence": low,
+        "not_applicable_reason": na_reason,
+        "findings": findings_out,
+    }
+    if reported_str is not None and reported_str != derived:
+        details["paragraph_status_reported"] = reported_str
+
+    comment = _findings_comment(na_reason, findings_out, derived)
+    out: dict[str, Any] = {
+        "status": derived,
+        "comment": comment,
+        "details": details,
+    }
+    return out, None
+
+
+def _normalize_legacy_payload(raw: dict | None) -> tuple[dict | None, str | None]:
     if raw is None:
         return None, "Model did not return valid JSON."
     st = raw.get("status")
@@ -133,6 +364,16 @@ def _normalize_payload(raw: dict | None) -> tuple[dict | None, str | None]:
     return out, None
 
 
+def _normalize_payload(
+    raw: dict | None,
+    *,
+    check: ImpactCheck | None = None,
+) -> tuple[dict | None, str | None]:
+    if check is not None and check.id in FINDINGS_CHECK_IDS:
+        return _normalize_findings_envelope(raw, check=check)
+    return _normalize_legacy_payload(raw)
+
+
 async def _emit(cb: ProgressCb | None, idx: int, payload: dict | None, err: str | None) -> None:
     if cb is None:
         return
@@ -154,7 +395,12 @@ async def _run_one_paragraph(
     except KeyError as e:
         return None, f"Template format error: {e}"
     system = check.system_prompt
-    if context and context.strip() and context.strip() != "(no context)":
+    if (
+        check.id not in FINDINGS_CHECK_IDS
+        and context
+        and context.strip()
+        and context.strip() != "(no context)"
+    ):
         system = (
             system.rstrip()
             + "\n\nProject file context is provided below the paragraph text. "
@@ -178,7 +424,7 @@ async def _run_one_paragraph(
         return None, f"{type(exc).__name__}: {exc}"
     text = chat_response_text(resp) or ""
     raw = _coerce_impact_json(text)
-    return _normalize_payload(raw)
+    return _normalize_payload(raw, check=check)
 
 
 async def run_impact_analysis(

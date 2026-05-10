@@ -716,7 +716,7 @@ class MarkdownStudio(
             visible=False,
             right=0,
             top=4,
-            width=260,
+            width=320,
             padding=ft.padding.all(10),
             bgcolor=config.SURFACE,
             border=ft.border.all(1, config.OUTLINE),
