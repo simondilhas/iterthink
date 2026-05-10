@@ -9,7 +9,7 @@ import numpy as np
 
 from iterthink.compare.paragraph_semantics import blob_to_floats
 from iterthink.persistence import store_db
-from iterthink.services import impact_rag
+from iterthink.services.rag import impact_rag
 
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -48,7 +48,7 @@ def test_fetch_latest_rows_prefers_max_version_per_doc() -> None:
             input_hash="ha",
             vec_rowid=rid1,
             embed_model_id="mid",
-            chunk_text="OLD",
+            chunk_text="OLD paragraph with enough characters for norm context filter.",
             content_sha="s1",
         )
         store_db.impact_version_chunk_insert_row(
@@ -59,7 +59,7 @@ def test_fetch_latest_rows_prefers_max_version_per_doc() -> None:
             input_hash="hb",
             vec_rowid=rid2,
             embed_model_id="mid",
-            chunk_text="NEW",
+            chunk_text="NEW paragraph with enough characters for norm context filter.",
             content_sha="s2",
         )
         conn.commit()
@@ -68,6 +68,7 @@ def test_fetch_latest_rows_prefers_max_version_per_doc() -> None:
         assert len(rows) == 1
         assert rows[0][1] == 20
         assert "NEW" in rows[0][4]
+        assert rows[0][5] == "unknown"
 
         q = blob_to_floats(
             conn.execute("SELECT embedding FROM paragraph_vec WHERE rowid=?", (rid2,)).fetchone()[0]

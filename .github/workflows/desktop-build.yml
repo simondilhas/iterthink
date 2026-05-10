@@ -121,8 +121,6 @@ jobs:
             -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
           git config --system core.longpaths true
 
-      # serious_python / Dart hit MAX_PATH when bundling onnxruntime (fastembed); default
-      # GITHUB_WORKSPACE (D:\a\org\repo\...) pushes paths over 260 chars. Mirror to C:\b\w.
       - name: Mirror repo to short path (Windows)
         if: matrix.name == 'windows'
         shell: powershell
@@ -168,8 +166,6 @@ jobs:
         shell: bash
         run: echo "ITER_REPO=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
 
-      # Workaround for flet-dev/flet#6332: dependency strings with `<` and no preceding
-      # space crash the Dart subprocess on Windows. PEP 440 ignores whitespace.
       - name: Patch pyproject.toml version specifiers
         working-directory: ${{ env.ITER_REPO }}
         shell: pwsh
@@ -198,12 +194,6 @@ jobs:
         working-directory: ${{ env.ITER_REPO }}
         run: uv run python scripts/verify_embedding_cache.py
 
-      # Now that uv-based steps are done, strip .venv (and any __pycache__) from the
-      # source tree on Windows. serious_python's source-copy step on Windows chokes on
-      # symlinks/junctions and locked DLLs that uv venvs contain (see flet-dev/flet#4246).
-      # Even with `.venv` listed in [tool.flet] excludes, the exclusion isn't reliable
-      # for `flet build`'s pre-package copy on every version. Physically removing it is
-      # the robust workaround. flet/serious_python provisions its own embedded Python.
       - name: Strip .venv from build source (Windows)
         if: matrix.name == 'windows'
         working-directory: ${{ env.ITER_REPO }}
@@ -225,34 +215,50 @@ jobs:
               cmd /c "rmdir /s /q `"$($_.FullName)`"" | Out-Null
             }
 
-      # serious_python subprocess-calls `python3` / `pip3`. The runner-provided Python
-      # from hostedtoolcache only has python.exe / pip.exe — drop shims so Dart's
-      # Process.run resolves them via CreateProcess.
-      - name: Create python3 / pip3 shims (Windows)
+      # serious_python's Dart subprocess looks for `python3` and `pip3` — runner's
+      # hostedtoolcache Python only ships `python.exe`/`pip.exe`. Drop both `python3`
+      # AND `python` shims into C:\b\bin so any spawn variant resolves.
+      - name: Create python / python3 / pip3 shims (Windows)
         if: matrix.name == 'windows'
         working-directory: ${{ env.ITER_REPO }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $py = (where.exe python | Select-Object -First 1).Trim()
-          if (-not (Test-Path -LiteralPath $py)) { throw "Could not resolve python.exe (got '$py')" }
-          Write-Host "Resolved python: $py"
+          # Resolve a real python.exe from the runner's hostedtoolcache (NOT C:\b\bin —
+          # that dir might already contain a partial shim from a previous attempt).
+          $candidates = @(
+            'C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe'
+          )
+          $found = $null
+          foreach ($c in $candidates) {
+            if (Test-Path -LiteralPath $c) { $found = $c; break }
+          }
+          if (-not $found) {
+            # Fall back to scanning hostedtoolcache for any Python 3.12.x.
+            $found = (Get-ChildItem 'C:\hostedtoolcache\windows\Python\3.12.*\x64\python.exe' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+          if (-not $found -or -not (Test-Path -LiteralPath $found)) {
+            throw "Could not locate a python.exe in C:\hostedtoolcache\windows\Python\"
+          }
+          Write-Host "Resolved python: $found"
 
           New-Item -ItemType Directory -Force -Path 'C:\b\bin' | Out-Null
 
-          $py3Cmd = "@echo off`r`n`"$py`" %*"
-          Set-Content -LiteralPath 'C:\b\bin\python3.cmd' -Value $py3Cmd -Encoding Ascii -Force
-          $pip3Cmd = "@echo off`r`n`"$py`" -m pip %*"
-          Set-Content -LiteralPath 'C:\b\bin\pip3.cmd' -Value $pip3Cmd -Encoding Ascii -Force
+          # Real .exe copies (Dart Process.run uses CreateProcess, which needs an actual
+          # executable, not a .cmd).
+          Copy-Item -LiteralPath $found -Destination 'C:\b\bin\python3.exe' -Force
+          Copy-Item -LiteralPath $found -Destination 'C:\b\bin\python.exe' -Force
 
-          Copy-Item -LiteralPath $py -Destination 'C:\b\bin\python3.exe' -Force
-          $pyDir = Split-Path -Parent $py
+          $pyDir = Split-Path -Parent $found
           $pipExe = Join-Path $pyDir 'Scripts\pip.exe'
           if (Test-Path -LiteralPath $pipExe) {
             Copy-Item -LiteralPath $pipExe -Destination 'C:\b\bin\pip3.exe' -Force
+            Copy-Item -LiteralPath $pipExe -Destination 'C:\b\bin\pip.exe' -Force
           }
 
+          where.exe python
           where.exe python3
+          python --version
           python3 --version
           where.exe pip3
 
@@ -287,17 +293,26 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $env:PATH = 'C:\b\bin;C:\Windows\System32;' + $env:PATH
+          # IMPORTANT: hostedtoolcache Python comes BEFORE C:\b\bin so uvx and other
+          # uv-launched subprocesses resolve the canonical python.exe rather than our
+          # shim copy. C:\b\bin still contributes tar.exe + python3.exe for Dart.
+          $hostedPy = (Get-ChildItem 'C:\hostedtoolcache\windows\Python\3.12.*\x64' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          $parts = @()
+          if ($hostedPy -and (Test-Path -LiteralPath $hostedPy)) {
+            $parts += $hostedPy
+            $parts += (Join-Path $hostedPy 'Scripts')
+          }
+          $parts += 'C:\b\bin'
+          $parts += 'C:\Windows\System32'
           $g = 'C:\Program Files\Git\cmd'
-          if (Test-Path -LiteralPath $g) { $env:PATH = "$g;$env:PATH" }
+          if (Test-Path -LiteralPath $g) { $parts = ,$g + $parts }
+          $env:PATH = ($parts -join ';') + ';' + $env:PATH
           Write-Host "PATH prefix (first 280 chars): $($env:PATH.Substring(0, [Math]::Min(280, $env:PATH.Length)))"
           Write-Host "--- sanity ---"
           where.exe tar
-          where.exe python3
           where.exe python
+          where.exe python3
           where.exe pip3
-          # uvx runs flet-cli without using the project's .venv (we just removed it).
-          # 2>&1 surfaces the dart subprocess's stderr inline so we can see what's wrong.
           uvx --from flet-cli flet build windows --yes -vv `
             --build-version $env:BUILD_VERSION `
             --build-number $env:GITHUB_RUN_NUMBER 2>&1

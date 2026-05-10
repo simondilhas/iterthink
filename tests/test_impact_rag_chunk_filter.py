@@ -1,6 +1,6 @@
 """RAG chunk quality filter for norm context."""
 
-from iterthink.services.impact_rag import _chunk_usable_for_norm_context, rag_chunk_display_body
+from iterthink.services.rag.impact_rag import _chunk_usable_for_norm_context, rag_chunk_display_body
 
 
 def test_rejects_trivial_heading_chunk() -> None:

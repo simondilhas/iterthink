@@ -15,7 +15,9 @@ from iterthink.compare.paragraph_semantics import embed_texts_cached
 from iterthink.db.session import session_scope
 from iterthink.impact_checks import ImpactCheck
 from iterthink.persistence import impact_annotations as impact_ann
-from iterthink.services import impact_prefilter, impact_rag
+from iterthink.services import impact_prefilter
+from iterthink.services.rag.chunk_type import NORM_COMPLIANCE_RAG_TYPES
+from iterthink.services.rag import impact_rag
 
 _FENCE_PREFIX = re.compile(r"^\s*```(?:json)?\s*", re.IGNORECASE)
 _FENCE_SUFFIX = re.compile(r"\s*```\s*$")
@@ -483,7 +485,14 @@ async def run_impact_analysis(
             ctx = ""
             if vec:
                 ctx = impact_rag.retrieve_context_by_document_ids(
-                    vec, conn, context_document_ids, labels, top_k=top_k
+                    vec,
+                    conn,
+                    context_document_ids,
+                    labels,
+                    top_k=top_k,
+                    chunk_types_include=(
+                        NORM_COMPLIANCE_RAG_TYPES if check.id == "norm_compliance" else None
+                    ),
                 )
             payload, err = await _run_one_paragraph(
                 llm_chat, model=model, check=check, paragraph=text, context=ctx
