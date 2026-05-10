@@ -27,6 +27,24 @@ def format_details_for_export(details: dict | None) -> str:
     if not details:
         return ""
     chunks: list[str] = []
+    findings = details.get("findings")
+    if isinstance(findings, list) and findings:
+        fb: list[str] = []
+        for fi, item in enumerate(findings):
+            if not isinstance(item, dict):
+                continue
+            fb.append(f"Finding {fi + 1}:")
+            for k, v in item.items():
+                if v is None or (isinstance(v, str) and not v.strip()):
+                    continue
+                fb.append(f"  {k}: {v}")
+        if fb:
+            chunks.append("\n".join(fb))
+    nar = details.get("not_applicable_reason")
+    if isinstance(nar, str) and nar.strip():
+        chunks.append(f"Not applicable: {nar.strip()}")
+    if details.get("low_confidence") is True:
+        chunks.append("Low confidence: context may be incomplete for this paragraph.")
     ex = details.get("explanation")
     if isinstance(ex, str) and ex.strip():
         chunks.append(ex.strip())

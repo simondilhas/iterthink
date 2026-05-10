@@ -177,6 +177,34 @@ jobs:
         working-directory: ${{ env.ITER_REPO }}
         run: uv sync
 
+      # serious_python subprocess-calls `python3` and `pip3` on Windows; the uv-managed
+      # interpreter only ships `python.exe`/`pip.exe`. Drop shims on PATH so Dart's
+      # Process.run('python3', ...) / Process.run('pip3', ...) resolve.
+      - name: Create python3 / pip3 shims (Windows)
+        if: matrix.name == 'windows'
+        working-directory: ${{ env.ITER_REPO }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $py = (uv run python -c "import sys; print(sys.executable)").Trim()
+          if (-not (Test-Path -LiteralPath $py)) { throw "Could not resolve python.exe (got '$py')" }
+          Write-Host "Resolved python: $py"
+
+          New-Item -ItemType Directory -Force -Path 'C:\b\bin' | Out-Null
+
+          # .cmd shims for callers using the bare command name
+          $py3Cmd = "@echo off`r`n`"$py`" %*"
+          Set-Content -LiteralPath 'C:\b\bin\python3.cmd' -Value $py3Cmd -Encoding Ascii -Force
+          $pip3Cmd = "@echo off`r`n`"$py`" -m pip %*"
+          Set-Content -LiteralPath 'C:\b\bin\pip3.cmd' -Value $pip3Cmd -Encoding Ascii -Force
+
+          # .exe copy of the interpreter for callers that require an actual executable
+          Copy-Item -LiteralPath $py -Destination 'C:\b\bin\python3.exe' -Force
+
+          where.exe python3
+          python3 --version
+          where.exe pip3
+
       - name: Prefetch embedding model
         working-directory: ${{ env.ITER_REPO }}
         run: uv run python scripts/prefetch_embed_model.py
@@ -208,7 +236,15 @@ jobs:
           $g = 'C:\Program Files\Git\cmd'
           if (Test-Path -LiteralPath $g) { $env:PATH = "$g;$env:PATH" }
           Write-Host "PATH prefix (first 280 chars): $($env:PATH.Substring(0, [Math]::Min(280, $env:PATH.Length)))"
+          Write-Host "--- sanity ---"
+          where.exe tar
+          where.exe python3
+          where.exe python
+          where.exe pip3
+          # Pass pre-installed packages from the uv venv so serious_python skips its
+          # internal pip/pip3 invocation, which fails on Windows (python3 not found).
           uv run flet build windows --yes -vv `
+            --site-packages-dir "$($env:ITER_REPO)\.venv\Lib\site-packages" `
             --build-version $env:BUILD_VERSION `
             --build-number $env:GITHUB_RUN_NUMBER
 

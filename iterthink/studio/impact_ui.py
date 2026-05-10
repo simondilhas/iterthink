@@ -16,7 +16,10 @@ from iterthink.db.session import session_scope
 from iterthink.persistence import impact_annotations as impact_ann
 from iterthink.persistence import version_storage
 from iterthink.services import impact_analysis_runner
-from iterthink.services.impact_analysis_runner import _impact_debug_llm_enabled
+from iterthink.services.impact_analysis_runner import (
+    FINDINGS_PARAGRAPH_STATUSES,
+    _impact_debug_llm_enabled,
+)
 from iterthink.studio.constants import KI_PILL_TEXT_SIZE, TAB_FUTURE
 from iterthink.studio.tree import build_md_tree
 from iterthink.studio.util import ctrl_on_page as _ctrl_on_page
@@ -423,13 +426,43 @@ class MarkdownStudioImpactMixin:
 
     @staticmethod
     def _impact_status_color(st: str) -> str:
-        if st == "risk":
+        if st == "risk" or st == "error":
             return "#E57373"
-        if st == "changed":
+        if st == "changed" or st == "warning":
             return "#FFB74D"
-        if st == "stable":
+        if st == "stable" or st == "ok":
             return "#81C784"
+        if st == "not_applicable":
+            return "#9AA0A6"
         return "#9AA0A6"
+
+    @staticmethod
+    def _impact_findings_main_icon(st: str):
+        if st == "ok":
+            return ft.Icons.CHECK_CIRCLE
+        if st == "warning":
+            return ft.Icons.WARNING_AMBER_ROUNDED
+        if st == "error":
+            return ft.Icons.ERROR_OUTLINE
+        if st == "not_applicable":
+            return ft.Icons.REMOVE_CIRCLE_OUTLINE
+        return ft.Icons.HELP_OUTLINE
+
+    @staticmethod
+    def _finding_detail_key_order() -> tuple[str, ...]:
+        return (
+            "type",
+            "severity",
+            "claim",
+            "norm_ref",
+            "expected",
+            "found",
+            "this_states",
+            "context_states",
+            "source_document",
+            "source_excerpt",
+            "action",
+        )
 
     @staticmethod
     def _impact_progress_row_dict(
@@ -471,6 +504,47 @@ class MarkdownStudioImpactMixin:
     def _get_candidate_paragraphs(self) -> list[str]:
         paras, _ = self._impact_paragraphs_for_display()
         return paras
+
+    @staticmethod
+    def _build_finding_type_tags(findings: list[dict]) -> ft.Row | None:
+        """Small colored pills summarising finding types (skips 'ok'). Returns None if nothing to show."""
+        from collections import Counter
+
+        sev_color = {"error": "#E57373", "warning": "#FFB74D", "info": "#9AA0A6"}
+        counts: Counter[str] = Counter()
+        type_sev: dict[str, str] = {}
+        for fd in findings:
+            ftype = fd.get("type", "")
+            if not ftype or ftype == "ok":
+                continue
+            counts[ftype] += 1
+            type_sev[ftype] = fd.get("severity", "info")
+
+        if not counts:
+            return None
+
+        pills: list[ft.Control] = []
+        for ftype, count in counts.most_common():
+            sev = type_sev.get(ftype, "info")
+            color = sev_color.get(sev, "#9AA0A6")
+            label = f"{ftype} ×{count}" if count > 1 else ftype
+            pills.append(
+                ft.Container(
+                    content=ft.Text(
+                        label,
+                        size=9,
+                        color=color,
+                        no_wrap=True,
+                        weight=ft.FontWeight.W_500,
+                    ),
+                    padding=ft.padding.symmetric(horizontal=5, vertical=1),
+                    border_radius=3,
+                    bgcolor=ft.Colors.with_opacity(0.13, color),
+                    border=ft.border.all(1, ft.Colors.with_opacity(0.35, color)),
+                )
+            )
+
+        return ft.Row(pills, spacing=4, tight=True, wrap=True)
 
     def _build_impact_para_row_pending(self, idx: int, para_text: str) -> ft.Container:
         from iterthink.studio import ui_theme
@@ -518,17 +592,37 @@ class MarkdownStudioImpactMixin:
         if ann_row is not None:
             st = str(ann_row.get("status", "") or "")
             color = self._impact_status_color(st)
-            chip_content: ft.Control = ft.Text(
-                st,
-                size=12,
-                weight=ft.FontWeight.W_700,
-                color=color,
-                no_wrap=True,
-            )
-            chip_bg = ft.Colors.with_opacity(0.14, color)
-            chip_border = ft.border.all(1, ft.Colors.with_opacity(0.45, color))
             tip = str(ann_row.get("effective_comment", "") or "").strip()
             chip_tooltip = tip or None
+            det_lc = ann_row.get("details")
+            low_conf = (
+                isinstance(det_lc, dict)
+                and det_lc.get("low_confidence") is True
+            )
+            if st in FINDINGS_PARAGRAPH_STATUSES:
+                main_ic = ft.Icon(self._impact_findings_main_icon(st), size=20, color=color)
+                chip_children: list[ft.Control] = [main_ic]
+                if low_conf:
+                    chip_children.append(
+                        ft.Icon(ft.Icons.HELP_OUTLINE, size=11, color="#FFB74D"),
+                    )
+                chip_content = ft.Row(
+                    chip_children,
+                    tight=True,
+                    spacing=2,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            else:
+                chip_content = ft.Text(
+                    st,
+                    size=12,
+                    weight=ft.FontWeight.W_700,
+                    color=color,
+                    no_wrap=True,
+                )
+            chip_bg = ft.Colors.with_opacity(0.14, color)
+            chip_border = ft.border.all(1, ft.Colors.with_opacity(0.45, color))
         else:
             color = config.OUTLINE
             chip_content = ft.Text("·", size=14, color=color, no_wrap=True)
@@ -562,13 +656,37 @@ class MarkdownStudioImpactMixin:
             expand=True,
         )
 
+        # Build inline finding-type tag pills from findings.
+        tag_row: ft.Control | None = None
+        if ann_row is not None:
+            det = ann_row.get("details")
+            if isinstance(det, dict):
+                finds = det.get("findings")
+                if isinstance(finds, list) and finds:
+                    tag_row = self._build_finding_type_tags(finds)
+
+        if tag_row is not None:
+            right_col: ft.Control = ft.Column(
+                [para_ctrl, tag_row],
+                spacing=3,
+                tight=True,
+                expand=True,
+            )
+        else:
+            right_col = para_ctrl
+
+        def _on_hover(e: ft.HoverEvent, i: int = idx) -> None:
+            if e.data == "true":
+                self._show_impact_result_card(i)
+
         return ft.Container(
             content=ft.Row(
-                [chip, para_ctrl],
+                [chip, right_col],
                 spacing=8,
                 vertical_alignment=ft.CrossAxisAlignment.START,
             ),
             padding=ft.padding.symmetric(horizontal=6, vertical=4),
+            on_hover=_on_hover if ann_row is not None else None,
         )
 
     def _show_impact_result_card(self, idx: int) -> None:
@@ -610,11 +728,24 @@ class MarkdownStudioImpactMixin:
         color = self._impact_status_color(st)
         eff = str(snap.get("effective_comment", "") or "").strip()
 
+        if st in FINDINGS_PARAGRAPH_STATUSES:
+            badge_content: ft.Control = ft.Row(
+                [
+                    ft.Icon(self._impact_findings_main_icon(st), size=18, color=color),
+                    ft.Text(st, size=12, weight=ft.FontWeight.W_700, color=color),
+                ],
+                tight=True,
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+        else:
+            badge_content = ft.Text(st, size=14, weight=ft.FontWeight.W_700, color=color)
+
         header = ft.Row(
             [
                 ft.Container(
-                    content=ft.Text(st, size=14, weight=ft.FontWeight.W_700, color=color),
-                    width=60,
+                    content=badge_content,
+                    padding=ft.padding.symmetric(horizontal=6, vertical=2),
                     height=28,
                     alignment=ft.Alignment.CENTER,
                     border_radius=6,
@@ -655,6 +786,109 @@ class MarkdownStudioImpactMixin:
             )
         det = snap.get("details")
         if isinstance(det, dict) and det:
+            if det.get("low_confidence") is True:
+                rows.append(
+                    ft.Container(
+                        content=ft.Text(
+                            "Low confidence: retrieved context may not match this paragraph.",
+                            size=11,
+                            color=config.ON_SURFACE_VARIANT,
+                            selectable=True,
+                        ),
+                        padding=ft.padding.only(top=8),
+                    )
+                )
+            nar = det.get("not_applicable_reason")
+            if isinstance(nar, str) and nar.strip():
+                rows.append(
+                    ft.Container(
+                        content=ft.Text(
+                            f"Not applicable: {nar.strip()}",
+                            size=12,
+                            color=config.ON_SURFACE,
+                            selectable=True,
+                        ),
+                        padding=ft.padding.only(top=6),
+                    )
+                )
+            rep = det.get("paragraph_status_reported")
+            if isinstance(rep, str) and rep.strip():
+                rows.append(
+                    ft.Container(
+                        content=ft.Text(
+                            f"Model paragraph_status (differs from stored): {rep.strip()}",
+                            size=10,
+                            color=config.ON_SURFACE_VARIANT,
+                            selectable=True,
+                        ),
+                        padding=ft.padding.only(top=2),
+                    )
+                )
+            finds = det.get("findings")
+            if isinstance(finds, list) and finds:
+                rows.append(
+                    ft.Container(
+                        content=ft.Text(
+                            "Findings",
+                            size=11,
+                            weight=ft.FontWeight.W_600,
+                            color=config.ON_SURFACE_VARIANT,
+                        ),
+                        padding=ft.padding.only(top=10, bottom=2),
+                    )
+                )
+                key_order = self._finding_detail_key_order()
+                for fi, fd in enumerate(finds):
+                    if not isinstance(fd, dict):
+                        continue
+                    rows.append(
+                        ft.Container(
+                            content=ft.Text(
+                                f"— Finding {fi + 1}",
+                                size=11,
+                                weight=ft.FontWeight.W_500,
+                                color=config.ON_SURFACE,
+                            ),
+                            padding=ft.padding.only(top=6, left=2),
+                        )
+                    )
+                    seen_k: set[str] = set()
+                    for key in key_order:
+                        if key not in fd:
+                            continue
+                        val = fd[key]
+                        if val is None or (isinstance(val, str) and not val.strip()):
+                            continue
+                        seen_k.add(key)
+                        label = key.replace("_", " ")
+                        rows.append(
+                            ft.Container(
+                                content=ft.Text(
+                                    f"{label}: {val}",
+                                    size=11,
+                                    color=config.ON_SURFACE,
+                                    selectable=True,
+                                ),
+                                padding=ft.padding.only(left=10, bottom=2),
+                            )
+                        )
+                    for key, val in fd.items():
+                        if key in seen_k or key in ("type", "severity"):
+                            continue
+                        if val is None or (isinstance(val, str) and not val.strip()):
+                            continue
+                        label = str(key).replace("_", " ")
+                        rows.append(
+                            ft.Container(
+                                content=ft.Text(
+                                    f"{label}: {val}",
+                                    size=11,
+                                    color=config.ON_SURFACE,
+                                    selectable=True,
+                                ),
+                                padding=ft.padding.only(left=10, bottom=2),
+                            )
+                        )
             ex = det.get("explanation")
             if isinstance(ex, str) and ex.strip():
                 rows.append(
@@ -971,9 +1205,13 @@ class MarkdownStudioImpactMixin:
                     det = r.get("details")
                     nref = 0
                     if isinstance(det, dict):
-                        refs = det.get("references")
-                        if isinstance(refs, list):
-                            nref = len(refs)
+                        fnd = det.get("findings")
+                        if isinstance(fnd, list):
+                            nref = len(fnd)
+                        else:
+                            refs = det.get("references")
+                            if isinstance(refs, list):
+                                nref = len(refs)
                     ann_lines.append((i, str(r.get("status", "")), str(r.get("comment", "")), nref))
 
             summary, s_err = await impact_analysis_runner.run_impact_summary(
