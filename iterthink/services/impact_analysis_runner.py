@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -23,6 +25,31 @@ VALID_STATUSES = frozenset({"stable", "changed", "risk"})
 ProgressCb = Callable[[int, dict | None, str | None], Awaitable[None] | None]
 
 _persist_lock = asyncio.Lock()
+
+
+def _impact_debug_llm_enabled() -> bool:
+    v = (os.environ.get("ITERTHINK_DEBUG_IMPACT") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _impact_debug_print_llm(phase: str, model: str, messages: list[dict[str, Any]]) -> None:
+    if not _impact_debug_llm_enabled():
+        return
+    lines = [
+        "",
+        "=" * 72,
+        f"iterthink Impact LLM  [{phase}]  model={model!r}",
+        "=" * 72,
+    ]
+    for msg in messages:
+        role = str(msg.get("role", "?"))
+        body = msg.get("content", "")
+        if not isinstance(body, str):
+            body = repr(body)
+        if len(body) > 16000:
+            body = body[:16000] + "\n… [truncated at 16000 chars]"
+        lines.append(f"\n--- {role} ---\n{body}")
+    print("\n".join(lines), file=sys.stderr, flush=True)
 
 
 def _coerce_impact_json(text: str) -> dict | None:
@@ -139,6 +166,7 @@ async def _run_one_paragraph(
         {"role": "system", "content": system},
         {"role": "user", "content": user_text},
     ]
+    _impact_debug_print_llm(f"paragraph check={check.id!r}", model, messages)
     try:
         resp = await llm_chat.chat(
             model=model,
@@ -236,10 +264,12 @@ async def run_impact_summary(
         "main risks, themes, and anything needing follow-up."
     )
     user = f"Annotations:\n{joined}"
+    sum_messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    _impact_debug_print_llm("document summary", model, sum_messages)
     try:
         resp = await llm_chat.chat(
             model=model,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            messages=sum_messages,
             stream=False,
         )
     except BaseException as exc:  # noqa: BLE001

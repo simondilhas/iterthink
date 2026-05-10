@@ -1239,17 +1239,13 @@ class MarkdownStudio(
         self._analyse_button_progress: dict[str, ft.ProgressRing] = {}
         self._analyse_button_count: dict[str, ft.Text] = {}
         # Impact checks (impact_checks.yaml) in the KI Analyse tab; visible on Review → Impact only.
+        # Run lives in _impact_run_dock (bottom of _chat_composer); shown for Review→Impact + KI Analyse,
+        # disabled until a check pill is selected (_sync_impact_ki_context_visibility).
         self._impact_analyse_section = ft.Container(
             visible=False,
             padding=ft.padding.only(top=4),
             content=ft.Column(
-                [
-                    self._pill_row_impact,
-                    ft.Container(
-                        padding=ft.padding.only(top=6),
-                        content=ft.Row([self._impact_run_btn], tight=True),
-                    ),
-                ],
+                [self._pill_row_impact],
                 spacing=2,
                 tight=True,
             ),
@@ -1398,6 +1394,20 @@ class MarkdownStudio(
             tab_bar_height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
         )
         self._chat_model_options: list[str] = []
+        self._chat_input_row = ft.Row(
+            [self._chat_input, self._chat_send_btn],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=4,
+        )
+        self._impact_run_dock = ft.Container(
+            visible=False,
+            padding=ft.padding.only(top=4),
+            content=ft.Row(
+                [self._impact_run_btn],
+                expand=True,
+                alignment=ft.MainAxisAlignment.START,
+            ),
+        )
         self._chat_composer = ft.Container(
             padding=ft.padding.symmetric(horizontal=0, vertical=6),
             bgcolor=ft.Colors.TRANSPARENT,
@@ -1405,11 +1415,8 @@ class MarkdownStudio(
             content=ft.Column(
                 [
                     self._ki_tier_tabs,
-                    ft.Row(
-                        [self._chat_input, self._chat_send_btn],
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=4,
-                    ),
+                    self._chat_input_row,
+                    self._impact_run_dock,
                 ],
                 tight=True,
                 spacing=6,

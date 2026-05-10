@@ -37,8 +37,8 @@ class MarkdownStudioKiSidebar:
             self._ki_topic_index = int(self._ki_topic_tabs.selected_index)
         self._sync_ki_topic_mode_buttons()
         self._apply_ki_tab_bar_view_height()
-        # Analyse tab: swap compare-check pills vs impact-check pills with Review subtab.
-        if int(self._ki_topic_index) == 2 and hasattr(self, "_sync_impact_ki_context_visibility"):
+        # Impact sidebar (Ask vs Run dock) depends on KI topic as well as Review subtab.
+        if hasattr(self, "_sync_impact_ki_context_visibility"):
             self._sync_impact_ki_context_visibility()
 
     def _sync_ki_topic_mode_buttons(self) -> None:
@@ -72,6 +72,8 @@ class MarkdownStudioKiSidebar:
             self._ki_topic_tabs.update()
         self._sync_ki_topic_mode_buttons()
         self._apply_ki_tab_bar_view_height()
+        if hasattr(self, "_sync_impact_ki_context_visibility"):
+            self._sync_impact_ki_context_visibility()
 
     def _on_ki_pill_row_size_discuss(self, e: ft.LayoutSizeChangeEvent) -> None:
         self._ki_tab_body_heights[0] = max(float(e.height), 28.0)

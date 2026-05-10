@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections import Counter
 from typing import Any
 
@@ -130,7 +131,15 @@ class MarkdownStudioChecksUi:
             self._rebuild_compare_paragraph_ui()
         buffers = self._active_compare_buffers()
         if not buffers.candidate.strip():
-            self._snack("Open a note first to analyse it.")
+            self._snack(
+                "Analyse needs text on the candidate side (right column). "
+                "On Review → Difference, load or paste a proposal; an empty right column cannot be analysed."
+            )
+            print(
+                "[analyse] skipped: candidate (right) text is empty",
+                file=sys.stderr,
+                flush=True,
+            )
             return
         pairs = aligned_compare_pairs(buffers.baseline, buffers.candidate)
         n = len(pairs)
@@ -145,6 +154,12 @@ class MarkdownStudioChecksUi:
         self._check_running[check_id] = True
         self._refresh_analyse_button_state()
         self._refresh_all_eval_cells()
+
+        print(
+            f"[analyse] starting check={check_id!r} paragraph_rows={n}",
+            file=sys.stderr,
+            flush=True,
+        )
 
         async def on_progress(idx: int, payload: dict | None, err: str | None) -> None:
             if my_gen != self._check_run_gen.get(check_id):

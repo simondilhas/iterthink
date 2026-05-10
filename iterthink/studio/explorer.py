@@ -1241,6 +1241,9 @@ class MarkdownStudioExplorer:
         self._refresh_title_bar()
         self._refresh_compose_plan_surface()
 
+        if getattr(self, "_impact_tab_initialized", False) and hasattr(self, "_rebuild_impact_context_tree"):
+            self._rebuild_impact_context_tree()
+
         try:
             with session_scope() as s:
                 version_storage.update_document_last_disk_state(s, path, body=text)
