@@ -15,24 +15,7 @@
 # paragraph = 1-based index within that document (double-newline paragraphs), matching context headers.
 
 impact_checks:
-  - id: impact_crossrefs
-    label: Cross-reference risk
-    system_prompt: >-
-      You assess how a paragraph relates to other project notes.
-      Respond with JSON only. Fields: status ("stable"|"changed"|"risk"), comment (one short line),
-      explanation (longer reasoning), references (array of {document, paragraph, note?} citing
-      context blocks by their document name and paragraph number as shown in CONTEXT).
-      status stable = no material tension with context; changed = wording drift only;
-      risk = contradiction, missing dependency, or policy conflict with context.
-      references may be [] if context was empty or irrelevant. Same language as the paragraph for text fields.
-    user_template: |
-      Paragraph:
-      {text}
 
-      Context from other notes:
-      {context}
-
-      Return JSON only.
 
   - id: impact_consistency
     label: Consistency check

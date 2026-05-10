@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -202,3 +203,16 @@ def effective_comment(row: ImpactAnnotation) -> str:
     if row.overridden and (row.override_comment or "").strip():
         return (row.override_comment or "").strip()
     return (row.comment or "").strip()
+
+
+def snapshot_row_ui(row: ImpactAnnotation) -> dict[str, Any]:
+    """Copy ORM fields while *row* is session-bound; safe to use after the session closes."""
+    return {
+        "status": str(row.status),
+        "effective_comment": effective_comment(row),
+        "details": parse_details_dict(row),
+        "document_id": int(row.document_id),
+        "version_id": int(row.version_id),
+        "paragraph_index": int(row.paragraph_index),
+        "prompt_id": str(row.prompt_id),
+    }
