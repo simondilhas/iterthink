@@ -187,12 +187,10 @@ jobs:
         run: uv sync
 
       - name: Prefetch embedding model
-        if: matrix.name != 'windows'
         working-directory: ${{ env.ITER_REPO }}
         run: uv run python scripts/prefetch_embed_model.py
 
       - name: Verify sqlite-vec embedding cache
-        if: matrix.name != 'windows'
         working-directory: ${{ env.ITER_REPO }}
         run: uv run python scripts/verify_embedding_cache.py
 
@@ -285,14 +283,6 @@ jobs:
           Get-ChildItem -Force -LiteralPath $env:ITER_REPO | Select-Object Mode, LastWriteTime, Length, Name
           Write-Host "--- .venv presence ---"
           if (Test-Path -LiteralPath (Join-Path $env:ITER_REPO '.venv')) { Write-Host '.venv STILL PRESENT' } else { Write-Host '.venv absent (good)' }
-          Write-Host "--- embedded_models directory tree (depth 4) ---"
-          $embPath = Join-Path $env:ITER_REPO 'iterthink\embedded_models'
-          if (Test-Path -LiteralPath $embPath) {
-            Get-ChildItem -Recurse -Depth 4 -Force -LiteralPath $embPath -ErrorAction SilentlyContinue |
-              Select-Object FullName, Length | Format-Table -AutoSize | Out-String -Width 4096 | Write-Host
-          } else {
-            Write-Host "embedded_models directory does not exist at $embPath"
-          }
           Write-Host "--- total source size ---"
           $size = (Get-ChildItem -Recurse -Force -LiteralPath $env:ITER_REPO -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
           "{0:N1} MB" -f ($size / 1MB)
@@ -346,22 +336,155 @@ jobs:
             --build-version "${BUILD_VERSION}" \
             --build-number "${GITHUB_RUN_NUMBER}"
 
-      - name: Zip build output
+      - name: Stage release output directory
+        working-directory: ${{ env.ITER_REPO }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist/installer
+          mkdir -p dist/installer
+
+      - name: Package portable archive
         working-directory: ${{ env.ITER_REPO }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          python -c "import os, shutil; ws=os.environ['ITER_REPO']; bv=os.environ['BUILD_VERSION']; suf=os.environ['SUFFIX']; sub=os.environ['SUBDIR']; src=os.path.join(ws,'build',sub); dst=os.path.join(ws,f'iterthink-{bv}-{suf}'); shutil.make_archive(dst,'zip',src)"
+          python -c "import os, shutil; ws=os.environ['ITER_REPO']; bv=os.environ['BUILD_VERSION']; suf=os.environ['SUFFIX']; sub=os.environ['SUBDIR']; src=os.path.join(ws,'build',sub); dst=os.path.join(ws,'dist','installer',f'iterthink-{bv}-{suf}'); shutil.make_archive(dst,'zip',src)"
         env:
           ITER_REPO: ${{ env.ITER_REPO }}
           SUFFIX: ${{ matrix.artifact_suffix }}
           SUBDIR: ${{ matrix.build_subdir }}
 
+      - name: Build Windows installer (Inno Setup)
+        if: matrix.name == 'windows'
+        working-directory: ${{ env.ITER_REPO }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            $found = (Get-ChildItem 'C:\Program Files*\Inno Setup*\ISCC.exe' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+            if (-not $found) { throw "Inno Setup 6 (ISCC.exe) not found on runner." }
+            $iscc = $found
+          }
+          Write-Host "Using ISCC: $iscc"
+          & $iscc /Qp "/DMyAppVersion=$env:BUILD_VERSION" `
+            "$env:ITER_REPO\packaging\windows\iterthink_setup.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Get-ChildItem "$env:ITER_REPO\dist\installer" -File | Select-Object Name, Length
+
+      - name: Build macOS DMG
+        if: matrix.name == 'macos'
+        working-directory: ${{ env.ITER_REPO }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v create-dmg >/dev/null 2>&1; then
+            brew install create-dmg
+          fi
+          APP="$(find "$ITER_REPO/build/macos" -maxdepth 5 -name '*.app' -type d -print -quit)"
+          if [[ -z "$APP" ]]; then
+            echo "::error::No .app bundle found under build/macos"
+            ls -la "$ITER_REPO/build/macos" || true
+            exit 1
+          fi
+          echo "Bundling: $APP"
+          STAGE="$(mktemp -d)"
+          cp -R "$APP" "$STAGE/"
+          APP_NAME="$(basename "$APP")"
+          DMG="$ITER_REPO/dist/installer/Iterthink-${BUILD_VERSION}.dmg"
+          # create-dmg can return non-zero even when the DMG is produced (no
+          # notification daemon on CI). Tolerate that, but fail if no file.
+          set +e
+          create-dmg \
+            --volname "Iterthink ${BUILD_VERSION}" \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "$APP_NAME" 175 200 \
+            --app-drop-link 425 200 \
+            --no-internet-enable \
+            "$DMG" \
+            "$STAGE"
+          rc=$?
+          set -e
+          if [[ ! -f "$DMG" ]]; then
+            echo "::error::create-dmg failed (exit $rc) and no DMG was produced"
+            exit "$rc"
+          fi
+          ls -la "$ITER_REPO/dist/installer"
+
+      - name: Build Linux AppImage
+        if: matrix.name == 'linux'
+        working-directory: ${{ env.ITER_REPO }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends \
+            librsvg2-bin libfuse2 desktop-file-utils zsync
+
+          APP_DIR="$ITER_REPO/dist/Iterthink.AppDir"
+          rm -rf "$APP_DIR"
+          mkdir -p "$APP_DIR"
+          cp -a "$ITER_REPO/build/linux/." "$APP_DIR/"
+
+          # Locate the Flet binary (ELF at AppDir root).
+          BIN=""
+          for cand in iterthink Iterthink iterthink.bin; do
+            if [[ -x "$APP_DIR/$cand" && -f "$APP_DIR/$cand" ]]; then
+              BIN="$APP_DIR/$cand"; break
+            fi
+          done
+          if [[ -z "$BIN" ]]; then
+            BIN="$(find "$APP_DIR" -maxdepth 1 -type f -executable -print -quit)"
+          fi
+          if [[ -z "$BIN" ]]; then
+            echo "::error::Could not locate Flet Linux binary in $APP_DIR"
+            ls -la "$APP_DIR"
+            exit 1
+          fi
+          BIN_NAME="$(basename "$BIN")"
+          echo "Linux binary: $BIN_NAME"
+
+          rsvg-convert -w 256 -h 256 \
+            "$ITER_REPO/iterthink/assets/fav.svg" \
+            -o "$APP_DIR/iterthink.png"
+
+          cat > "$APP_DIR/AppRun" <<EOF
+          #!/bin/bash
+          HERE="\$(dirname "\$(readlink -f "\${0}")")"
+          export LD_LIBRARY_PATH="\${HERE}/lib:\${LD_LIBRARY_PATH:-}"
+          cd "\${HERE}"
+          exec "\${HERE}/${BIN_NAME}" "\$@"
+          EOF
+          chmod +x "$APP_DIR/AppRun"
+
+          cat > "$APP_DIR/iterthink.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=Iterthink
+          Comment=Local Markdown writer with Ollama
+          Exec=${BIN_NAME}
+          Icon=iterthink
+          Categories=Utility;TextEditor;Office;
+          Terminal=false
+          EOF
+          desktop-file-validate "$APP_DIR/iterthink.desktop" || true
+
+          curl -fsSL -o "$ITER_REPO/appimagetool.AppImage" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$ITER_REPO/appimagetool.AppImage"
+
+          ARCH=x86_64 "$ITER_REPO/appimagetool.AppImage" --no-appstream \
+            "$APP_DIR" \
+            "$ITER_REPO/dist/installer/Iterthink-${BUILD_VERSION}-x86_64.AppImage"
+
+          ls -la "$ITER_REPO/dist/installer"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.name }}
-          path: ${{ env.ITER_REPO }}/iterthink-${{ env.BUILD_VERSION }}-${{ matrix.artifact_suffix }}.zip
+          path: ${{ env.ITER_REPO }}/dist/installer/*
           if-no-files-found: error
 
   release:
@@ -385,5 +508,9 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Iterthink ${{ github.ref_name }}
           generate_release_notes: true
-          files: assets/*.zip
+          files: |
+            assets/*.zip
+            assets/*.exe
+            assets/*.dmg
+            assets/*.AppImage
           replace_assets: true
