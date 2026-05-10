@@ -28,6 +28,7 @@ Public API
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,44 @@ from iterthink.persistence import store_db
 _DOC_KEY_PREFIX = "impact_rag::"
 
 _CHUNK_MAX_CHARS = 600  # truncation limit when building context strings
+
+# Trivial heading-only chunks (### 0, ### –) and TOC dot leaders pollute norm RAG context.
+_TRIVIAL_HEADING_CHUNK = re.compile(r"^#{1,6}\s*[\d\-–—.]+\s*$", re.MULTILINE)
+
+
+def _chunk_usable_for_norm_context(chunk_stripped: str) -> bool:
+    """Drop low-information chunks so the norm LLM is not fed TOC lines or placeholder headings."""
+    s = chunk_stripped.strip()
+    if len(s) < 20:
+        return False
+    if _TRIVIAL_HEADING_CHUNK.fullmatch(s):
+        return False
+    if len(s) > 60 and s.count(".") / len(s) > 0.22:
+        return False
+    if re.search(r"(?:\.\s*){6,}\d", s):
+        return False
+    return True
+
+
+def _format_ranked_context_parts(
+    scored: list[tuple[float, str, str, int]],
+    *,
+    top_k: int,
+) -> str:
+    """Take up to *top_k* highest-similarity chunks that pass quality filter."""
+    parts: list[str] = []
+    for _sim, fname, chunk, chunk_index in scored:
+        raw = chunk.strip()
+        if not _chunk_usable_for_norm_context(raw):
+            continue
+        snip = raw
+        if len(snip) > _CHUNK_MAX_CHARS:
+            snip = snip[: _CHUNK_MAX_CHARS - 1] + "…"
+        para_num = chunk_index + 1
+        parts.append(f"[{fname}] chunk_index={chunk_index} paragraph={para_num}\n{snip}")
+        if len(parts) >= top_k:
+            break
+    return "\n\n".join(parts)
 
 
 def _doc_key(path: Path) -> str:
@@ -151,17 +190,7 @@ def retrieve_context_for_paragraph(
 
     scored.sort(key=lambda t: t[0], reverse=True)
 
-    parts: list[str] = []
-    for _sim, fname, chunk, chunk_index in scored[:top_k]:
-        snip = chunk.strip()
-        if len(snip) > _CHUNK_MAX_CHARS:
-            snip = snip[:_CHUNK_MAX_CHARS - 1] + "…"
-        para_num = chunk_index + 1
-        parts.append(
-            f"[{fname}] chunk_index={chunk_index} paragraph={para_num}\n{snip}"
-        )
-
-    return "\n\n".join(parts)
+    return _format_ranked_context_parts(scored, top_k=top_k)
 
 
 # --- Version-scoped Impact RAG (DB snapshots + sqlite-vec) -----------------
@@ -278,14 +307,4 @@ def retrieve_context_by_document_ids(
 
     scored.sort(key=lambda t: t[0], reverse=True)
 
-    parts: list[str] = []
-    for _sim, fname, chunk, chunk_index in scored[:top_k]:
-        snip = chunk.strip()
-        if len(snip) > _CHUNK_MAX_CHARS:
-            snip = snip[: _CHUNK_MAX_CHARS - 1] + "…"
-        para_num = chunk_index + 1
-        parts.append(
-            f"[{fname}] chunk_index={chunk_index} paragraph={para_num}\n{snip}"
-        )
-
-    return "\n\n".join(parts)
+    return _format_ranked_context_parts(scored, top_k=top_k)

@@ -15,7 +15,7 @@ from iterthink.compare.paragraph_semantics import embed_texts_cached
 from iterthink.db.session import session_scope
 from iterthink.impact_checks import ImpactCheck
 from iterthink.persistence import impact_annotations as impact_ann
-from iterthink.services import impact_rag
+from iterthink.services import impact_prefilter, impact_rag
 
 _FENCE_PREFIX = re.compile(r"^\s*```(?:json)?\s*", re.IGNORECASE)
 _FENCE_SUFFIX = re.compile(r"\s*```\s*$")
@@ -455,6 +455,26 @@ async def run_impact_analysis(
             await _emit(on_progress, idx, None, None)
             return
         async with sem:
+            if check.id == "norm_compliance":
+                skipped = impact_prefilter.norm_compliance_skip_llm(text)
+                if skipped is not None:
+                    async with _persist_lock:
+                        with session_scope() as s:
+                            impact_ann.upsert_model_result(
+                                s,
+                                document_id=target_document_id,
+                                version_id=target_version_id,
+                                paragraph_index=idx,
+                                prompt_id=check.id,
+                                status=str(skipped["status"]),
+                                comment=str(skipped["comment"]),
+                                details=skipped.get("details")
+                                if isinstance(skipped.get("details"), dict)
+                                else None,
+                            )
+                    results[idx] = skipped
+                    await _emit(on_progress, idx, skipped, None)
+                    return
             try:
                 vecs = await embed_texts_cached(conn, None, [text])
             except BaseException:  # noqa: BLE001
