@@ -27,6 +27,8 @@ Public API
 ``rag_chunk_display_body(chunk)``
     Strips optional ``<!-- iterthink-rag-context-start/end -->`` wrapper so prepended
     retrieval text stays in the embedded string but not in norm LLM context.
+
+Chunk rows store ``chunk_type`` (``ChunkType`` in ``chunk_type``) for retrieval filtering.
 """
 
 from __future__ import annotations
@@ -44,6 +46,8 @@ from iterthink.compare.paragraph_semantics import (
     text_hash,
 )
 from iterthink.persistence import store_db
+
+from .chunk_type import ChunkType, classify_chunk_type, parse_chunk_type
 
 # Namespace prefix so these embeddings never collide with per-document paragraph keys.
 _DOC_KEY_PREFIX = "impact_rag::"
@@ -94,13 +98,13 @@ def _chunk_usable_for_norm_context(chunk_full: str) -> bool:
 
 
 def _format_ranked_context_parts(
-    scored: list[tuple[float, str, str, int]],
+    scored: list[tuple[float, str, str, int, ChunkType]],
     *,
     top_k: int,
 ) -> str:
     """Take up to *top_k* highest-similarity chunks that pass quality filter."""
     parts: list[str] = []
-    for _sim, fname, chunk, chunk_index in scored:
+    for _sim, fname, chunk, chunk_index, chunk_type in scored:
         raw = chunk.strip()
         if not _chunk_usable_for_norm_context(raw):
             continue
@@ -108,7 +112,9 @@ def _format_ranked_context_parts(
         if len(snip) > _CHUNK_MAX_CHARS:
             snip = snip[: _CHUNK_MAX_CHARS - 1] + "…"
         para_num = chunk_index + 1
-        parts.append(f"[{fname}] chunk_index={chunk_index} paragraph={para_num}\n{snip}")
+        parts.append(
+            f"[{fname}] chunk_index={chunk_index} paragraph={para_num} type={chunk_type.value}\n{snip}"
+        )
         if len(parts) >= top_k:
             break
     return "\n\n".join(parts)
@@ -188,6 +194,8 @@ def retrieve_context_for_paragraph(
     file_chunks: dict[Path, list[tuple[str, int]]],
     conn: Any,
     top_k: int = 3,
+    *,
+    chunk_types_include: frozenset[ChunkType] | None = None,
 ) -> str:
     """Return formatted context from the *top_k* chunks most similar to *para_floats*.
 
@@ -198,10 +206,13 @@ def retrieve_context_for_paragraph(
     if not para_floats or not file_chunks:
         return ""
 
-    scored: list[tuple[float, str, str, int]] = []  # (similarity, filename, chunk_text, chunk_index)
+    scored: list[tuple[float, str, str, int, ChunkType]] = []
 
     for path, chunks in file_chunks.items():
         for chunk_index, (chunk_text, vec_rowid) in enumerate(chunks):
+            ct = classify_chunk_type(rag_chunk_display_body(chunk_text))
+            if chunk_types_include is not None and ct not in chunk_types_include:
+                continue
             row = conn.execute(
                 "SELECT embedding FROM paragraph_vec WHERE rowid = ?",
                 (vec_rowid,),
@@ -212,7 +223,7 @@ def retrieve_context_for_paragraph(
             if not chunk_floats:
                 continue
             sim = cosine_sim(para_floats, chunk_floats)
-            scored.append((sim, path.name, chunk_text, chunk_index))
+            scored.append((sim, path.name, chunk_text, chunk_index, ct))
 
     if not scored:
         return ""
@@ -269,6 +280,7 @@ async def ingest_latest_versions_for_document_ids(
             if row is None:
                 continue
             rid = int(row[0])
+            ct = classify_chunk_type(rag_chunk_display_body(chunk))
             store_db.impact_version_chunk_insert_row(
                 conn,
                 doc_id=doc_id,
@@ -279,6 +291,7 @@ async def ingest_latest_versions_for_document_ids(
                 embed_model_id=embed_model_id,
                 chunk_text=chunk,
                 content_sha=sha,
+                chunk_type=ct.value,
             )
         conn.commit()
 
@@ -308,6 +321,8 @@ def retrieve_context_by_document_ids(
     document_ids: list[int],
     labels: dict[int, str],
     top_k: int = 3,
+    *,
+    chunk_types_include: frozenset[ChunkType] | None = None,
 ) -> str:
     """Rank latest-version chunks from ``document_ids`` by cosine similarity to *para_floats*."""
     if not para_floats or not document_ids:
@@ -316,9 +331,12 @@ def retrieve_context_by_document_ids(
     rows = store_db.impact_version_chunk_fetch_latest_rows(conn, document_ids)
     if not rows:
         return ""
-    scored: list[tuple[float, str, str, int]] = []
+    scored: list[tuple[float, str, str, int, ChunkType]] = []
 
-    for doc_id, _ver_id, chunk_idx, vec_rowid, chunk_text in rows:
+    for doc_id, _ver_id, chunk_idx, vec_rowid, chunk_text, chunk_type_raw in rows:
+        ct = parse_chunk_type(chunk_type_raw)
+        if chunk_types_include is not None and ct not in chunk_types_include:
+            continue
         row = conn.execute(
             "SELECT embedding FROM paragraph_vec WHERE rowid = ?",
             (vec_rowid,),
@@ -329,7 +347,7 @@ def retrieve_context_by_document_ids(
         if not chunk_floats:
             continue
         sim = cosine_sim(para_floats, chunk_floats)
-        scored.append((sim, labels.get(int(doc_id), str(doc_id)), chunk_text, int(chunk_idx)))
+        scored.append((sim, labels.get(int(doc_id), str(doc_id)), chunk_text, int(chunk_idx), ct))
 
     if not scored:
         return ""

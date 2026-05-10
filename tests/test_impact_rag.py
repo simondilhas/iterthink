@@ -1,4 +1,4 @@
-"""Tests for impact_rag.retrieve_context_for_paragraph."""
+"""Tests for iterthink.services.rag.impact_rag.retrieve_context_for_paragraph."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import numpy as np
 
 from iterthink.compare.paragraph_semantics import blob_to_floats
 from iterthink.persistence import store_db
-from iterthink.services import impact_rag
+from iterthink.services.rag import impact_rag
 
 _REPO = Path(__file__).resolve().parents[1]
 _SCRATCH = _REPO / ".pytest_store"
@@ -56,13 +56,14 @@ def test_retrieve_context_ranks_by_cosine_similarity() -> None:
         md = Path("/tmp/context_rank.md")
         file_chunks = {
             md: [
-                ("LOW_SIM chunk body", rid2),
-                ("HIGH_SIM chunk body", rid1),
+                ("LOW_SIM chunk body extra padding text.", rid2),
+                ("HIGH_SIM chunk body extra padding text.", rid1),
             ]
         }
         text = impact_rag.retrieve_context_for_paragraph(query, file_chunks, conn, top_k=1)
         assert "HIGH_SIM" in text
         assert "LOW_SIM" not in text
+        assert "type=" in text
     finally:
         conn.close()
         for p in (db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")):

@@ -13,7 +13,7 @@ import sqlite_vec
 
 from iterthink import config
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SETTINGS_CHAT = "ollama_chat_model"
 SETTINGS_EMBED = "ollama_embed_model"
@@ -136,6 +136,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_impact_version_chunk_doc_ver
             ON impact_version_chunk (doc_id, ver_id);
+            """
+        )
+    if ver < 5:
+        conn.executescript(
+            """
+            ALTER TABLE impact_version_chunk ADD COLUMN chunk_type TEXT NOT NULL DEFAULT 'unknown';
             """
         )
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -330,14 +336,15 @@ def impact_version_chunk_insert_row(
     embed_model_id: str,
     chunk_text: str,
     content_sha: str,
+    chunk_type: str = "unknown",
 ) -> None:
     now = time.time()
     conn.execute(
         """
         INSERT INTO impact_version_chunk (
             doc_id, ver_id, chunk_index, input_hash, vec_rowid, embed_model_id,
-            chunk_text, content_sha, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            chunk_text, content_sha, chunk_type, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             doc_id,
@@ -348,6 +355,7 @@ def impact_version_chunk_insert_row(
             embed_model_id,
             chunk_text,
             content_sha,
+            chunk_type,
             now,
         ),
     )
@@ -355,13 +363,13 @@ def impact_version_chunk_insert_row(
 
 def impact_version_chunk_fetch_latest_rows(
     conn: sqlite3.Connection, doc_ids: list[int]
-) -> list[tuple[int, int, int, int, str]]:
-    """Rows for each doc_id at its highest stored ver_id: (doc_id, ver_id, idx, vec_rowid, chunk_text)."""
+) -> list[tuple[int, int, int, int, str, str]]:
+    """Rows at max ver_id per doc: (doc_id, ver_id, idx, vec_rowid, chunk_text, chunk_type)."""
     if not doc_ids:
         return []
     placeholders = ",".join("?" * len(doc_ids))
     sql = f"""
-    SELECT c.doc_id, c.ver_id, c.chunk_index, c.vec_rowid, c.chunk_text
+    SELECT c.doc_id, c.ver_id, c.chunk_index, c.vec_rowid, c.chunk_text, c.chunk_type
     FROM impact_version_chunk c
     INNER JOIN (
         SELECT doc_id AS d, MAX(ver_id) AS mv
@@ -372,7 +380,7 @@ def impact_version_chunk_fetch_latest_rows(
     ORDER BY c.doc_id, c.chunk_index
     """
     rows = conn.execute(sql, doc_ids).fetchall()
-    return [(int(r[0]), int(r[1]), int(r[2]), int(r[3]), str(r[4])) for r in rows]
+    return [(int(r[0]), int(r[1]), int(r[2]), int(r[3]), str(r[4]), str(r[5])) for r in rows]
 
 
 def impact_version_embeddings_complete(

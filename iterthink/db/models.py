@@ -1,4 +1,13 @@
-"""ORM models: documents and version snapshots metadata."""
+"""ORM models: documents and version snapshots metadata only.
+
+Embeddings / Impact RAG (sqlite-vec) are not defined here. Start from:
+
+- ``iterthink.persistence.store_db`` — loads sqlite-vec, ``init_schema()`` creates
+  ``paragraph_vec`` (vec0), embedding cache, manifest, ``impact_version_chunk``.
+- ``iterthink.compare.paragraph_semantics`` — ``embed_texts_cached()`` writes vectors.
+- ``iterthink.services.rag.impact_rag`` — project-file and version-scoped ingest
+  and retrieval over those tables.
+"""
 
 from __future__ import annotations
 
