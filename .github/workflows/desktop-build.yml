@@ -144,18 +144,27 @@ jobs:
           [System.IO.File]::AppendAllText($env:GITHUB_ENV, "ITER_REPO=C:\b\w`n", $utf8)
           exit 0
 
-      # serious_python extracts standalone CPython with `Process.run('tar', ...)`; Git Bash
-      # PATH can hide System32 from native Dart. Short TEMP avoids long-path edge cases.
+      # serious_python runs `Process.run('tar', ...)`; flet merges `self.env['PATH']` (Flutter bin
+      # + cleaned PATH from the Python that launched flet). `uv run` can start with a minimal PATH
+      # without System32, so Dart never finds tar — copy tar.exe to a short prefix and prepend both.
       - name: Windows Flet host environment
         if: matrix.name == 'windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path 'C:\b\t' | Out-Null
+          New-Item -ItemType Directory -Force -Path 'C:\b\bin' | Out-Null
+          $sysTar = Join-Path $env:SystemRoot 'System32\tar.exe'
+          if (-not (Test-Path -LiteralPath $sysTar)) { throw "Missing $sysTar" }
+          Copy-Item -LiteralPath $sysTar -Destination 'C:\b\bin\tar.exe' -Force
+          Add-Content -Path $env:GITHUB_PATH -Value 'C:\b\bin'
           Add-Content -Path $env:GITHUB_PATH -Value 'C:\Windows\System32'
+          $gitCmd = 'C:\Program Files\Git\cmd'
+          if (Test-Path -LiteralPath $gitCmd) { Add-Content -Path $env:GITHUB_PATH -Value $gitCmd }
           $utf8 = New-Object System.Text.UTF8Encoding $false
           [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TEMP=C:\b\t`n", $utf8)
           [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TMP=C:\b\t`n", $utf8)
-          $env:PATH = 'C:\Windows\System32;' + $env:PATH
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "UV_LINK_MODE=copy`n", $utf8)
+          $env:PATH = 'C:\b\bin;C:\Windows\System32;' + $env:PATH
           Write-Host '--- tar (serious_python bootstrap) ---'
           where.exe tar
 
@@ -195,6 +204,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $env:PATH = 'C:\b\bin;C:\Windows\System32;' + $env:PATH
+          $g = 'C:\Program Files\Git\cmd'
+          if (Test-Path -LiteralPath $g) { $env:PATH = "$g;$env:PATH" }
+          Write-Host "PATH prefix (first 280 chars): $($env:PATH.Substring(0, [Math]::Min(280, $env:PATH.Length)))"
           uv run flet build windows --yes -vv `
             --build-version $env:BUILD_VERSION `
             --build-number $env:GITHUB_RUN_NUMBER
