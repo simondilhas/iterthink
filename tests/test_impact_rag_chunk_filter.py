@@ -1,6 +1,6 @@
 """RAG chunk quality filter for norm context."""
 
-from iterthink.services.impact_rag import _chunk_usable_for_norm_context
+from iterthink.services.impact_rag import _chunk_usable_for_norm_context, rag_chunk_display_body
 
 
 def test_rejects_trivial_heading_chunk() -> None:
@@ -26,3 +26,26 @@ def test_accepts_substantive_excerpt() -> None:
         "müssen den Anforderungen an Dampfbremsen genügen."
     )
     assert _chunk_usable_for_norm_context(s)
+
+
+def test_rag_context_wrapper_stripped_for_display() -> None:
+    inner = (
+        "2.1 Foo   . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 7\n"
+        "2.2 Bar   . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 7"
+    )
+    body = (
+        "Bauzeitabdichtungen, die später als Dampfbremse belassen werden, "
+        "müssen den Anforderungen an Dampfbremsen genügen."
+    )
+    wrapped = (
+        f"<!-- iterthink-rag-context-start -->\n{inner}\n<!-- iterthink-rag-context-end -->\n\n{body}"
+    )
+    assert rag_chunk_display_body(wrapped).strip() == body
+    assert _chunk_usable_for_norm_context(wrapped)
+
+
+def test_rag_context_wrapper_body_still_rejected_if_junk() -> None:
+    wrapped = (
+        "<!-- iterthink-rag-context-start -->\n# ok\n<!-- iterthink-rag-context-end -->\n\n### 0"
+    )
+    assert not _chunk_usable_for_norm_context(wrapped)

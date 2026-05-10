@@ -169,8 +169,7 @@ jobs:
         run: echo "ITER_REPO=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
 
       # Workaround for flet-dev/flet#6332: dependency strings with `<` and no preceding
-      # space crash the Dart subprocess on Windows. PEP 440 ignores whitespace, so
-      # inserting a space is semantically a no-op.
+      # space crash the Dart subprocess on Windows. PEP 440 ignores whitespace.
       - name: Patch pyproject.toml version specifiers
         working-directory: ${{ env.ITER_REPO }}
         shell: pwsh
@@ -191,12 +190,20 @@ jobs:
         working-directory: ${{ env.ITER_REPO }}
         run: uv sync
 
-      # Even though pyproject.toml lists `.venv` under [tool.flet] excludes, serious_python
-      # still walks into it for the source-copy step on Windows, where uv venvs may contain
-      # symlinks/junctions or files with characters Dart's File.copy can't handle. Easiest
-      # fix: physically remove .venv from the build source after we're done with uv sync.
-      # uv re-created it inside C:\b\w during the previous step; flet doesn't need it
-      # because serious_python provisions its own embedded Python anyway.
+      - name: Prefetch embedding model
+        working-directory: ${{ env.ITER_REPO }}
+        run: uv run python scripts/prefetch_embed_model.py
+
+      - name: Verify sqlite-vec embedding cache
+        working-directory: ${{ env.ITER_REPO }}
+        run: uv run python scripts/verify_embedding_cache.py
+
+      # Now that uv-based steps are done, strip .venv (and any __pycache__) from the
+      # source tree on Windows. serious_python's source-copy step on Windows chokes on
+      # symlinks/junctions and locked DLLs that uv venvs contain (see flet-dev/flet#4246).
+      # Even with `.venv` listed in [tool.flet] excludes, the exclusion isn't reliable
+      # for `flet build`'s pre-package copy on every version. Physically removing it is
+      # the robust workaround. flet/serious_python provisions its own embedded Python.
       - name: Strip .venv from build source (Windows)
         if: matrix.name == 'windows'
         working-directory: ${{ env.ITER_REPO }}
@@ -205,14 +212,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $venv = Join-Path $env:ITER_REPO '.venv'
           if (Test-Path -LiteralPath $venv) {
-            Write-Host "Removing $venv (serious_python will provision its own Python)"
-            # Use cmd's rmdir /s /q which handles symlinks/junctions cleanly.
+            Write-Host "Removing $venv"
             cmd /c "rmdir /s /q `"$venv`""
             if (Test-Path -LiteralPath $venv) { throw "Failed to remove $venv" }
           } else {
             Write-Host "No .venv to remove."
           }
-          # Same for any stray __pycache__ dirs that uv may have created inside the source.
           Get-ChildItem -LiteralPath $env:ITER_REPO -Recurse -Force -Directory `
             -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -eq '__pycache__' } |
@@ -220,13 +225,15 @@ jobs:
               cmd /c "rmdir /s /q `"$($_.FullName)`"" | Out-Null
             }
 
+      # serious_python subprocess-calls `python3` / `pip3`. The runner-provided Python
+      # from hostedtoolcache only has python.exe / pip.exe — drop shims so Dart's
+      # Process.run resolves them via CreateProcess.
       - name: Create python3 / pip3 shims (Windows)
         if: matrix.name == 'windows'
         working-directory: ${{ env.ITER_REPO }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # .venv was just removed — use the runner-provided Python from hostedtoolcache.
           $py = (where.exe python | Select-Object -First 1).Trim()
           if (-not (Test-Path -LiteralPath $py)) { throw "Could not resolve python.exe (got '$py')" }
           Write-Host "Resolved python: $py"
@@ -249,31 +256,6 @@ jobs:
           python3 --version
           where.exe pip3
 
-      # On non-Windows we keep the previous flow (uv-managed venv stays, prefetch + verify
-      # run inside it). On Windows we skip these because we just removed .venv.
-      - name: Prefetch embedding model (non-Windows)
-        if: matrix.name != 'windows'
-        working-directory: ${{ env.ITER_REPO }}
-        run: uv run python scripts/prefetch_embed_model.py
-
-      - name: Verify sqlite-vec embedding cache (non-Windows)
-        if: matrix.name != 'windows'
-        working-directory: ${{ env.ITER_REPO }}
-        run: uv run python scripts/verify_embedding_cache.py
-
-      # Run the prefetch/verify on Windows too, but using the runner's Python directly so
-      # we don't need .venv. Install the minimum deps these scripts need into the user
-      # site or use uvx if simpler. Adjust the dep list to match what the scripts import.
-      - name: Prefetch + verify (Windows)
-        if: matrix.name == 'windows'
-        working-directory: ${{ env.ITER_REPO }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # uv run --with installs deps into an ephemeral env — no .venv recreated in source.
-          uv run --with-requirements pyproject.toml --no-project python scripts/prefetch_embed_model.py
-          uv run --with-requirements pyproject.toml --no-project python scripts/verify_embedding_cache.py
-
       - name: Set build version
         shell: pwsh
         run: |
@@ -286,8 +268,6 @@ jobs:
           $utf8 = New-Object System.Text.UTF8Encoding $false
           [System.IO.File]::AppendAllText($env:GITHUB_ENV, "BUILD_VERSION=$bv`n", $utf8)
 
-      # Pre-build sanity dump: confirm there's no .venv, no oversized junk, and show the
-      # tree size. Helps explain failures fast.
       - name: Pre-build source audit (Windows)
         if: matrix.name == 'windows'
         working-directory: ${{ env.ITER_REPO }}
@@ -316,9 +296,8 @@ jobs:
           where.exe python3
           where.exe python
           where.exe pip3
-          # uvx runs flet-cli without needing a project venv, and inherits PATH.
-          # `2>&1` ensures stderr from the dart subprocess is interleaved into stdout
-          # so we actually see what serious_python:main is doing.
+          # uvx runs flet-cli without using the project's .venv (we just removed it).
+          # 2>&1 surfaces the dart subprocess's stderr inline so we can see what's wrong.
           uvx --from flet-cli flet build windows --yes -vv `
             --build-version $env:BUILD_VERSION `
             --build-number $env:GITHUB_RUN_NUMBER 2>&1
