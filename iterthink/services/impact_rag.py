@@ -23,6 +23,10 @@ Public API
 
 ``retrieve_context_by_document_ids(para_floats, conn, session, document_ids)``
     Cosine-ranked context from latest-version chunks only.
+
+``rag_chunk_display_body(chunk)``
+    Strips optional ``<!-- iterthink-rag-context-start/end -->`` wrapper so prepended
+    retrieval text stays in the embedded string but not in norm LLM context.
 """
 
 from __future__ import annotations
@@ -46,13 +50,38 @@ _DOC_KEY_PREFIX = "impact_rag::"
 
 _CHUNK_MAX_CHARS = 600  # truncation limit when building context strings
 
+# Optional: retrieval prefix in HTML comments is embedded with the chunk (header/path
+# terms shift the vector) but stripped for norm junk checks and LLM snippets.
+_RAG_CTX_START = re.compile(r"<!--\s*iterthink-rag-context-start\s*-->", re.IGNORECASE)
+_RAG_CTX_END = re.compile(r"<!--\s*iterthink-rag-context-end\s*-->", re.IGNORECASE)
+
 # Trivial heading-only chunks (### 0, ### –) and TOC dot leaders pollute norm RAG context.
 _TRIVIAL_HEADING_CHUNK = re.compile(r"^#{1,6}\s*[\d\-–—.]+\s*$", re.MULTILINE)
 
 
-def _chunk_usable_for_norm_context(chunk_stripped: str) -> bool:
-    """Drop low-information chunks so the norm LLM is not fed TOC lines or placeholder headings."""
-    s = chunk_stripped.strip()
+def rag_chunk_display_body(chunk: str) -> str:
+    """Substantive body for prompts and junk heuristics.
+
+    Text between ``<!-- iterthink-rag-context-start -->`` and
+    ``<!-- iterthink-rag-context-end -->`` is kept in the stored chunk for embedding
+    quality; this function returns everything after that block. Chunks without
+    markers are returned unchanged (stripped).
+    """
+    s = chunk.strip()
+    start_m = _RAG_CTX_START.search(s)
+    if not start_m:
+        return s
+    tail = s[start_m.end() :]
+    end_m = _RAG_CTX_END.search(tail)
+    if not end_m:
+        return s
+    body = tail[end_m.end() :].strip()
+    return body if body else s
+
+
+def _chunk_usable_for_norm_context(chunk_full: str) -> bool:
+    """Drop low-information chunks for norm RAG; heuristics use display body only."""
+    s = rag_chunk_display_body(chunk_full).strip()
     if len(s) < 20:
         return False
     if _TRIVIAL_HEADING_CHUNK.fullmatch(s):
@@ -75,7 +104,7 @@ def _format_ranked_context_parts(
         raw = chunk.strip()
         if not _chunk_usable_for_norm_context(raw):
             continue
-        snip = raw
+        snip = rag_chunk_display_body(raw).strip()
         if len(snip) > _CHUNK_MAX_CHARS:
             snip = snip[: _CHUNK_MAX_CHARS - 1] + "…"
         para_num = chunk_index + 1
