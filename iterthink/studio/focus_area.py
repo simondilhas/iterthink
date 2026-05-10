@@ -429,6 +429,42 @@ class MarkdownStudioCompose:
             self._compose_tab_filename_text.update()
         if _ctrl_on_page(self._compose_tab_filename_hit):
             self._compose_tab_filename_hit.update()
+        self._apply_focus_preview_mode()
+
+    def _toggle_focus_preview_mode(self) -> None:
+        if self._main_tab_index != TAB_PRESENT:
+            return
+        self._focus_view_mode = (
+            "preview" if self._focus_view_mode == "edit" else "edit"
+        )
+        self._apply_focus_preview_mode()
+
+    def _apply_focus_preview_mode(self) -> None:
+        on_focus = self._main_tab_index == TAB_PRESENT
+        has_file = self.current_path is not None
+        # Force back to edit when not on Focus so the next entry starts clean.
+        if not on_focus:
+            self._focus_view_mode = "edit"
+        in_preview = self._focus_view_mode == "preview"
+        self._focus_preview_toggle_btn.visible = on_focus and has_file
+        if in_preview:
+            self._compose_preview_md.value = self.editor.value or ""
+        self._compose_editor_shell_wrapped.visible = not in_preview
+        self._compose_preview_host.visible = in_preview
+        self._focus_preview_toggle_btn.icon = (
+            ft.Icons.MODE_EDIT_OUTLINE if in_preview else ft.Icons.VISIBILITY_OUTLINED
+        )
+        self._focus_preview_toggle_btn.tooltip = (
+            "Edit markdown" if in_preview else "Preview rendered markdown"
+        )
+        for c in (
+            self._focus_preview_toggle_btn,
+            self._compose_editor_shell_wrapped,
+            self._compose_preview_host,
+            self._compose_preview_md,
+        ):
+            if _ctrl_on_page(c):
+                c.update()
 
     def _compose_tab_exit_rename_mode(self) -> None:
         self._compose_tab_inline_rename_active = False

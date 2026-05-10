@@ -248,6 +248,3 @@ margin_actions:
       No fenced code blocks, no emojis, no hashtags.
       Output only the resulting text. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
     user_template: "Improve the call to action:\n\n{text}"
-
-
-

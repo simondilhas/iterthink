@@ -13,7 +13,7 @@ from ollama import AsyncClient
 
 from iterthink import config
 from iterthink.ai import passphrase_keyring
-from iterthink.persistence import store_db, vault_store, version_storage
+from iterthink.persistence import impact_annotations, store_db, vault_store, version_storage
 from iterthink.services import markdown_docx_export
 
 from . import ui_theme
@@ -24,6 +24,7 @@ from .formats.ifc import MarkdownStudioIfcFormat
 from .formats.pdf_docx import MarkdownStudioAssetCompare
 
 from .checks_ui import MarkdownStudioChecksUi
+from .impact_ui import MarkdownStudioImpactMixin
 from .constants import (
     COMPARE_COL_FONT_SIZE,
     COMPARE_COL_LINE_HEIGHT,
@@ -82,6 +83,7 @@ class MarkdownStudio(
     MarkdownStudioSidebars,
     MarkdownStudioKiSidebar,
     MarkdownStudioExplorer,
+    MarkdownStudioImpactMixin,
     MarkdownStudioChecksUi,
     MarkdownStudioAssetCompare,   # PDF / DOCX compare rendering
     MarkdownStudioIfcFormat,      # IFC compare rendering (placeholder)
@@ -95,6 +97,7 @@ class MarkdownStudio(
         self._menu_bar: ft.MenuBar | None = None
         self.ollama = AsyncClient(host=config.OLLAMA_HOST) if config.OLLAMA_HOST else AsyncClient()
         self._db = store_db.connect()
+        store_db.init_schema(self._db)
         self.ollama_model: str = store_db.settings_get(self._db, store_db.SETTINGS_CHAT) or config.DEFAULT_OLLAMA_MODEL
         self._api_secrets_cache: dict[str, str] | None = None
         if vault_store.vault_exists():
@@ -141,7 +144,7 @@ class MarkdownStudio(
         self._compare_newer_version_id: int | None = None
         self._compare_newer_cached_body: str = ""
         self._compare_newer_dropdown_hover: bool = False
-        # Set before switching to History after Word/PDF import so tab sync does not clobber baseline.
+        # Optional: set before switching to History so tab sync picks a specific snapshot (legacy paths).
         self._pending_post_import_history_vid: int | None = None
         self._pending_ai_accept_action_id: str | None = None
         # AI proposal book-keeping: every change-topic reply persists an ai_proposal snapshot;
@@ -278,10 +281,32 @@ class MarkdownStudio(
             content=self._compose_editor_and_actions_stack,
             expand=True,
         )
+        self._focus_view_mode: Literal["edit", "preview"] = "edit"
+        self._compose_preview_md = ft.Markdown(
+            value="",
+            selectable=True,
+            extension_set=ft.MarkdownExtensionSet.GITHUB_FLAVORED,
+        )
+        self._compose_preview_host = ft.Container(
+            expand=True,
+            visible=False,
+            padding=ft.padding.only(
+                left=COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX,
+                right=COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX,
+                top=COMPOSE_EDITOR_CONTENT_PAD_TOP_PX,
+                bottom=0,
+            ),
+            content=ft.Column(
+                [self._compose_preview_md],
+                scroll=ft.ScrollMode.AUTO,
+                expand=True,
+            ),
+        )
         self._compose_reading_inner = ft.Column(
             [
                 self._compose_plan_host,
                 self._compose_editor_shell_wrapped,
+                self._compose_preview_host,
             ],
             expand=True,
             spacing=8,
@@ -569,13 +594,73 @@ class MarkdownStudio(
             padding=ft.padding.symmetric(horizontal=4, vertical=2),
         )
         self._future_paragraph_layer = ft.Container(content=self._future_rows_listview, expand=True)
+        self._future_pdf_left_lv = ft.ListView(
+            expand=True,
+            spacing=8,
+            padding=ft.padding.all(8),
+            on_scroll=self._on_future_pdf_scroll_left,
+        )
+        self._future_pdf_right_lv = ft.ListView(
+            expand=True,
+            spacing=6,
+            padding=ft.padding.all(8),
+            on_scroll=self._on_future_pdf_scroll_right,
+        )
+        self._future_pdf_split_row = ft.Row(
+            [
+                ft.Container(
+                    content=self._future_pdf_left_lv,
+                    expand=True,
+                    border=ft.border.all(1, ui_theme.outline_muted(alpha=0.38)),
+                    border_radius=8,
+                ),
+                ft.Container(
+                    content=self._future_pdf_right_lv,
+                    expand=True,
+                    border=ft.border.all(1, ui_theme.outline_muted(alpha=0.38)),
+                    border_radius=8,
+                ),
+            ],
+            expand=True,
+            spacing=8,
+        )
+        self._future_pdf_layer = ft.Container(
+            content=self._future_pdf_split_row,
+            expand=True,
+            visible=False,
+        )
+        self._future_pdf_import_md_tf = ft.TextField(
+            multiline=True,
+            max_lines=None,
+            min_lines=1,
+            border=ft.InputBorder.NONE,
+            filled=False,
+            dense=True,
+            text_size=COMPARE_COL_FONT_SIZE,
+            text_style=ft.TextStyle(
+                font_family="monospace",
+                size=COMPARE_COL_FONT_SIZE,
+                height=COMPARE_COL_LINE_HEIGHT,
+                color=ui_theme.editor_text_color(),
+            ),
+            cursor_color=config.PRIMARY_COLOR,
+            selection_color=config.SELECTION_OVERLAY,
+            content_padding=ft.padding.all(8),
+            expand=True,
+            enable_interactive_selection=True,
+            on_change=self._on_future_pdf_import_md_change,
+        )
         self._future_body_stack = ft.Stack(
             controls=[
                 self._future_paragraph_layer,
+                self._future_pdf_layer,
                 self._future_result_card_overlay,
             ],
             expand=True,
         )
+        self._pill_row_impact = ft.Row(spacing=4, wrap=True, run_spacing=4)
+        self._impact_summary_cache: str = ""
+        self._init_impact_ui_fields()
         self._review_change_panel = ft.Container(
             expand=True,
             content=ft.Column(
@@ -584,14 +669,86 @@ class MarkdownStudio(
                 spacing=0,
             ),
         )
+        self._impact_status_text = ft.Text(
+            "",
+            size=13,
+            color=config.ON_SURFACE_VARIANT,
+            text_align=ft.TextAlign.CENTER,
+        )
+        self._impact_results_list = ft.ListView(
+            expand=True,
+            spacing=4,
+            padding=ft.padding.symmetric(horizontal=8, vertical=4),
+            visible=False,
+        )
+        self._impact_summary_text = ft.Text(
+            "",
+            size=12,
+            color=config.ON_SURFACE,
+            selectable=True,
+        )
+        self._impact_summary_container = ft.Container(
+            visible=False,
+            padding=ft.padding.all(10),
+            border=ft.border.all(1, config.OUTLINE),
+            border_radius=8,
+            margin=ft.margin.only(top=4, left=8, right=8, bottom=8),
+            content=ft.Column(
+                [
+                    ft.Text(
+                        "Summary",
+                        size=11,
+                        weight=ft.FontWeight.W_600,
+                        color=config.ON_SURFACE_VARIANT,
+                    ),
+                    self._impact_summary_text,
+                ],
+                spacing=4,
+                tight=True,
+            ),
+        )
+        self._impact_para_listview = ft.ListView(
+            expand=True,
+            spacing=0,
+            padding=ft.padding.symmetric(horizontal=4, vertical=2),
+        )
+        self._impact_result_card_overlay = ft.Container(
+            visible=False,
+            right=0,
+            top=4,
+            width=260,
+            padding=ft.padding.all(10),
+            bgcolor=config.SURFACE,
+            border=ft.border.all(1, config.OUTLINE),
+            border_radius=10,
+            shadow=ft.BoxShadow(blur_radius=8, color=ft.Colors.with_opacity(0.18, ft.Colors.BLACK)),
+            content=ft.Column([], spacing=4, tight=True, scroll=ft.ScrollMode.AUTO),
+        )
         self._review_impact_panel = ft.Container(
             expand=False,
             visible=False,
-            alignment=ft.Alignment.CENTER,
-            content=ft.Text(
-                "Impact analysis coming soon",
-                size=13,
-                color=config.ON_SURFACE_VARIANT,
+            content=ft.Column(
+                [
+                    ft.Container(
+                        content=self._impact_status_text,
+                        alignment=ft.Alignment.CENTER,
+                        padding=ft.padding.symmetric(vertical=6),
+                    ),
+                    ft.Container(
+                        expand=True,
+                        alignment=ft.Alignment.TOP_CENTER,
+                        content=ft.Container(
+                            width=680,
+                            expand=True,
+                            content=ft.Stack(
+                                [self._impact_para_listview, self._impact_result_card_overlay],
+                                expand=True,
+                            ),
+                        ),
+                    ),
+                ],
+                expand=True,
+                spacing=0,
             ),
         )
 
@@ -634,14 +791,24 @@ class MarkdownStudio(
             color=config.ON_SURFACE_VARIANT,
             visible=False,
         )
+        self._focus_preview_toggle_btn = ft.IconButton(
+            icon=ft.Icons.VISIBILITY_OUTLINED,
+            icon_size=18,
+            icon_color=config.ON_SURFACE_VARIANT,
+            tooltip="Preview rendered markdown",
+            style=ft.ButtonStyle(padding=ft.padding.all(2)),
+            visible=False,
+            on_click=lambda _e: self._toggle_focus_preview_mode(),
+        )
         self._compose_tab_filename_row = ft.Row(
             [
                 self._compose_tab_filename_hit,
                 self._compose_tab_filename_field,
                 self._compose_tab_filename_suffix_text,
+                self._focus_preview_toggle_btn,
             ],
             tight=True,
-            spacing=0,
+            spacing=4,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         # Under main History | Focus | Review tabs on every mode (rename targets this row).
@@ -1071,6 +1238,22 @@ class MarkdownStudio(
         self._analyse_buttons: dict[str, ft.FilledButton] = {}
         self._analyse_button_progress: dict[str, ft.ProgressRing] = {}
         self._analyse_button_count: dict[str, ft.Text] = {}
+        # Impact checks (impact_checks.yaml) in the KI Analyse tab; visible on Review → Impact only.
+        self._impact_analyse_section = ft.Container(
+            visible=False,
+            padding=ft.padding.only(top=4),
+            content=ft.Column(
+                [
+                    self._pill_row_impact,
+                    ft.Container(
+                        padding=ft.padding.only(top=6),
+                        content=ft.Row([self._impact_run_btn], tight=True),
+                    ),
+                ],
+                spacing=2,
+                tight=True,
+            ),
+        )
         self._ki_tab_body_heights: list[float] = [
             float(KI_TAB_BODY_MIN_HEIGHT_PX),
             float(KI_TAB_BODY_MIN_HEIGHT_PX),
@@ -1099,7 +1282,11 @@ class MarkdownStudio(
                         horizontal=4,
                         vertical=KI_TAB_PAGE_PAD_V_PX,
                     ),
-                    content=self._pill_row_analyse,
+                    content=ft.Column(
+                        [self._pill_row_analyse, self._impact_analyse_section],
+                        spacing=0,
+                        tight=True,
+                    ),
                 ),
                 self._ki_act_container,
             ],
@@ -1240,6 +1427,56 @@ class MarkdownStudio(
                 spacing=8,
             ),
         )
+        self._impact_ki_context_title = ft.Text(
+            "Context files (.md)",
+            size=11,
+            weight=ft.FontWeight.W_600,
+            color=config.ON_SURFACE_VARIANT,
+            visible=False,
+        )
+        self._impact_ki_context_scroll = ft.Column(
+            [],
+            scroll=ft.ScrollMode.AUTO,
+            height=200,
+            spacing=0,
+            tight=True,
+            visible=False,
+        )
+        self._impact_ki_context_panel = ft.Container(
+            visible=False,
+            padding=ft.padding.only(bottom=4),
+            content=ft.Column(
+                [self._impact_ki_context_title, self._impact_ki_context_scroll],
+                spacing=4,
+                tight=True,
+            ),
+        )
+        self._impact_summary_right_text = ft.Text(
+            "",
+            size=11,
+            color=config.ON_SURFACE,
+            selectable=True,
+        )
+        self._impact_summary_right = ft.Container(
+            visible=False,
+            padding=ft.padding.all(8),
+            border=ft.border.all(1, ui_theme.outline_muted(alpha=0.35)),
+            border_radius=8,
+            margin=ft.margin.only(bottom=4),
+            content=ft.Column(
+                [
+                    ft.Text(
+                        "Impact summary",
+                        size=10,
+                        weight=ft.FontWeight.W_600,
+                        color=config.ON_SURFACE_VARIANT,
+                    ),
+                    self._impact_summary_right_text,
+                ],
+                spacing=4,
+                tight=True,
+            ),
+        )
         self._ki_sidebar_well = ft.Container(
             expand=True,
             bgcolor=config.SURFACE,
@@ -1249,6 +1486,8 @@ class MarkdownStudio(
             content=ft.Column(
                 [
                     self._ki_topic_tabs,
+                    self._impact_ki_context_panel,
+                    self._impact_summary_right,
                     self._right_chat_section,
                 ],
                 expand=True,
@@ -1260,6 +1499,7 @@ class MarkdownStudio(
         self._pill_row_discuss.on_size_change = self._on_ki_pill_row_size_discuss
         self._pill_row_change.on_size_change = self._on_ki_pill_row_size_change
         self._pill_row_analyse.on_size_change = self._on_ki_pill_row_size_analyse
+        self._pill_row_impact.on_size_change = self._on_ki_pill_row_size_analyse
         self._ki_act_container.on_size_change = self._on_ki_pill_row_size_act
 
         self.right_panel = ft.Container(
@@ -1684,15 +1924,30 @@ class MarkdownStudio(
                 title_stem=md_path.stem,
                 author=author,
                 date_iso=date.today().isoformat(),
+                comment_author=author,
             )
 
             def _run() -> None:
+                para_comments: dict[int, str] = {}
+                try:
+                    with session_scope() as s:
+                        doc = version_storage.get_document_by_resolved_path(s, md_path)
+                        if doc is not None:
+                            snaps = version_storage.list_snapshots(s, md_path)
+                            if snaps:
+                                vid = snaps[0].version_id
+                                para_comments = impact_annotations.paragraph_comments_map_for_export(
+                                    s, document_id=int(doc.id), version_id=int(vid)
+                                )
+                except BaseException:
+                    para_comments = {}
                 markdown_docx_export.markdown_to_docx(
                     markdown_src=markdown_src,
                     md_path=md_path,
                     template_path=tpl,
                     output_path=out,
                     meta=meta,
+                    paragraph_comments=para_comments or None,
                 )
 
             try:

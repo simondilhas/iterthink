@@ -37,6 +37,9 @@ class MarkdownStudioKiSidebar:
             self._ki_topic_index = int(self._ki_topic_tabs.selected_index)
         self._sync_ki_topic_mode_buttons()
         self._apply_ki_tab_bar_view_height()
+        # Analyse tab: swap compare-check pills vs impact-check pills with Review subtab.
+        if int(self._ki_topic_index) == 2 and hasattr(self, "_sync_impact_ki_context_visibility"):
+            self._sync_impact_ki_context_visibility()
 
     def _sync_ki_topic_mode_buttons(self) -> None:
         ix = self._ki_topic_index

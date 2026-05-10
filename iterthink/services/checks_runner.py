@@ -113,11 +113,22 @@ async def run_paragraph(
     check: Check,
     old: str,
     new: str,
+    context: str = "",
 ) -> tuple[dict | None, str | None]:
     """One LLM call (Ollama or routed HTTP). Returns ``(payload, error)``."""
-    user_text = check.user_template.format(old=old or "", new=new or "")
+    template = check.user_template
+    system = check.system_prompt
+    if context:
+        template = template + "\n\nCONTEXT FROM PROJECT FILES:\n{context}"
+        system = (
+            system.rstrip()
+            + "\n\nWhen CONTEXT FROM PROJECT FILES is provided, use it to ground "
+            "your evaluation in the broader project scope. Consider how this change "
+            "interacts with or affects the referenced project documents."
+        )
+    user_text = template.format(old=old or "", new=new or "", context=context)
     messages = [
-        {"role": "system", "content": check.system_prompt},
+        {"role": "system", "content": system},
         {"role": "user", "content": user_text},
     ]
     try:
@@ -148,6 +159,7 @@ async def run_check_for_document(
     pairs: list[tuple[str, str]],
     on_progress: ProgressCb | None = None,
     use_cache: bool = True,
+    context_per_pair: list[str | None] | None = None,
 ) -> list[dict | None]:
     """Run ``check`` over each ``(old, new)`` pair.
 
@@ -156,9 +168,16 @@ async def run_check_for_document(
     synthetic payload (still written to cache when ``use_cache`` is true).
     Sequential to keep the backend responsive; the spinner-per-row UI
     gives immediate feedback. Uses cache unless ``use_cache=False`` (refresh).
+
+    When ``context_per_pair`` is provided, each non-empty context string is
+    appended to the prompt for that paragraph and the result is not cached
+    (context is not part of the existing cache key).
     """
     results: list[dict | None] = [None] * len(pairs)
     for i, (old, new) in enumerate(pairs):
+        ctx = (
+            (context_per_pair[i] if context_per_pair and i < len(context_per_pair) else None) or ""
+        )
         if not (old or "").strip() and not (new or "").strip():
             await _emit(on_progress, i, None, None)
             continue
@@ -166,7 +185,7 @@ async def run_check_for_document(
         err: str | None = None
         if compute_hash(old) == compute_hash(new):
             payload = unchanged_paragraph_payload(check)
-            if use_cache:
+            if use_cache and not ctx:
                 try:
                     save_result(check.id, old, new, model, payload)
                 except BaseException as exc:  # noqa: BLE001
@@ -174,13 +193,14 @@ async def run_check_for_document(
             results[i] = payload
             await _emit(on_progress, i, payload, err)
             continue
-        if use_cache:
+        # Skip cache when context is present (context not factored into cache key).
+        if use_cache and not ctx:
             payload = load_cached(check.id, old, new, model)
         if payload is None:
             payload, err = await run_paragraph(
-                llm_chat, model=model, check=check, old=old, new=new
+                llm_chat, model=model, check=check, old=old, new=new, context=ctx
             )
-            if payload is not None:
+            if payload is not None and not ctx:
                 try:
                     save_result(check.id, old, new, model, payload)
                 except BaseException as exc:  # noqa: BLE001

@@ -121,13 +121,47 @@ jobs:
             -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
           git config --system core.longpaths true
 
+      # serious_python / Dart hit MAX_PATH when bundling onnxruntime (fastembed); default
+      # GITHUB_WORKSPACE (D:\a\org\repo\...) pushes paths over 260 chars. Mirror to C:\b\w.
+      - name: Mirror repo to short path (Windows)
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path 'C:\b\w' | Out-Null
+          robocopy $env:GITHUB_WORKSPACE 'C:\b\w' /E /MT:16 /NFL /NDL /NJH /NJS /nc /ns /np
+          $code = $LASTEXITCODE
+          if ($code -ge 8) { exit $code }
+          "ITER_REPO=C:\b\w" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # serious_python extracts standalone CPython with `Process.run('tar', ...)`; Git Bash
+      # PATH can hide System32 from native Dart. Short TEMP avoids long-path edge cases.
+      - name: Windows Flet host environment
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'C:\b\t' | Out-Null
+          Add-Content -Path $env:GITHUB_PATH -Value 'C:\Windows\System32'
+          "TEMP=C:\b\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=C:\b\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $env:PATH = 'C:\Windows\System32;' + $env:PATH
+          Write-Host '--- tar (serious_python bootstrap) ---'
+          where.exe tar
+
+      - name: Set build repo path (non-Windows)
+        if: matrix.name != 'windows'
+        shell: bash
+        run: echo "ITER_REPO=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
+
       - name: Sync dependencies
+        working-directory: ${{ env.ITER_REPO }}
         run: uv sync
 
       - name: Prefetch embedding model
+        working-directory: ${{ env.ITER_REPO }}
         run: uv run python scripts/prefetch_embed_model.py
 
       - name: Verify sqlite-vec embedding cache
+        working-directory: ${{ env.ITER_REPO }}
         run: uv run python scripts/verify_embedding_cache.py
 
       - name: Set build version
@@ -139,7 +173,19 @@ jobs:
             echo "BUILD_VERSION=0.0.0+${GITHUB_RUN_NUMBER}" >> "${GITHUB_ENV}"
           fi
 
-      - name: Flet build
+      - name: Flet build (Windows)
+        if: matrix.name == 'windows'
+        working-directory: ${{ env.ITER_REPO }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          uv run flet build windows --yes -vv `
+            --build-version $env:BUILD_VERSION `
+            --build-number $env:GITHUB_RUN_NUMBER
+
+      - name: Flet build (macOS / Linux)
+        if: matrix.name != 'windows'
+        working-directory: ${{ env.ITER_REPO }}
         shell: bash
         run: |
           set -euo pipefail
@@ -148,12 +194,13 @@ jobs:
             --build-number "${GITHUB_RUN_NUMBER}"
 
       - name: Zip build output
+        working-directory: ${{ env.ITER_REPO }}
         shell: bash
         run: |
           set -euo pipefail
           uv run python -c "
           import os, shutil
-          ws = os.environ['GITHUB_WORKSPACE']
+          ws = os.environ['ITER_REPO']
           bv = os.environ['BUILD_VERSION']
           suf = os.environ['SUFFIX']
           sub = os.environ['SUBDIR']
@@ -162,6 +209,7 @@ jobs:
           shutil.make_archive(dst, 'zip', src)
           "
         env:
+          ITER_REPO: ${{ env.ITER_REPO }}
           SUFFIX: ${{ matrix.artifact_suffix }}
           SUBDIR: ${{ matrix.build_subdir }}
 
@@ -169,7 +217,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.name }}
-          path: ${{ github.workspace }}/iterthink-${{ env.BUILD_VERSION }}-${{ matrix.artifact_suffix }}.zip
+          path: ${{ env.ITER_REPO }}/iterthink-${{ env.BUILD_VERSION }}-${{ matrix.artifact_suffix }}.zip
           if-no-files-found: error
 
   release:

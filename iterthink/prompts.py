@@ -38,7 +38,7 @@ def _prompts_path() -> Path:
     return config.STORE_DIR / "prompts.yaml"
 
 
-def _parse_actions(data: Any) -> tuple[MarginAction, ...]:
+def _parse_margin_actions(data: Any) -> tuple[MarginAction, ...]:
     if not isinstance(data, dict):
         raise ValueError("Prompts YAML must be a mapping with 'margin_actions' list.")
     raw_list = data.get("margin_actions")
@@ -77,6 +77,15 @@ def _parse_actions(data: Any) -> tuple[MarginAction, ...]:
     return tuple(out)
 
 
+def _parse_actions(data: Any) -> tuple[MarginAction, ...]:
+    """Backward-compatible name: margin actions only."""
+    return _parse_margin_actions(data)
+
+
+def _validate_prompts_document(data: Any) -> None:
+    _parse_margin_actions(data)
+
+
 def _ensure_prompts_file() -> None:
     config.STORE_DIR.mkdir(parents=True, exist_ok=True)
     path = _prompts_path()
@@ -90,7 +99,9 @@ def reload() -> None:
     _ensure_prompts_file()
     raw = _prompts_path().read_text(encoding="utf-8")
     data = yaml.safe_load(raw)
-    MARGIN_ACTIONS = _parse_actions(data)
+    if not isinstance(data, dict):
+        data = {}
+    MARGIN_ACTIONS = _parse_margin_actions(data)
 
 
 def read_prompts_yaml_text() -> str:
@@ -101,15 +112,23 @@ def read_prompts_yaml_text() -> str:
 def write_prompts_yaml_text(text: str) -> None:
     config.STORE_DIR.mkdir(parents=True, exist_ok=True)
     data = yaml.safe_load(text)
-    _parse_actions(data)  # validate before write
+    _validate_prompts_document(data)
     _prompts_path().write_text(text.rstrip() + "\n", encoding="utf-8")
     reload()
 
 
+def _read_prompts_mapping() -> dict[str, Any]:
+    _ensure_prompts_file()
+    raw = yaml.safe_load(_prompts_path().read_text(encoding="utf-8"))
+    return raw if isinstance(raw, dict) else {}
+
+
 def write_margin_actions_dicts(actions: list[dict[str, Any]]) -> None:
-    """Validate and write margin_actions only (structured editor)."""
-    data = {"margin_actions": actions}
-    _parse_actions(data)
+    """Validate and write margin_actions only (drops legacy impact_actions key if present)."""
+    data = _read_prompts_mapping()
+    data["margin_actions"] = actions
+    data.pop("impact_actions", None)
+    _validate_prompts_document(data)
     dumped = yaml.safe_dump(
         data,
         default_flow_style=False,

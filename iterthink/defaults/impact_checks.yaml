@@ -1,0 +1,72 @@
+# Review → Impact tab: per-paragraph checks with version-scoped RAG context.
+# Runtime file: <store_dir>/impact_checks.yaml (seeded from this file when missing).
+#
+# Each entry: id, label, system_prompt, user_template (must include {text} and {context}).
+#
+# Model JSON schema (strict):
+# {
+#   "status": "stable" | "changed" | "risk",
+#   "comment": "one short line for chip tooltip",
+#   "explanation": "longer reasoning; same language as the paragraph",
+#   "references": [
+#     {"document": "Note.md", "paragraph": 3, "note": "optional short quote or role"}
+#   ]
+# }
+# paragraph = 1-based index within that document (double-newline paragraphs), matching context headers.
+
+impact_checks:
+  - id: impact_crossrefs
+    label: Cross-reference risk
+    system_prompt: >-
+      You assess how a paragraph relates to other project notes.
+      Respond with JSON only. Fields: status ("stable"|"changed"|"risk"), comment (one short line),
+      explanation (longer reasoning), references (array of {document, paragraph, note?} citing
+      context blocks by their document name and paragraph number as shown in CONTEXT).
+      status stable = no material tension with context; changed = wording drift only;
+      risk = contradiction, missing dependency, or policy conflict with context.
+      references may be [] if context was empty or irrelevant. Same language as the paragraph for text fields.
+    user_template: |
+      Paragraph:
+      {text}
+
+      Context from other notes:
+      {context}
+
+      Return JSON only.
+
+  - id: impact_consistency
+    label: Consistency check
+    system_prompt: >-
+      You check internal consistency against related project content.
+      Respond with JSON only. Fields: status ("stable"|"changed"|"risk"), comment (one short line),
+      explanation (longer reasoning), references (array of {document, paragraph, note?}).
+      references may be [] if context was empty or irrelevant. Same language as the paragraph for text fields.
+    user_template: |
+      Paragraph:
+      {text}
+
+      Context:
+      {context}
+
+      Return JSON only.
+
+  - id: norm_compliance
+    label: Norm compliance
+    system_prompt: >-
+      You are an expert in technical norm and standard compliance for engineering and construction
+      (DIN, EN, ISO, VDI, HOAI, VOB, and similar). Assess this single paragraph in light of CONTEXT
+      from other project notes: traceability of norm claims, citation quality, contradictions with
+      cited standards, and enforceability. Respond with JSON only. Fields: status ("stable"|"changed"|"risk"),
+      comment (one short line), explanation (longer reasoning), references (array of {document, paragraph, note?}
+      citing CONTEXT headers). stable = norm references and claims align with context or no norm issue;
+      changed = minor citation/wording drift; risk = missing or wrong norm reference, contradiction with
+      context, or ambiguous requirement vs norms. references may be [] if context empty or irrelevant.
+      Same language as the paragraph for text fields; keep norm identifiers as in the text.
+    user_template: |
+      Paragraph:
+      {text}
+
+      Context from project notes:
+      {context}
+
+      Return JSON only.

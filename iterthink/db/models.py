@@ -5,7 +5,16 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from iterthink.db.base import Base
@@ -52,6 +61,39 @@ class DocumentVersion(Base):
     pdf_profile: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     document: Mapped["Document"] = relationship("Document", back_populates="versions")
+
+
+class ImpactAnnotation(Base):
+    """Per-paragraph Impact tab LLM output (Review → Impact), keyed by snapshot version."""
+
+    __tablename__ = "impact_annotations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version_id: Mapped[int] = mapped_column(
+        ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    paragraph_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    comment: Mapped[str] = mapped_column(Text, nullable=False)
+    details_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    overridden: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    override_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
+    updated_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id",
+            "version_id",
+            "paragraph_index",
+            "prompt_id",
+            name="uq_impact_annotation_key",
+        ),
+    )
 
 
 class ParagraphAnalysis(Base):

@@ -574,7 +574,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.13.0" },
     { name = "cryptography", specifier = ">=42.0.0" },
     { name = "fastembed", specifier = ">=0.8.0" },
-    { name = "flet", specifier = ">=0.80.0" },
+    { name = "flet", specifier = ">=0.84.0,<0.85.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "keyring", specifier = ">=25.0" },
     { name = "markdown-it-py", specifier = ">=3.0.0" },

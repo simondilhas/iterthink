@@ -22,10 +22,16 @@ if config_obj.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+_PLACEHOLDER_DB_URL = "sqlite:///placeholder.db"
+
+
 def get_url() -> str:
     x = context.get_x_argument(as_dictionary=True)
     if x.get("dburl"):
         return x["dburl"]
+    ini_url = config_obj.get_main_option("sqlalchemy.url")
+    if ini_url and ini_url != _PLACEHOLDER_DB_URL:
+        return ini_url
     config.refresh()
     return f"sqlite:///{config.STORE_DB_PATH.resolve()}"
 

@@ -31,6 +31,7 @@ class MarkdownStudioChecksUi:
         self._analyse_buttons.clear()
         self._analyse_button_progress.clear()
         self._analyse_button_count.clear()
+
         for c in checks_mod.CHECKS:
             spinner = ft.ProgressRing(
                 width=10,
@@ -67,13 +68,17 @@ class MarkdownStudioChecksUi:
                     padding=ft.padding.symmetric(horizontal=8, vertical=4),
                 ),
                 tooltip=f"Run {c.label} on every paragraph (cached results reused).",
-                on_click=lambda _e, cid=c.id: self.page.run_task(self._run_check_async, cid),
+                on_click=lambda _e, cid=c.id: self._on_analyse_pill_click(cid),
             )
             self._analyse_buttons[c.id] = btn
             self._analyse_button_progress[c.id] = spinner
             self._analyse_button_count[c.id] = counter
             self._pill_row_analyse.controls.append(btn)
+
         self._refresh_analyse_button_state()
+
+    def _on_analyse_pill_click(self, check_id: str) -> None:
+        self.page.run_task(self._run_check_async, check_id)
 
     def _refresh_analyse_button_state(self) -> None:
         """Highlight the active check's button; show spinner+counter while running."""

@@ -14,15 +14,30 @@ from iterthink.tools.pdf_visual_diff import diff_pdfs_to_overlay_paths
 
 from .. import plan_compare_panel, plan_picture_viewer, ui_theme
 from iterthink.db.session import session_scope
-from ..constants import COMPARE_COL_FONT_SIZE, COMPARE_COL_LINE_HEIGHT, TAB_HISTORY
+from ..constants import COMPARE_COL_FONT_SIZE, COMPARE_COL_LINE_HEIGHT, TAB_FUTURE, TAB_HISTORY
 from ..util import ctrl_on_page as _ctrl_on_page
 
 _PDF_COMPARE_SCROLL_SOURCES = ("pdf_original", "docx_original")
 
 
 class MarkdownStudioAssetCompare:
+    def _on_future_pdf_import_md_change(self, _e: ft.ControlEvent) -> None:
+        v = self._future_pdf_import_md_tf.value or ""
+        if (self.editor.value or "") == v and (self._compare_editor.value or "") == v:
+            return
+        self.editor.value = v
+        self._compare_editor.value = v
+        self._refresh_title_bar()
+        self._kick_debounced_autosave()
+        if _ctrl_on_page(self.editor):
+            self.editor.update()
+
     def _on_compare_pdf_scroll_left(self, e: ft.OnScrollEvent) -> None:
-        if self._compare_pdf_scroll_guard or self._compare_candidate_source not in _PDF_COMPARE_SCROLL_SOURCES:
+        if self._compare_pdf_scroll_guard:
+            return
+        if self._main_tab_index != TAB_HISTORY:
+            return
+        if self._compare_candidate_source not in _PDF_COMPARE_SCROLL_SOURCES:
             return
         if e.event_type != ft.ScrollType.UPDATE:
             return
@@ -42,7 +57,11 @@ class MarkdownStudioAssetCompare:
             self._compare_pdf_scroll_guard = False
 
     def _on_compare_pdf_scroll_right(self, e: ft.OnScrollEvent) -> None:
-        if self._compare_pdf_scroll_guard or self._compare_candidate_source not in _PDF_COMPARE_SCROLL_SOURCES:
+        if self._compare_pdf_scroll_guard:
+            return
+        if self._main_tab_index != TAB_HISTORY:
+            return
+        if self._compare_candidate_source not in _PDF_COMPARE_SCROLL_SOURCES:
             return
         if e.event_type != ft.ScrollType.UPDATE:
             return
@@ -58,8 +77,63 @@ class MarkdownStudioAssetCompare:
         finally:
             self._compare_pdf_scroll_guard = False
 
+    def _on_future_pdf_scroll_left(self, e: ft.OnScrollEvent) -> None:
+        if self._compare_pdf_scroll_guard:
+            return
+        if self._main_tab_index != TAB_FUTURE or self._compare_candidate_source != "pdf_original":
+            return
+        if e.event_type != ft.ScrollType.UPDATE:
+            return
+        self._compare_pdf_left_max_scroll = max(e.max_scroll_extent, 1e-6)
+        ratio = max(0.0, min(1.0, e.pixels / self._compare_pdf_left_max_scroll))
+        target = ratio * max(self._compare_pdf_right_max_scroll, 1e-6)
+        self._compare_pdf_scroll_guard = True
+        self.page.run_task(self._future_pdf_sync_scroll_right_async, target)
+
+    async def _future_pdf_sync_scroll_right_async(self, target: float) -> None:
+        try:
+            await self._future_pdf_right_lv.scroll_to(offset=target, duration=0)
+        finally:
+            self._compare_pdf_scroll_guard = False
+
+    def _on_future_pdf_scroll_right(self, e: ft.OnScrollEvent) -> None:
+        if self._compare_pdf_scroll_guard:
+            return
+        if self._main_tab_index != TAB_FUTURE or self._compare_candidate_source != "pdf_original":
+            return
+        if e.event_type != ft.ScrollType.UPDATE:
+            return
+        self._compare_pdf_right_max_scroll = max(e.max_scroll_extent, 1e-6)
+        ratio = max(0.0, min(1.0, e.pixels / self._compare_pdf_right_max_scroll))
+        target = ratio * max(self._compare_pdf_left_max_scroll, 1e-6)
+        self._compare_pdf_scroll_guard = True
+        self.page.run_task(self._future_pdf_sync_scroll_left_async, target)
+
+    async def _future_pdf_sync_scroll_left_async(self, target: float) -> None:
+        try:
+            await self._future_pdf_left_lv.scroll_to(offset=target, duration=0)
+        finally:
+            self._compare_pdf_scroll_guard = False
+
+    def _sync_future_pdf_layers_visibility(self) -> None:
+        sub = int(getattr(self, "_review_subtab_index", 0) or 0)
+        show = (
+            self._main_tab_index == TAB_FUTURE
+            and sub == 0
+            and self._compare_candidate_source == "pdf_original"
+        )
+        self._future_pdf_layer.visible = show
+        self._future_paragraph_layer.visible = not show
+        if _ctrl_on_page(self._future_pdf_layer):
+            self._future_pdf_layer.update()
+        if _ctrl_on_page(self._future_paragraph_layer):
+            self._future_paragraph_layer.update()
+
     def _sync_compare_pdf_layers_visibility(self) -> None:
-        show_side_by_side = self._compare_candidate_source in _PDF_COMPARE_SCROLL_SOURCES
+        show_side_by_side = (
+            self._compare_candidate_source in _PDF_COMPARE_SCROLL_SOURCES
+            and self._main_tab_index == TAB_HISTORY
+        )
         self._compare_paragraph_layer.visible = not show_side_by_side
         self._compare_pdf_layer.visible = show_side_by_side
         if _ctrl_on_page(self._compare_paragraph_layer):
@@ -254,6 +328,95 @@ class MarkdownStudioAssetCompare:
                     return (vid, rel)
         return self._compare_resolve_pdf_asset()
 
+    def _append_pdf_pages_to_left_list(self, left_lv: ft.ListView, resolved: tuple[int, str] | None) -> None:
+        if resolved is None:
+            left_lv.controls.append(
+                ft.Container(
+                    padding=ft.padding.all(12),
+                    content=ft.Text(
+                        "No PDF asset for this comparison.",
+                        color=ft.Colors.ORANGE_200,
+                        size=13,
+                    ),
+                )
+            )
+            return
+        _, rel = resolved
+        try:
+            pdf_abs = version_storage.pdf_asset_abs_path(rel)
+        except (ValueError, OSError):
+            pdf_abs = None
+        if pdf_abs is None or not pdf_abs.is_file():
+            left_lv.controls.append(
+                ft.Container(
+                    padding=ft.padding.all(12),
+                    content=ft.Text("PDF file missing on disk.", color=ft.Colors.RED_200, size=13),
+                )
+            )
+        else:
+            try:
+                pages = document_import.render_pdf_to_png_pages(pdf_abs)
+                pic_col = plan_picture_viewer.plan_picture_column(pages, inner_scroll=False)
+                left_lv.controls.append(ft.Container(content=pic_col, expand=True))
+            except BaseException as ex:
+                left_lv.controls.append(
+                    ft.Container(
+                        padding=ft.padding.all(12),
+                        content=ft.Text(f"Could not render PDF: {ex}", color=ft.Colors.RED_200, size=12),
+                    )
+                )
+
+    def _append_markdown_to_right_list(
+        self,
+        right_lv: ft.ListView,
+        body: str,
+        *,
+        editable_right: bool,
+    ) -> None:
+        _md_style = ft.TextStyle(
+            font_family="monospace",
+            size=COMPARE_COL_FONT_SIZE,
+            height=COMPARE_COL_LINE_HEIGHT,
+            color=ui_theme.editor_text_color(),
+        )
+        if editable_right:
+            self._future_pdf_import_md_tf.value = body
+            right_lv.controls.append(
+                ft.Container(
+                    padding=ft.padding.all(0),
+                    content=self._future_pdf_import_md_tf,
+                    expand=True,
+                )
+            )
+        else:
+            right_lv.controls.append(
+                ft.Container(
+                    padding=ft.padding.all(8),
+                    content=ft.Text(
+                        body,
+                        selectable=True,
+                        expand=True,
+                        style=_md_style,
+                    ),
+                )
+            )
+
+    def _rebuild_future_pdf_import_panes(self) -> None:
+        """Review tab: PDF left, editable markdown right (import snapshot)."""
+        self._future_pdf_left_lv.controls.clear()
+        self._future_pdf_right_lv.controls.clear()
+        body = self.editor.value or ""
+        self._compare_editor.value = body
+        resolved = self._compare_resolve_pdf_asset_right()
+        self._append_pdf_pages_to_left_list(self._future_pdf_left_lv, resolved)
+        self._append_markdown_to_right_list(self._future_pdf_right_lv, body, editable_right=True)
+        if _ctrl_on_page(self._future_pdf_left_lv):
+            self._future_pdf_left_lv.update()
+        if _ctrl_on_page(self._future_pdf_right_lv):
+            self._future_pdf_right_lv.update()
+        if _ctrl_on_page(self._future_pdf_import_md_tf):
+            self._future_pdf_import_md_tf.update()
+
     def _rebuild_compare_pdf_panes(self) -> None:
         if self._compare_candidate_source == "docx_original":
             self._rebuild_compare_docx_panes()
@@ -284,56 +447,8 @@ class MarkdownStudioAssetCompare:
             return
 
         resolved = self._compare_resolve_pdf_asset_right()
-        if resolved is None:
-            self._compare_pdf_left_lv.controls.append(
-                ft.Container(
-                    padding=ft.padding.all(12),
-                    content=ft.Text(
-                        "No PDF asset for this comparison.",
-                        color=ft.Colors.ORANGE_200,
-                        size=13,
-                    ),
-                )
-            )
-        else:
-            _, rel = resolved
-            try:
-                pdf_abs = version_storage.pdf_asset_abs_path(rel)
-            except (ValueError, OSError):
-                pdf_abs = None
-            if pdf_abs is None or not pdf_abs.is_file():
-                self._compare_pdf_left_lv.controls.append(
-                    ft.Container(
-                        padding=ft.padding.all(12),
-                        content=ft.Text("PDF file missing on disk.", color=ft.Colors.RED_200, size=13),
-                    )
-                )
-            else:
-                try:
-                    pages = document_import.render_pdf_to_png_pages(pdf_abs)
-                    pic_col = plan_picture_viewer.plan_picture_column(pages, inner_scroll=False)
-                    self._compare_pdf_left_lv.controls.append(
-                        ft.Container(content=pic_col, expand=True)
-                    )
-                except BaseException as ex:
-                    self._compare_pdf_left_lv.controls.append(
-                        ft.Container(
-                            padding=ft.padding.all(12),
-                            content=ft.Text(f"Could not render PDF: {ex}", color=ft.Colors.RED_200, size=12),
-                        )
-                    )
-
-        self._compare_pdf_right_lv.controls.append(
-            ft.Container(
-                padding=ft.padding.all(8),
-                content=ft.Text(
-                    body,
-                    selectable=True,
-                    expand=True,
-                    style=_md_style,
-                ),
-            )
-        )
+        self._append_pdf_pages_to_left_list(self._compare_pdf_left_lv, resolved)
+        self._append_markdown_to_right_list(self._compare_pdf_right_lv, body, editable_right=False)
         if _ctrl_on_page(self._compare_pdf_left_lv):
             self._compare_pdf_left_lv.update()
         if _ctrl_on_page(self._compare_pdf_right_lv):

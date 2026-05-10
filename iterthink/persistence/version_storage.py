@@ -197,6 +197,26 @@ def get_or_create_document(session: Session, resolved_doc: Path) -> Document:
     return doc
 
 
+def get_document_by_resolved_path(session: Session, resolved_doc: Path) -> Document | None:
+    key = path_key_for(resolved_doc)
+    return session.execute(select(Document).where(Document.path_key == key)).scalar_one_or_none()
+
+
+def latest_version_id_for_document(session: Session, document_id: int) -> int | None:
+    row = session.execute(
+        select(DocumentVersion.id)
+        .where(DocumentVersion.document_id == document_id)
+        .order_by(DocumentVersion.created_at.desc(), DocumentVersion.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return int(row) if row is not None else None
+
+
+def document_id_for_resolved_path(session: Session, resolved_doc: Path) -> int | None:
+    doc = get_document_by_resolved_path(session, resolved_doc)
+    return int(doc.id) if doc is not None else None
+
+
 def update_document_last_disk_state(session: Session, resolved_doc: Path, *, body: str) -> None:
     """Record canonical .md mtime, size, and content hash after app read or write."""
     p = resolved_doc.resolve()
