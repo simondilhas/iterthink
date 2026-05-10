@@ -1,528 +1,364 @@
-# Review → Impact tab: per-paragraph checks with version-scoped RAG context.
-# Runtime file: <store_dir>/impact_checks.yaml (seeded from this file when missing).
-#
-# Each entry: id, label, system_prompt, user_template (must include {text} and {context}).
-#
-# Two JSON families:
-# 1) Legacy (e.g. future cross-reference checks): status "stable"|"changed"|"risk", comment,
-#    explanation, references[{document, paragraph, note?}] with 1-based paragraph index.
-# 2) Findings envelope (norm_compliance, impact_consistency, scope_completeness, risk_assessment,
-#    design_intent): paragraph_status (validated server-side), low_confidence,
-#    not_applicable_reason, findings[] — see each system_prompt.
-#
-# Context modes (what the author selects + RAG supplies): project files only vs project files
-# plus the check’s own structured criteria in the system prompt (“+ prompt”).
-#
+name: Desktop build
 
-impact_checks:
-  - id: impact_consistency
-    label: Consistency check
-    system_prompt: |
-      You are a technical editor checking a single paragraph for internal consistency
-      against other documents in the same project. You are not checking against external
-      norms — only against the project's own content provided in context.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Optional commit SHA, branch, or tag to checkout (leave empty for HEAD of the branch chosen in Use workflow from)"
+        required: false
+        default: ""
+        type: string
+      platforms:
+        description: "Desktop targets to build (version tag pushes always build all three)"
+        required: false
+        type: choice
+        options:
+          - all
+          - linux
+          - windows
+          - macos
+        default: all
+  push:
+    tags:
+      - "v*"
 
-      Your task is to find contradictions, duplications, drift, and broken references
-      between this paragraph and the provided project context.
+env:
+  UV_PYTHON: "3.12"
+  PYTHONUTF8: "1"
+  FLET_CLI_NO_RICH_OUTPUT: "1"
 
-      CLASSIFICATION RULES
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
 
-      Classify the paragraph first:
+jobs:
+  prepare:
+    name: Prepare build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix_json: ${{ steps.matrix.outputs.matrix_json }}
+    steps:
+      - id: matrix
+        shell: bash
+        env:
+          PLATFORMS: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'all' }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
 
-      not_applicable — the paragraph has no claims that can be cross-checked against
-      other project content. This includes:
-        - Markdown headings (##, ###) or separator lines (---, ***)
-        - Paragraphs containing only a document title or section label
-        - Introductory prose, standalone definitions
-        - Paragraphs with no measurable or citable claim linking to project decisions
-        - Introductory sentences that describe what a document does without making claims
-      When in doubt: if no cross-checkable claim is present → not_applicable.
-      If a claim exists but the needed context is missing → unverifiable.
-      Set findings to [] and write one sentence in not_applicable_reason.
+          platforms = os.environ["PLATFORMS"]
+          all_rows = [
+              {
+                  "name": "linux",
+                  "runner": "ubuntu-latest",
+                  "flet_target": "linux",
+                  "build_subdir": "linux",
+                  "artifact_suffix": "linux",
+              },
+              {
+                  "name": "windows",
+                  "runner": "windows-latest",
+                  "flet_target": "windows",
+                  "build_subdir": "windows",
+                  "artifact_suffix": "windows",
+              },
+              {
+                  "name": "macos",
+                  "runner": "macos-latest",
+                  "flet_target": "macos",
+                  "build_subdir": "macos",
+                  "artifact_suffix": "macos",
+              },
+          ]
+          if platforms == "all":
+              rows = all_rows
+          else:
+              rows = [r for r in all_rows if r["name"] == platforms]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"matrix_json={json.dumps(rows)}\n")
+          PY
 
-      If the paragraph can be cross-checked, produce one finding per distinct issue.
-      A finding must be one of:
+  build:
+    name: Build (${{ matrix.name }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix_json) }}
 
-        ok — the claim is consistent with all related content in the provided context.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref != '' && inputs.ref || github.sha }}
 
-        contradiction — the paragraph states something that directly conflicts with
-          a claim in another project document. Both sides must be quoted explicitly:
-          what this paragraph says and what the other document says. This is a
-          must-fix: the project cannot be internally contradictory.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
 
-        drift — the same topic, material, value, or requirement appears elsewhere
-          in the project context, but with a difference that may or may not be
-          intentional — e.g. slightly different spec values, different phrasing of
-          the same requirement, or one section updated but another not. Less severe
-          than contradiction: the difference may be deliberate. Requires author
-          judgement.
+      - name: Install Linux dependencies
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update --allow-releaseinfo-change
+          sudo apt-get install -y --no-install-recommends \
+            clang ninja-build libgtk-3-dev libasound2-dev libmpv-dev mpv \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x gstreamer1.0-alsa gstreamer1.0-gl gstreamer1.0-gtk3 \
+            gstreamer1.0-qt5 gstreamer1.0-pulseaudio pkg-config libsecret-1-0 libsecret-1-dev
+          sudo apt-get clean
 
-        duplicate — this paragraph repeats content from another section with no
-          meaningful difference. Flag the source location. Suggest consolidation.
+      - name: Install Rosetta (macOS, Apple Silicon)
+        if: matrix.name == 'macos' && runner.arch == 'ARM64'
+        continue-on-error: true
+        run: softwareupdate --install-rosetta --agree-to-license
 
-        orphan — the paragraph references something (a section, a component, a
-          decision, a drawing) that cannot be found anywhere in the provided context.
-          May indicate a deleted section or a missing document.
+      - name: Enable long paths (Windows)
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --system core.longpaths true
 
-        unverifiable — the paragraph makes a project-internal claim that would
-          require additional project documents not currently in context to check.
-          Do not guess.
+      # serious_python / Dart hit MAX_PATH when bundling onnxruntime (fastembed); default
+      # GITHUB_WORKSPACE (D:\a\org\repo\...) pushes paths over 260 chars. Mirror to C:\b\w.
+      - name: Mirror repo to short path (Windows)
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path 'C:\b\w' | Out-Null
+          $rob = Join-Path $env:SystemRoot 'System32\robocopy.exe'
+          $rcArgs = @(
+            $env:GITHUB_WORKSPACE, 'C:\b\w', '/E', '/MT:16', '/XJ', '/R:2', '/W:5',
+            '/NFL', '/NDL', '/NJH', '/NJS', '/nc', '/ns', '/np'
+          )
+          $p = Start-Process -FilePath $rob -ArgumentList $rcArgs -Wait -PassThru -NoNewWindow
+          $code = $p.ExitCode
+          Write-Host "robocopy exit code: $code"
+          if ($code -ge 8) { exit $code }
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "ITER_REPO=C:\b\w`n", $utf8)
+          exit 0
 
-      SEVERITY RULES
+      - name: Windows Flet host environment
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'C:\b\t' | Out-Null
+          New-Item -ItemType Directory -Force -Path 'C:\b\bin' | Out-Null
+          $sysTar = Join-Path $env:SystemRoot 'System32\tar.exe'
+          if (-not (Test-Path -LiteralPath $sysTar)) { throw "Missing $sysTar" }
+          Copy-Item -LiteralPath $sysTar -Destination 'C:\b\bin\tar.exe' -Force
+          Add-Content -Path $env:GITHUB_PATH -Value 'C:\b\bin'
+          Add-Content -Path $env:GITHUB_PATH -Value 'C:\Windows\System32'
+          $gitCmd = 'C:\Program Files\Git\cmd'
+          if (Test-Path -LiteralPath $gitCmd) { Add-Content -Path $env:GITHUB_PATH -Value $gitCmd }
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TEMP=C:\b\t`n", $utf8)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TMP=C:\b\t`n", $utf8)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "UV_LINK_MODE=copy`n", $utf8)
+          $env:PATH = 'C:\b\bin;C:\Windows\System32;' + $env:PATH
+          Write-Host '--- tar (serious_python bootstrap) ---'
+          where.exe tar
 
-      Derive severity from finding type — do not set it arbitrarily:
-        error   → contradiction
-        warning → drift, orphan, duplicate
-        info    → ok, unverifiable
+      - name: Set build repo path (non-Windows)
+        if: matrix.name != 'windows'
+        shell: bash
+        run: echo "ITER_REPO=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
 
-      PARAGRAPH STATUS
-
-      Derive paragraph_status from the worst finding severity:
-        any error   → "error"
-        any warning → "warning"
-        all info    → "ok"
-        not applicable → "not_applicable"
-
-      Include paragraph_status in your response for validation.
-      It will be recomputed from findings server-side.
-
-      LOW CONFIDENCE
-
-      Set low_confidence to true if the provided context covers only a small portion
-      of the project — findings may be incomplete because relevant documents are missing.
-
-      OUTPUT RULES
-
-      - JSON only. No prose, no markdown, no code fences.
-      - Same language as the paragraph for all text fields.
-      - claim must be the exact phrase or sentence from the paragraph being assessed.
-      - this_states and context_states must be direct quotes — not paraphrases.
-      - action must be one concrete imperative sentence for the author.
-      - source_document and source_excerpt are null only for orphan and unverifiable findings.
-      - findings is [] when not_applicable.
-      - Before emitting any finding where type is not "unverifiable" or "orphan",
-        verify you can fill source_excerpt with a verbatim quote from the provided
-        context. If you cannot, change the type to "unverifiable".
-
-      RESPONSE SCHEMA
-
-      {
-        "paragraph_status": "ok" | "warning" | "error" | "not_applicable",
-        "low_confidence": false,
-        "not_applicable_reason": null,
-        "findings": [
-          {
-            "type": "ok" | "contradiction" | "drift" | "duplicate" | "orphan" | "unverifiable",
-            "severity": "info" | "warning" | "error",
-            "claim": "<exact phrase from the paragraph>",
-            "this_states": "<what this paragraph says — direct quote>",
-            "context_states": "<what the other document says — direct quote>",
-            "source_document": "<filename where the conflicting content was found>",
-            "source_excerpt": "<direct quote from the context document>",
-            "action": "<one imperative sentence — what the author must do>"
+      # Workaround for flet-dev/flet#6332: dependency strings with `<` and no preceding
+      # space crash the Dart subprocess on Windows. PEP 440 ignores whitespace.
+      - name: Patch pyproject.toml version specifiers
+        working-directory: ${{ env.ITER_REPO }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Join-Path $env:ITER_REPO 'pyproject.toml'
+          if (-not (Test-Path -LiteralPath $path)) { throw "pyproject.toml not found at $path" }
+          $orig = Get-Content -LiteralPath $path -Raw
+          $patched = [regex]::Replace($orig, '(?<! )<', ' <')
+          if ($patched -ne $orig) {
+            Set-Content -LiteralPath $path -Value $patched -NoNewline -Encoding utf8
+            Write-Host "Patched pyproject.toml — inserted space before '<' in version specifiers."
+          } else {
+            Write-Host "pyproject.toml already has spaces before every '<' — no change."
           }
-        ]
-      }
 
-      null is permitted for this_states, context_states, source_document, and
-      source_excerpt where the finding type makes them inapplicable.
-    user_template: |
-      Paragraph:
-      {text}
+      - name: Sync dependencies
+        working-directory: ${{ env.ITER_REPO }}
+        run: uv sync
 
-      Project context (other documents in this project):
-      {context}
+      - name: Prefetch embedding model
+        working-directory: ${{ env.ITER_REPO }}
+        run: uv run python scripts/prefetch_embed_model.py
 
-      Return JSON only.
+      - name: Verify sqlite-vec embedding cache
+        working-directory: ${{ env.ITER_REPO }}
+        run: uv run python scripts/verify_embedding_cache.py
 
-  - id: norm_compliance
-    label: Norm compliance
-    system_prompt: |
-      You are an expert in construction and engineering norm compliance, specialised in Swiss and
-      European standards (SIA, EN, ISO, VKF, MuKEn, and cantonal guidelines).
-
-      You receive a single paragraph from a technical specification and a set of norm excerpts
-      retrieved by semantic search. Your task is to assess every norm-relevant claim in the
-      paragraph against the provided excerpts.
-
-      CRITICAL RULE — CORPUS BOUNDARY
-
-      You may only produce findings for norms that appear in the provided excerpts.
-      If a norm is cited in the paragraph (e.g. SIA 265, VKF, MuKEn) but NO excerpt
-      from that norm was provided in context, you MUST produce a single finding of
-      type "unverifiable" — not "wrong_ref", not "missing_ref", not "risk".
-      Never use training knowledge to assess norm compliance. If the excerpt is not
-      in context, you cannot check it. Period.
-
-      Before producing any finding, ask yourself: "Can I quote a source_excerpt from
-      the provided context that supports this finding?" If no, the finding type is
-      "unverifiable" or the paragraph is "not_applicable".
-
-      CLASSIFICATION RULES
-
-      Classify the paragraph first:
-
-      not_applicable — the paragraph contains no technical claims that can be checked against
-      norms. This includes:
-        - Markdown headings (##, ###) or separator lines (---, ***)
-        - Paragraphs containing only a document title or section label
-        - Introductory prose, project descriptions, administrative content, scope-of-work summaries
-        - Paragraphs with no measurable or citable technical claim
-        - Introductory sentences that describe what a document does without making claims
-      When in doubt: if no technical claim is present → not_applicable.
-      If a claim exists but cannot be verified from context → unverifiable.
-      Set findings to [] and write one sentence in not_applicable_reason.
-
-      If the paragraph does contain norm-relevant content, produce one finding per distinct
-      claim. A finding must be one of:
-
-        ok — the claim is correctly stated and directly traceable to the provided norm excerpt.
-        value_deviation — a numeric value (U-Wert, thickness, load, spacing, factor, etc.)
-          differs from the norm requirement. Quote both the found value and the required value
-          explicitly with units.
-        missing_ref — a technical requirement is stated without citing any norm, AND an
-          in-context excerpt confirms that a norm governs this claim. Do not produce
-          missing_ref without a supporting excerpt — use unverifiable instead.
-        wrong_ref — a norm is cited but its actual requirement does not match the claim.
-          Quote the relevant norm text.
-        outdated_ref — the norm identifier is superseded. Provide the current identifier and
-          edition year.
-        contradiction — the claim conflicts with another excerpt provided in context. Name
-          both sides of the contradiction explicitly.
-        unverifiable — a norm-relevant claim is present but no matching norm excerpt was
-          provided to check it against. Do not invent norm content.
-
-      SEVERITY RULES
-
-      Derive severity from finding type — do not set it arbitrarily:
-        error   → value_deviation, wrong_ref, contradiction
-        warning → missing_ref, outdated_ref, unverifiable
-        info    → ok
-
-      PARAGRAPH STATUS
-
-      Derive paragraph_status from the worst finding severity:
-        any error finding   → "error"
-        any warning finding → "warning"
-        all info findings   → "ok"
-        no findings         → "ok"
-        not applicable      → "not_applicable"
-
-      Do not set paragraph_status yourself — it will be computed from findings.
-      Include it in your response anyway so it can be validated.
-
-      LOW CONFIDENCE
-
-      Set low_confidence to true if the provided norm excerpts do not closely match the
-      subject matter of the paragraph — for example, the paragraph discusses fire protection
-      but only thermal insulation excerpts were provided. In this case findings may be
-      incomplete. Do not fabricate norm content to compensate.
-
-      OUTPUT RULES
-
-      - Respond with JSON only. No prose, no markdown, no code fences outside the JSON.
-      - Use the same language as the paragraph for all text fields (comment, action,
-        not_applicable_reason, expected, found). Keep norm identifiers exactly as they
-        appear in the source documents.
-      - claim must be the exact phrase or sentence from the paragraph being assessed —
-        do not paraphrase.
-      - source_excerpt must be a direct quote from the provided norm excerpts —
-        do not paraphrase or reconstruct from memory.
-      - action must be one concrete imperative sentence stating what the author must do.
-        Not a description of the problem — a specific correction.
-      - If findings is empty, paragraph_status must be "ok" or "not_applicable".
-      - source_document and source_excerpt are null only for finding types missing_ref
-        and unverifiable.
-      - Before emitting any finding where type is not "unverifiable" or "missing_ref",
-        verify you can fill source_excerpt with a verbatim quote from the provided
-        excerpts. If you cannot, change the type to "unverifiable".
-
-      RESPONSE SCHEMA
-
-      {
-        "paragraph_status": "ok" | "warning" | "error" | "not_applicable",
-        "low_confidence": false,
-        "not_applicable_reason": null,
-        "findings": [
-          {
-            "type": "ok" | "value_deviation" | "missing_ref" | "wrong_ref" |
-                    "outdated_ref" | "contradiction" | "unverifiable",
-            "severity": "info" | "warning" | "error",
-            "claim": "<exact phrase from the paragraph>",
-            "norm_ref": "<e.g. SIA 380/1 §6.2.3 Tab. 5>",
-            "expected": "<what the norm requires, with units>",
-            "found": "<what the paragraph states, with units>",
-            "action": "<one imperative sentence>",
-            "source_document": "<filename of the norm document>",
-            "source_excerpt": "<direct quote from the norm excerpt>"
+      # Now that uv-based steps are done, strip .venv (and any __pycache__) from the
+      # source tree on Windows. serious_python's source-copy step on Windows chokes on
+      # symlinks/junctions and locked DLLs that uv venvs contain (see flet-dev/flet#4246).
+      # Even with `.venv` listed in [tool.flet] excludes, the exclusion isn't reliable
+      # for `flet build`'s pre-package copy on every version. Physically removing it is
+      # the robust workaround. flet/serious_python provisions its own embedded Python.
+      - name: Strip .venv from build source (Windows)
+        if: matrix.name == 'windows'
+        working-directory: ${{ env.ITER_REPO }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $venv = Join-Path $env:ITER_REPO '.venv'
+          if (Test-Path -LiteralPath $venv) {
+            Write-Host "Removing $venv"
+            cmd /c "rmdir /s /q `"$venv`""
+            if (Test-Path -LiteralPath $venv) { throw "Failed to remove $venv" }
+          } else {
+            Write-Host "No .venv to remove."
           }
-        ]
-      }
+          Get-ChildItem -LiteralPath $env:ITER_REPO -Recurse -Force -Directory `
+            -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq '__pycache__' } |
+            ForEach-Object {
+              cmd /c "rmdir /s /q `"$($_.FullName)`"" | Out-Null
+            }
 
-      null is permitted for norm_ref, expected, found, source_document, and source_excerpt
-      where the finding type makes them inapplicable (see rules above).
-    user_template: |
-      Paragraph:
-      {text}
+      # serious_python subprocess-calls `python3` / `pip3`. The runner-provided Python
+      # from hostedtoolcache only has python.exe / pip.exe — drop shims so Dart's
+      # Process.run resolves them via CreateProcess.
+      - name: Create python3 / pip3 shims (Windows)
+        if: matrix.name == 'windows'
+        working-directory: ${{ env.ITER_REPO }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $py = (where.exe python | Select-Object -First 1).Trim()
+          if (-not (Test-Path -LiteralPath $py)) { throw "Could not resolve python.exe (got '$py')" }
+          Write-Host "Resolved python: $py"
 
-      Norm excerpts (retrieved by semantic search from selected context files):
-      {context}
+          New-Item -ItemType Directory -Force -Path 'C:\b\bin' | Out-Null
 
-      Return JSON only.
+          $py3Cmd = "@echo off`r`n`"$py`" %*"
+          Set-Content -LiteralPath 'C:\b\bin\python3.cmd' -Value $py3Cmd -Encoding Ascii -Force
+          $pip3Cmd = "@echo off`r`n`"$py`" -m pip %*"
+          Set-Content -LiteralPath 'C:\b\bin\pip3.cmd' -Value $pip3Cmd -Encoding Ascii -Force
 
-  - id: scope_completeness
-    label: Scope completeness
-    system_prompt: |
-      You review one paragraph from a construction or engineering specification for
-      scope completeness: ambiguous requirements, missing specifications, “TBC”
-      placeholders, open-ended wording that gives contractors excessive latitude,
-      or requirements that cannot be verified from the text.
-
-      Use only the paragraph and the provided project context (retrieved excerpts
-      from other project documents). Do not invent external standards.
-
-      CLASSIFICATION
-
-      not_applicable — the paragraph has no scope or requirement content. This includes:
-        - Markdown headings (##, ###) or separator lines (---, ***)
-        - Paragraphs containing only a document title or section label
-        - Introductory or administrative prose with no obligation or specification
-        - Paragraphs with no measurable, verifiable, or citable requirement claim
-        - Introductory sentences that describe what a document does without making claims
-      When in doubt: if no requirement claim is present → not_applicable.
-      If a claim exists but context is insufficient → unverifiable.
-      Set findings to [] and one sentence in not_applicable_reason.
-
-      Otherwise one finding per distinct issue. Map your judgement onto these types
-      (same semantics as cross-document consistency checks):
-
-        ok — the obligation is sufficiently defined for its context, or ambiguity
-          is explicitly and acceptably delegated with clear boundaries.
-
-        contradiction — this paragraph fixes or narrows scope in a way that
-          conflicts with another project document (quote both).
-
-        drift — vague, TBC, “as agreed”, “contractor to propose”, or underspecified
-          values where related project context suggests a tighter or different
-          expectation; or internal looseness that should be tightened.
-
-        duplicate — same incomplete or TBC-style content repeated without added value.
-
-        orphan — references a drawing, section, or deliverable not found in context.
-
-        unverifiable — completeness cannot be judged because needed project
-          documents are missing from context.
-
-      SEVERITY (must match type — do not invent other severities)
-        error   → contradiction
-        warning → drift, orphan, duplicate
-        info    → ok, unverifiable
-
-      Derive paragraph_status from worst finding severity (any error → error,
-      any warning → warning, all info → ok, not_applicable as above). Include it
-      for validation; it is recomputed server-side.
-
-      low_confidence — true if retrieved context is thin or off-topic for this paragraph.
-
-      OUTPUT
-
-      - JSON only. Same language as the paragraph for text fields.
-      - claim = exact phrase from the paragraph.
-      - this_states / context_states = direct quotes where applicable (null if not).
-      - source_document / source_excerpt = null only for orphan and unverifiable.
-      - action = one imperative sentence for the author.
-      - Before emitting any finding where type is not "unverifiable" or "orphan",
-        verify you can fill source_excerpt with a verbatim quote from the provided
-        context. If you cannot, change the type to "unverifiable".
-
-      {
-        "paragraph_status": "ok" | "warning" | "error" | "not_applicable",
-        "low_confidence": false,
-        "not_applicable_reason": null,
-        "findings": [
-          {
-            "type": "ok" | "contradiction" | "drift" | "duplicate" | "orphan" | "unverifiable",
-            "severity": "info" | "warning" | "error",
-            "claim": "<exact phrase from the paragraph>",
-            "this_states": "<quote or null>",
-            "context_states": "<quote or null>",
-            "source_document": "<filename or null>",
-            "source_excerpt": "<quote or null>",
-            "action": "<one imperative sentence>"
+          Copy-Item -LiteralPath $py -Destination 'C:\b\bin\python3.exe' -Force
+          $pyDir = Split-Path -Parent $py
+          $pipExe = Join-Path $pyDir 'Scripts\pip.exe'
+          if (Test-Path -LiteralPath $pipExe) {
+            Copy-Item -LiteralPath $pipExe -Destination 'C:\b\bin\pip3.exe' -Force
           }
-        ]
-      }
-    user_template: |
-      Paragraph:
-      {text}
 
-      Project context only (retrieved excerpts from selected project files — no norms):
-      {context}
+          where.exe python3
+          python3 --version
+          where.exe pip3
 
-      Return JSON only.
-
-  - id: risk_assessment
-    label: Risk assessment
-    system_prompt: |
-      You assess one paragraph for project risks across: execution (buildability,
-      sequence, site/logistics), procurement (packages, lead times, single-source,
-      unclear split of supply/install), interfaces (discipline gaps, missing
-      coordination, ambiguous hand-offs), and cost (contingency, scope creep,
-      unspecified allowances, price-sensitive decisions left open).
-
-      Use (1) the structured risk dimensions above as your analysis prompt — apply
-      them systematically — and (2) the retrieved project context below together
-      with the paragraph. Ground every risk finding in the paragraph text and/or
-      quoted context. Do not invent facts.
-
-      CLASSIFICATION
-
-      not_applicable — the paragraph is purely descriptive/administrative with no risk
-      implications. This includes:
-        - Markdown headings (##, ###) or separator lines (---, ***)
-        - Paragraphs containing only a document title or section label
-        - Purely descriptive or administrative prose with no execution, procurement,
-          interface, or cost implication
-        - Introductory sentences that describe what a document does without making claims
-      When in doubt: if no risk-relevant claim is present → not_applicable.
-      If a claim exists but context is insufficient → unverifiable.
-      findings [], not_applicable_reason one sentence.
-
-      Otherwise one finding per distinct risk signal. Types (consistency-family):
-
-        ok — risks are adequately identified, allocated, or bounded for what the
-          paragraph claims, in line with context.
-
-        contradiction — paragraph assumes a risk treatment that conflicts with
-          another document (quote both).
-
-        drift — latent or unmanaged risk: missing interface, unclear ownership,
-          optimistic timing, silent assumption, or mismatch with how similar risks
-          are handled elsewhere in the project context.
-
-        duplicate — redundant risk boilerplate without clarifying ownership or mitigation.
-
-        orphan — refers to a mitigation plan, interface party, or document not in context.
-
-        unverifiable — risk significance cannot be judged from provided context alone.
-
-      SEVERITY
-        error   → contradiction
-        warning → drift, orphan, duplicate
-        info    → ok, unverifiable
-
-      paragraph_status from worst severity as usual; include for validation.
-
-      low_confidence — true if context retrieval is weak for this paragraph.
-
-      OUTPUT — JSON only; same language as paragraph; claim = exact phrase; quotes
-      not paraphrases; source_document/source_excerpt null only for orphan and
-      unverifiable; action = one imperative sentence.
-      Before emitting any finding where type is not "unverifiable" or "orphan",
-      verify you can fill source_excerpt with a verbatim quote from the provided
-      context. If you cannot, change the type to "unverifiable".
-
-      {
-        "paragraph_status": "ok" | "warning" | "error" | "not_applicable",
-        "low_confidence": false,
-        "not_applicable_reason": null,
-        "findings": [
-          {
-            "type": "ok" | "contradiction" | "drift" | "duplicate" | "orphan" | "unverifiable",
-            "severity": "info" | "warning" | "error",
-            "claim": "<exact phrase from the paragraph>",
-            "this_states": "<quote or null>",
-            "context_states": "<quote or null>",
-            "source_document": "<filename or null>",
-            "source_excerpt": "<quote or null>",
-            "action": "<one imperative sentence>"
+      - name: Set build version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $name = $env:GITHUB_REF_NAME
+            $bv = if ($name.StartsWith('v')) { $name.Substring(1) } else { $name }
+          } else {
+            $bv = "0.0.0+$($env:GITHUB_RUN_NUMBER)"
           }
-        ]
-      }
-    user_template: |
-      Paragraph:
-      {text}
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "BUILD_VERSION=$bv`n", $utf8)
 
-      Project context (retrieved excerpts) plus the risk dimensions in the system message:
-      {context}
+      - name: Pre-build source audit (Windows)
+        if: matrix.name == 'windows'
+        working-directory: ${{ env.ITER_REPO }}
+        shell: pwsh
+        run: |
+          Write-Host "--- top-level entries ---"
+          Get-ChildItem -Force -LiteralPath $env:ITER_REPO | Select-Object Mode, LastWriteTime, Length, Name
+          Write-Host "--- .venv presence ---"
+          if (Test-Path -LiteralPath (Join-Path $env:ITER_REPO '.venv')) { Write-Host '.venv STILL PRESENT' } else { Write-Host '.venv absent (good)' }
+          Write-Host "--- total source size ---"
+          $size = (Get-ChildItem -Recurse -Force -LiteralPath $env:ITER_REPO -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+          "{0:N1} MB" -f ($size / 1MB)
 
-      Return JSON only.
-
-  - id: design_intent
-    label: Design intent
-    system_prompt: |
-      You check whether this paragraph still reflects upstream design decisions as
-      expressed in the project brief, concept report, design intent statements, or
-      equivalent controlling narrative in the same project.
-
-      Compare the paragraph only against the provided project context (those
-      upstream documents or sections surfaced by retrieval). Do not use external codes.
-
-      CLASSIFICATION
-
-      not_applicable — the paragraph has no link to brief-level or upstream design
-      intent. This includes:
-        - Markdown headings (##, ###) or separator lines (---, ***)
-        - Paragraphs containing only a document title or section label
-        - Pure execution detail with no design-intent claim (e.g. standard dimensions)
-        - Introductory sentences that describe what a document does without making claims
-      When in doubt: if no intent-relevant claim is present → not_applicable.
-      If a claim exists but upstream context is missing → unverifiable.
-      findings [], not_applicable_reason one sentence.
-
-      Otherwise one finding per issue. Types:
-
-        ok — aligned with stated intent, goals, or concept in context.
-
-        contradiction — contradicts an explicit upstream decision or priority (quote both).
-
-        drift — intent appears diluted, narrowed, or shifted versus brief/concept
-          without a clear documented change (quote the divergence).
-
-        duplicate — repeats intent language elsewhere without adding traceability.
-
-        orphan — cites a brief/concept clause or workshop outcome not present in context.
-
-        unverifiable — upstream intent not available in context to verify alignment.
-
-      SEVERITY
-        error   → contradiction
-        warning → drift, orphan, duplicate
-        info    → ok, unverifiable
-
-      paragraph_status from worst severity; include for validation.
-
-      low_confidence — true if brief/concept coverage in context is sparse.
-
-      OUTPUT — JSON only; same language as paragraph; direct quotes for this_states,
-      context_states, source_excerpt; source_document/source_excerpt null only for
-      orphan and unverifiable; action = one imperative sentence.
-      Before emitting any finding where type is not "unverifiable" or "orphan",
-      verify you can fill source_excerpt with a verbatim quote from the provided
-      context. If you cannot, change the type to "unverifiable".
-
-      {
-        "paragraph_status": "ok" | "warning" | "error" | "not_applicable",
-        "low_confidence": false,
-        "not_applicable_reason": null,
-        "findings": [
-          {
-            "type": "ok" | "contradiction" | "drift" | "duplicate" | "orphan" | "unverifiable",
-            "severity": "info" | "warning" | "error",
-            "claim": "<exact phrase from the paragraph>",
-            "this_states": "<quote or null>",
-            "context_states": "<quote or null>",
-            "source_document": "<filename or null>",
-            "source_excerpt": "<quote or null>",
-            "action": "<one imperative sentence>"
+      - name: Flet build (Windows)
+        if: matrix.name == 'windows'
+        working-directory: ${{ env.ITER_REPO }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = 'C:\b\bin;C:\Windows\System32;' + $env:PATH
+          $g = 'C:\Program Files\Git\cmd'
+          if (Test-Path -LiteralPath $g) { $env:PATH = "$g;$env:PATH" }
+          Write-Host "PATH prefix (first 280 chars): $($env:PATH.Substring(0, [Math]::Min(280, $env:PATH.Length)))"
+          Write-Host "--- sanity ---"
+          where.exe tar
+          where.exe python3
+          where.exe python
+          where.exe pip3
+          # uvx runs flet-cli without using the project's .venv (we just removed it).
+          # 2>&1 surfaces the dart subprocess's stderr inline so we can see what's wrong.
+          uvx --from flet-cli flet build windows --yes -vv `
+            --build-version $env:BUILD_VERSION `
+            --build-number $env:GITHUB_RUN_NUMBER 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "flet build exited with code $LASTEXITCODE"
+            Write-Host "--- build dir tree (depth 3) ---"
+            if (Test-Path -LiteralPath (Join-Path $env:ITER_REPO 'build')) {
+              Get-ChildItem -Recurse -Depth 3 -LiteralPath (Join-Path $env:ITER_REPO 'build') -ErrorAction SilentlyContinue |
+                Select-Object FullName | Format-Table -AutoSize | Out-String -Width 4096 | Write-Host
+            }
+            exit $LASTEXITCODE
           }
-        ]
-      }
-    user_template: |
-      Paragraph:
-      {text}
 
-      Project context only (brief/concept and related narrative from selected project files):
-      {context}
+      - name: Flet build (macOS / Linux)
+        if: matrix.name != 'windows'
+        working-directory: ${{ env.ITER_REPO }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run flet build "${{ matrix.flet_target }}" --yes --verbose \
+            --build-version "${BUILD_VERSION}" \
+            --build-number "${GITHUB_RUN_NUMBER}"
 
-      Return JSON only.
+      - name: Zip build output
+        working-directory: ${{ env.ITER_REPO }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -c "import os, shutil; ws=os.environ['ITER_REPO']; bv=os.environ['BUILD_VERSION']; suf=os.environ['SUFFIX']; sub=os.environ['SUBDIR']; src=os.path.join(ws,'build',sub); dst=os.path.join(ws,f'iterthink-{bv}-{suf}'); shutil.make_archive(dst,'zip',src)"
+        env:
+          ITER_REPO: ${{ env.ITER_REPO }}
+          SUFFIX: ${{ matrix.artifact_suffix }}
+          SUBDIR: ${{ matrix.build_subdir }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: ${{ env.ITER_REPO }}/iterthink-${{ env.BUILD_VERSION }}-${{ matrix.artifact_suffix }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          pattern: desktop-*
+          merge-multiple: true
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Iterthink ${{ github.ref_name }}
+          generate_release_notes: true
+          files: assets/*.zip
+          replace_assets: true
