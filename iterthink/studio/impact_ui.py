@@ -497,7 +497,7 @@ class MarkdownStudioImpactMixin:
             if news and any((p or "").strip() for p in news):
                 return news, False
             base_only = [p for p in split_paragraphs(baseline) if (p or "").strip()]
-            return base_only, bool(base_only)
+            return base_only, False
         except Exception:  # noqa: BLE001
             return [], True
 
