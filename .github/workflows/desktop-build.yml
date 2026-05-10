@@ -283,6 +283,14 @@ jobs:
           Get-ChildItem -Force -LiteralPath $env:ITER_REPO | Select-Object Mode, LastWriteTime, Length, Name
           Write-Host "--- .venv presence ---"
           if (Test-Path -LiteralPath (Join-Path $env:ITER_REPO '.venv')) { Write-Host '.venv STILL PRESENT' } else { Write-Host '.venv absent (good)' }
+          Write-Host "--- embedded_models directory tree (depth 4) ---"
+          $embPath = Join-Path $env:ITER_REPO 'iterthink\embedded_models'
+          if (Test-Path -LiteralPath $embPath) {
+            Get-ChildItem -Recurse -Depth 4 -Force -LiteralPath $embPath -ErrorAction SilentlyContinue |
+              Select-Object FullName, Length | Format-Table -AutoSize | Out-String -Width 4096 | Write-Host
+          } else {
+            Write-Host "embedded_models directory does not exist at $embPath"
+          }
           Write-Host "--- total source size ---"
           $size = (Get-ChildItem -Recurse -Force -LiteralPath $env:ITER_REPO -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
           "{0:N1} MB" -f ($size / 1MB)
