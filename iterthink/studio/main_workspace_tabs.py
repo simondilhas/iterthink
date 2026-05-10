@@ -94,9 +94,10 @@ class MainWorkspaceTabsMixin:
         the toolbar so the Review chrome only shows on the Change subtab.
         """
         is_active = getattr(self, "_review_subtab_index", 0) == idx
+        display_label = f"{label} (Experimental)" if idx == 1 else label
         return ft.Container(
             content=ft.Text(
-                label,
+                display_label,
                 size=13,
                 weight=ft.FontWeight.W_500,
                 color=config.ON_SURFACE if is_active else config.ON_SURFACE_VARIANT,
