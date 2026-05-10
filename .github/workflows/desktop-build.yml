@@ -127,11 +127,16 @@ jobs:
         if: matrix.name == 'windows'
         shell: powershell
         run: |
+          # Robocopy uses exit 0–7 for success (e.g. 1 = copied files). PowerShell may
+          # otherwise surface that as the step exit code and fail the job.
           New-Item -ItemType Directory -Force -Path 'C:\b\w' | Out-Null
-          robocopy $env:GITHUB_WORKSPACE 'C:\b\w' /E /MT:16 /NFL /NDL /NJH /NJS /nc /ns /np
+          robocopy $env:GITHUB_WORKSPACE 'C:\b\w' /E /MT:16 /XJ /R:2 /W:5 /NFL /NDL /NJH /NJS /nc /ns /np
           $code = $LASTEXITCODE
+          Write-Host "robocopy exit code: $code"
           if ($code -ge 8) { exit $code }
-          "ITER_REPO=C:\b\w" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "ITER_REPO=C:\b\w`n", $utf8)
+          exit 0
 
       # serious_python extracts standalone CPython with `Process.run('tar', ...)`; Git Bash
       # PATH can hide System32 from native Dart. Short TEMP avoids long-path edge cases.
@@ -141,8 +146,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path 'C:\b\t' | Out-Null
           Add-Content -Path $env:GITHUB_PATH -Value 'C:\Windows\System32'
-          "TEMP=C:\b\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "TMP=C:\b\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TEMP=C:\b\t`n", $utf8)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TMP=C:\b\t`n", $utf8)
           $env:PATH = 'C:\Windows\System32;' + $env:PATH
           Write-Host '--- tar (serious_python bootstrap) ---'
           where.exe tar
