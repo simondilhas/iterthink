@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Optional commit SHA, branch, or tag to checkout (leave empty for HEAD of the branch chosen in Use workflow from)"
+        description: "Optional commit SHA, branch, or tag to checkout"
         required: false
         default: ""
         type: string
       platforms:
-        description: "Desktop targets to build (version tag pushes always build all three)"
+        description: "Desktop targets to build"
         required: false
         type: choice
         options:
@@ -54,21 +54,18 @@ jobs:
                   "runner": "ubuntu-latest",
                   "flet_target": "linux",
                   "build_subdir": "linux",
-                  "artifact_suffix": "linux",
               },
               {
                   "name": "windows",
                   "runner": "windows-latest",
                   "flet_target": "windows",
                   "build_subdir": "windows",
-                  "artifact_suffix": "windows",
               },
               {
                   "name": "macos",
                   "runner": "macos-latest",
                   "flet_target": "macos",
                   "build_subdir": "macos",
-                  "artifact_suffix": "macos",
               },
           ]
           if platforms == "all":
@@ -106,7 +103,7 @@ jobs:
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
             gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x gstreamer1.0-alsa gstreamer1.0-gl gstreamer1.0-gtk3 \
             gstreamer1.0-qt5 gstreamer1.0-pulseaudio pkg-config libsecret-1-0 libsecret-1-dev \
-            file
+            file imagemagick
           sudo apt-get clean
 
       - name: Install Rosetta (macOS, Apple Silicon)
@@ -178,9 +175,7 @@ jobs:
           $patched = [regex]::Replace($orig, '(?<! )<', ' <')
           if ($patched -ne $orig) {
             Set-Content -LiteralPath $path -Value $patched -NoNewline -Encoding utf8
-            Write-Host "Patched pyproject.toml — inserted space before '<' in version specifiers."
-          } else {
-            Write-Host "pyproject.toml already has spaces before every '<' — no change."
+            Write-Host "Patched pyproject.toml"
           }
 
       - name: Sync dependencies
@@ -197,322 +192,141 @@ jobs:
         working-directory: ${{ env.ITER_REPO }}
         run: uv run python scripts/verify_embedding_cache.py
 
-      - name: Strip .venv from build source (Windows)
+      - name: Strip .venv (Windows)
         if: matrix.name == 'windows'
         working-directory: ${{ env.ITER_REPO }}
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
           $venv = Join-Path $env:ITER_REPO '.venv'
-          if (Test-Path -LiteralPath $venv) {
-            Write-Host "Removing $venv"
+          if (Test-Path $venv) {
             cmd /c "rmdir /s /q `"$venv`""
-            if (Test-Path -LiteralPath $venv) { throw "Failed to remove $venv" }
-          } else {
-            Write-Host "No .venv to remove."
           }
-          Get-ChildItem -LiteralPath $env:ITER_REPO -Recurse -Force -Directory `
-            -ErrorAction SilentlyContinue |
+          Get-ChildItem $env:ITER_REPO -Recurse -Force -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -eq '__pycache__' } |
-            ForEach-Object {
-              cmd /c "rmdir /s /q `"$($_.FullName)`"" | Out-Null
-            }
+            ForEach-Object { cmd /c "rmdir /s /q `"$($_.FullName)`"" }
 
-      - name: Create python / python3 / pip3 shims (Windows)
+      - name: Create python shims (Windows)
         if: matrix.name == 'windows'
-        working-directory: ${{ env.ITER_REPO }}
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $candidates = @(
-            'C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe'
-          )
-          $found = $null
-          foreach ($c in $candidates) {
-            if (Test-Path -LiteralPath $c) { $found = $c; break }
+          $py = (Get-ChildItem 'C:\hostedtoolcache\windows\Python\3.12.*\x64\python.exe' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          if (-not $py) { throw "Python not found" }
+          Copy-Item $py 'C:\b\bin\python3.exe' -Force
+          Copy-Item $py 'C:\b\bin\python.exe' -Force
+          $pip = Join-Path (Split-Path $py) 'Scripts\pip.exe'
+          if (Test-Path $pip) {
+            Copy-Item $pip 'C:\b\bin\pip3.exe' -Force
+            Copy-Item $pip 'C:\b\bin\pip.exe' -Force
           }
-          if (-not $found) {
-            $found = (Get-ChildItem 'C:\hostedtoolcache\windows\Python\3.12.*\x64\python.exe' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          }
-          if (-not $found -or -not (Test-Path -LiteralPath $found)) {
-            throw "Could not locate a python.exe in C:\hostedtoolcache\windows\Python\"
-          }
-          Write-Host "Resolved python: $found"
-
-          New-Item -ItemType Directory -Force -Path 'C:\b\bin' | Out-Null
-
-          Copy-Item -LiteralPath $found -Destination 'C:\b\bin\python3.exe' -Force
-          Copy-Item -LiteralPath $found -Destination 'C:\b\bin\python.exe' -Force
-
-          $pyDir = Split-Path -Parent $found
-          $pipExe = Join-Path $pyDir 'Scripts\pip.exe'
-          if (Test-Path -LiteralPath $pipExe) {
-            Copy-Item -LiteralPath $pipExe -Destination 'C:\b\bin\pip3.exe' -Force
-            Copy-Item -LiteralPath $pipExe -Destination 'C:\b\bin\pip.exe' -Force
-          }
-
-          where.exe python
-          where.exe python3
-          python --version
-          python3 --version
-          where.exe pip3
 
       - name: Set build version
         shell: pwsh
         run: |
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
-            $name = $env:GITHUB_REF_NAME
-            $bv = if ($name.StartsWith('v')) { $name.Substring(1) } else { $name }
+            $bv = $env:GITHUB_REF_NAME -replace '^v', ''
           } else {
             $bv = "0.0.0+$($env:GITHUB_RUN_NUMBER)"
           }
           $utf8 = New-Object System.Text.UTF8Encoding $false
           [System.IO.File]::AppendAllText($env:GITHUB_ENV, "BUILD_VERSION=$bv`n", $utf8)
 
-      - name: Pre-build source audit (Windows)
-        if: matrix.name == 'windows'
-        working-directory: ${{ env.ITER_REPO }}
-        shell: pwsh
-        run: |
-          Write-Host "--- top-level entries ---"
-          Get-ChildItem -Force -LiteralPath $env:ITER_REPO | Select-Object Mode, LastWriteTime, Length, Name
-          Write-Host "--- .venv presence ---"
-          if (Test-Path -LiteralPath (Join-Path $env:ITER_REPO '.venv')) { Write-Host '.venv STILL PRESENT' } else { Write-Host '.venv absent (good)' }
-          Write-Host "--- embedded_models directory tree (depth 4) ---"
-          $embPath = Join-Path $env:ITER_REPO 'iterthink\embedded_models'
-          if (Test-Path -LiteralPath $embPath) {
-            Get-ChildItem -Recurse -Depth 4 -Force -LiteralPath $embPath -ErrorAction SilentlyContinue |
-              Select-Object FullName, Length | Format-Table -AutoSize | Out-String -Width 4096 | Write-Host
-          } else {
-            Write-Host "embedded_models directory does not exist at $embPath"
-          }
-          Write-Host "--- total source size ---"
-          $size = (Get-ChildItem -Recurse -Force -LiteralPath $env:ITER_REPO -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-          "{0:N1} MB" -f ($size / 1MB)
-
       - name: Flet build (Windows)
         if: matrix.name == 'windows'
         working-directory: ${{ env.ITER_REPO }}
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $hostedPy = (Get-ChildItem 'C:\hostedtoolcache\windows\Python\3.12.*\x64' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          $parts = @()
-          if ($hostedPy -and (Test-Path -LiteralPath $hostedPy)) {
-            $parts += $hostedPy
-            $parts += (Join-Path $hostedPy 'Scripts')
-          }
-          $parts += 'C:\b\bin'
-          $parts += 'C:\Windows\System32'
-          $g = 'C:\Program Files\Git\cmd'
-          if (Test-Path -LiteralPath $g) { $parts = ,$g + $parts }
-          $env:PATH = ($parts -join ';') + ';' + $env:PATH
-          Write-Host "PATH prefix (first 280 chars): $($env:PATH.Substring(0, [Math]::Min(280, $env:PATH.Length)))"
-          Write-Host "--- sanity ---"
-          where.exe tar
-          where.exe python
-          where.exe python3
-          where.exe pip3
-          uvx --from flet-cli flet build windows --yes -vv `
-            --build-version $env:BUILD_VERSION `
-            --build-number $env:GITHUB_RUN_NUMBER 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "flet build exited with code $LASTEXITCODE"
-            Write-Host "--- build dir tree (depth 3) ---"
-            if (Test-Path -LiteralPath (Join-Path $env:ITER_REPO 'build')) {
-              Get-ChildItem -Recurse -Depth 3 -LiteralPath (Join-Path $env:ITER_REPO 'build') -ErrorAction SilentlyContinue |
-                Select-Object FullName | Format-Table -AutoSize | Out-String -Width 4096 | Write-Host
-            }
-            exit $LASTEXITCODE
-          }
+          $hostedPy = (Get-ChildItem 'C:\hostedtoolcache\windows\Python\3.12.*\x64' | Select-Object -First 1).FullName
+          $env:PATH = "$hostedPy;$hostedPy\Scripts;C:\b\bin;C:\Windows\System32;C:\Program Files\Git\cmd;$env:PATH"
+          uvx --from flet-cli flet build windows --yes -vv --build-version $env:BUILD_VERSION --build-number $env:GITHUB_RUN_NUMBER
 
       - name: Flet build (macOS / Linux)
         if: matrix.name != 'windows'
         working-directory: ${{ env.ITER_REPO }}
-        shell: bash
         run: |
-          set -euo pipefail
           uv run flet build "${{ matrix.flet_target }}" --yes --verbose \
-            --build-version "${BUILD_VERSION}" \
-            --build-number "${GITHUB_RUN_NUMBER}"
+            --build-version "${BUILD_VERSION}" --build-number "${GITHUB_RUN_NUMBER}"
 
-      # ==================== PACKAGING ====================
+      # ===== PACKAGING =====
 
-      - name: Create Windows installer (Inno Setup)
+      - name: Package Windows installer
         if: matrix.name == 'windows'
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest 'https://jrsoftware.org/download.php/is.exe' -OutFile 'C:\b\t\inno.exe'
+          Start-Process 'C:\b\t\inno.exe' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -Wait
           
-          # Download and install Inno Setup
-          $innoUrl = 'https://jrsoftware.org/download.php/is.exe'
-          $innoInstaller = 'C:\b\t\innosetup.exe'
-          Write-Host "Downloading Inno Setup..."
-          Invoke-WebRequest -Uri $innoUrl -OutFile $innoInstaller
-          Write-Host "Installing Inno Setup..."
-          Start-Process -FilePath $innoInstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -Wait
+          $iss = @'
+          [Setup]
+          AppName=Iterthink
+          AppVersion={0}
+          DefaultDirName={{autopf}}\Iterthink
+          DefaultGroupName=Iterthink
+          OutputDir={1}
+          OutputBaseFilename=iterthink-{0}-windows-installer
+          Compression=lzma2
+          SolidCompression=yes
+          DisableProgramGroupPage=yes
+          PrivilegesRequired=lowest
           
-          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
-          if (-not (Test-Path $iscc)) { throw "Inno Setup not found at $iscc" }
+          [Files]
+          Source: "{1}\build\windows\*"; DestDir: "{{app}}"; Flags: ignoreversion recursesubdirs
           
-          # Create Inno Setup script
-          $buildDir = Join-Path $env:ITER_REPO "build\windows"
-          $exeName = "iterthink.exe"
-          $appName = "Iterthink"
-          $version = $env:BUILD_VERSION
+          [Icons]
+          Name: "{{group}}\Iterthink"; Filename: "{{app}}\iterthink.exe"
+          Name: "{{autodesktop}}\Iterthink"; Filename: "{{app}}\iterthink.exe"
+          '@
           
-          $issContent = @"
-[Setup]
-AppName=$appName
-AppVersion=$version
-DefaultDirName={autopf}\$appName
-DefaultGroupName=$appName
-OutputDir=$env:ITER_REPO
-OutputBaseFilename=iterthink-$version-windows-installer
-Compression=lzma2
-SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64
-DisableProgramGroupPage=yes
-PrivilegesRequired=lowest
+          $issContent = $iss -f $env:BUILD_VERSION, $env:ITER_REPO
+          Set-Content "$env:ITER_REPO\installer.iss" $issContent
+          
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' "$env:ITER_REPO\installer.iss"
 
-[Files]
-Source: "$buildDir\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-
-[Icons]
-Name: "{group}\$appName"; Filename: "{app}\$exeName"
-Name: "{autodesktop}\$appName"; Filename: "{app}\$exeName"
-
-[Run]
-Filename: "{app}\$exeName"; Description: "Launch $appName"; Flags: nowait postinstall skipifsilent
-"@
-          
-          $issPath = Join-Path $env:ITER_REPO 'installer.iss'
-          Set-Content -LiteralPath $issPath -Value $issContent -Encoding UTF8
-          
-          Write-Host "Building installer..."
-          & $iscc $issPath
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
-          
-          Write-Host "Installer created successfully"
-
-      - name: Create Linux AppImage
+      - name: Package Linux AppImage
         if: matrix.name == 'linux'
-        shell: bash
         run: |
-          set -euo pipefail
-          
-          BUILD_DIR="${ITER_REPO}/build/linux"
-          APPDIR="${ITER_REPO}/AppDir"
-          
-          # Find the main executable
-          MAIN_EXEC=$(find "$BUILD_DIR" -maxdepth 1 -type f -executable -name "iterthink" | head -n1)
-          if [ -z "$MAIN_EXEC" ]; then
-            echo "Error: Could not find main executable"
-            exit 1
-          fi
-          
-          echo "Found executable: $MAIN_EXEC"
-          
-          # Create AppDir structure
-          mkdir -p "$APPDIR/usr/bin"
-          mkdir -p "$APPDIR/usr/lib"
-          
-          # Copy all build output to AppDir
-          cp -r "$BUILD_DIR"/* "$APPDIR/usr/bin/"
-          
-          # Create .desktop file
-          cat > "$APPDIR/iterthink.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Iterthink
-Exec=iterthink
-Icon=iterthink
-Categories=Utility;
-Terminal=false
-EOF
-          
-          # Create icon (use a default if none exists)
-          if [ -f "${ITER_REPO}/icon.png" ]; then
-            cp "${ITER_REPO}/icon.png" "$APPDIR/iterthink.png"
-          else
-            # Create a simple placeholder icon
-            convert -size 256x256 xc:blue "$APPDIR/iterthink.png" 2>/dev/null || \
-            touch "$APPDIR/iterthink.png"
-          fi
-          
-          # Create AppRun
-          cat > "$APPDIR/AppRun" <<'EOF'
-#!/bin/bash
-SELF=$(readlink -f "$0")
-HERE=${SELF%/*}
-export PATH="${HERE}/usr/bin:${PATH}"
-export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
-cd "${HERE}/usr/bin"
-exec "./iterthink" "$@"
-EOF
-          chmod +x "$APPDIR/AppRun"
-          
-          # Download appimagetool
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool
           chmod +x /tmp/appimagetool
           
-          # Build AppImage
-          ARCH=x86_64 /tmp/appimagetool "$APPDIR" "${ITER_REPO}/iterthink-${BUILD_VERSION}-linux-x86_64.AppImage"
+          mkdir -p AppDir/usr/bin
+          cp -r build/linux/* AppDir/usr/bin/
           
-          echo "AppImage created successfully"
+          cat > AppDir/iterthink.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Iterthink
+          Exec=iterthink
+          Icon=iterthink
+          Categories=Utility;
+          DESKTOP
+          
+          convert -size 256x256 xc:blue AppDir/iterthink.png 2>/dev/null || touch AppDir/iterthink.png
+          
+          cat > AppDir/AppRun <<'APPRUN'
+          #!/bin/bash
+          SELF=$(readlink -f "$0")
+          HERE=${SELF%/*}
+          export PATH="${HERE}/usr/bin:${PATH}"
+          exec "${HERE}/usr/bin/iterthink" "$@"
+          APPRUN
+          chmod +x AppDir/AppRun
+          
+          ARCH=x86_64 /tmp/appimagetool AppDir "iterthink-${BUILD_VERSION}-linux-x86_64.AppImage"
 
-      - name: Create macOS DMG
+      - name: Package macOS DMG
         if: matrix.name == 'macos'
-        shell: bash
         run: |
-          set -euo pipefail
-          
-          BUILD_DIR="${ITER_REPO}/build/macos"
-          APP_BUNDLE=$(find "$BUILD_DIR" -maxdepth 1 -name "*.app" | head -n1)
-          
-          if [ -z "$APP_BUNDLE" ]; then
-            echo "Error: Could not find .app bundle"
-            exit 1
-          fi
-          
-          echo "Found app bundle: $APP_BUNDLE"
-          
-          DMG_NAME="iterthink-${BUILD_VERSION}-macos.dmg"
-          
-          # Create DMG
-          hdiutil create -volname "Iterthink" \
-            -srcfolder "$APP_BUNDLE" \
-            -ov \
-            -format UDZO \
-            "${ITER_REPO}/${DMG_NAME}"
-          
-          echo "DMG created successfully: ${DMG_NAME}"
+          APP=$(find build/macos -name "*.app" | head -n1)
+          hdiutil create -volname "Iterthink" -srcfolder "$APP" -ov -format UDZO "iterthink-${BUILD_VERSION}-macos.dmg"
 
-      # ==================== UPLOAD ARTIFACTS ====================
-
-      - name: Upload Windows installer
-        if: matrix.name == 'windows'
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
-          path: ${{ env.ITER_REPO }}/iterthink-${{ env.BUILD_VERSION }}-windows-installer.exe
-          if-no-files-found: error
-
-      - name: Upload Linux AppImage
-        if: matrix.name == 'linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-appimage
-          path: ${{ env.ITER_REPO }}/iterthink-${{ env.BUILD_VERSION }}-linux-x86_64.AppImage
-          if-no-files-found: error
-
-      - name: Upload macOS DMG
-        if: matrix.name == 'macos'
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-dmg
-          path: ${{ env.ITER_REPO }}/iterthink-${{ env.BUILD_VERSION }}-macos.dmg
-          if-no-files-found: error
+          name: ${{ matrix.name }}-package
+          path: |
+            ${{ env.ITER_REPO }}/iterthink-*-windows-installer.exe
+            iterthink-*-linux-x86_64.AppImage
+            iterthink-*-macos.dmg
+          if-no-files-found: ignore
 
   release:
     name: Publish GitHub Release
@@ -522,17 +336,14 @@ EOF
     permissions:
       contents: write
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
 
-      - name: Create or update release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Iterthink ${{ github.ref_name }}
           generate_release_notes: true
           files: release-assets/*
-          replace_assets: true
