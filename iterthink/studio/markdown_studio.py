@@ -1239,7 +1239,8 @@ class MarkdownStudio(
         self._analyse_button_progress: dict[str, ft.ProgressRing] = {}
         self._analyse_button_count: dict[str, ft.Text] = {}
         # Impact checks (impact_checks.yaml) in the KI Analyse tab; visible on Review → Impact only.
-        # Run lives in _impact_run_dock at the bottom of _right_chat_section (see _chat_composer).
+        # Run lives in _impact_run_dock (bottom of _chat_composer); shown for Review→Impact + KI Analyse,
+        # disabled until a check pill is selected (_sync_impact_ki_context_visibility).
         self._impact_analyse_section = ft.Container(
             visible=False,
             padding=ft.padding.only(top=4),
@@ -1401,7 +1402,11 @@ class MarkdownStudio(
         self._impact_run_dock = ft.Container(
             visible=False,
             padding=ft.padding.only(top=4),
-            content=self._impact_run_btn,
+            content=ft.Row(
+                [self._impact_run_btn],
+                expand=True,
+                alignment=ft.MainAxisAlignment.START,
+            ),
         )
         self._chat_composer = ft.Container(
             padding=ft.padding.symmetric(horizontal=0, vertical=6),

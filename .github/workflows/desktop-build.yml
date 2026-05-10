@@ -127,11 +127,17 @@ jobs:
         if: matrix.name == 'windows'
         shell: powershell
         run: |
-          # Robocopy uses exit 0–7 for success (e.g. 1 = copied files). PowerShell may
-          # otherwise surface that as the step exit code and fail the job.
+          # Robocopy uses 0–7 for success (e.g. 1 = files copied). Invoking it via
+          # Start-Process avoids that code becoming the PowerShell step exit status.
+          $ErrorActionPreference = 'Continue'
           New-Item -ItemType Directory -Force -Path 'C:\b\w' | Out-Null
-          robocopy $env:GITHUB_WORKSPACE 'C:\b\w' /E /MT:16 /XJ /R:2 /W:5 /NFL /NDL /NJH /NJS /nc /ns /np
-          $code = $LASTEXITCODE
+          $rob = Join-Path $env:SystemRoot 'System32\robocopy.exe'
+          $rcArgs = @(
+            $env:GITHUB_WORKSPACE, 'C:\b\w', '/E', '/MT:16', '/XJ', '/R:2', '/W:5',
+            '/NFL', '/NDL', '/NJH', '/NJS', '/nc', '/ns', '/np'
+          )
+          $p = Start-Process -FilePath $rob -ArgumentList $rcArgs -Wait -PassThru -NoNewWindow
+          $code = $p.ExitCode
           Write-Host "robocopy exit code: $code"
           if ($code -ge 8) { exit $code }
           $utf8 = New-Object System.Text.UTF8Encoding $false

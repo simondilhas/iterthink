@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ from iterthink.db.session import session_scope
 from iterthink.persistence import impact_annotations as impact_ann
 from iterthink.persistence import version_storage
 from iterthink.services import impact_analysis_runner
+from iterthink.services.impact_analysis_runner import _impact_debug_llm_enabled
 from iterthink.studio.constants import KI_PILL_TEXT_SIZE, TAB_FUTURE
 from iterthink.studio.tree import build_md_tree
 from iterthink.studio.util import ctrl_on_page as _ctrl_on_page
@@ -34,6 +37,7 @@ class MarkdownStudioImpactMixin:
         self._active_impact_prompt_id: str | None = None
         self._impact_context_file_cbs: dict[Path, ft.Checkbox] = {}
         self._impact_folder_rows: list[tuple[ft.Checkbox, list[Path]]] = []
+        self._impact_folder_expanded: dict[str, bool] = {}
         self._impact_run_gen = 0
         self._impact_run_spinner = ft.ProgressRing(
             width=12,
@@ -51,8 +55,10 @@ class MarkdownStudioImpactMixin:
                 tight=True,
                 spacing=6,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
             ),
             elevation=0,
+            expand=True,
             style=ft.ButtonStyle(
                 bgcolor=config.PRIMARY_COLOR,
                 color=config.ON_PRIMARY,
@@ -120,12 +126,30 @@ class MarkdownStudioImpactMixin:
             row.update()
         self._sync_impact_ki_context_visibility()
 
+    def _toggle_impact_folder_expand(
+        self,
+        key_id: str,
+        inner: ft.Column,
+        btn: ft.IconButton,
+        _e: ft.ControlEvent,
+    ) -> None:
+        vis = not bool(inner.visible)
+        inner.visible = vis
+        self._impact_folder_expanded[key_id] = vis
+        btn.icon = ft.Icons.KEYBOARD_ARROW_DOWN if vis else ft.Icons.KEYBOARD_ARROW_RIGHT
+        if _ctrl_on_page(btn):
+            btn.update()
+        if _ctrl_on_page(inner):
+            inner.update()
+
     def _files_under_node(self, node: dict[str, Any], exclude_resolved: Path | None) -> list[Path]:
+        """Resolved paths of selectable context files under *node* (excludes the open document)."""
         out: list[Path] = []
         for _name, fpath in node.get("_files", []):
-            if exclude_resolved is not None and fpath.resolve() == exclude_resolved:
+            r = fpath.resolve()
+            if exclude_resolved is not None and r == exclude_resolved:
                 continue
-            out.append(fpath)
+            out.append(r)
         for key, sub in node.items():
             if key != "_files" and isinstance(sub, dict):
                 out.extend(self._files_under_node(sub, exclude_resolved))
@@ -155,20 +179,70 @@ class MarkdownStudioImpactMixin:
                 scroll.update()
             return
 
-        def build_node(node: dict[str, Any], depth: int) -> list[ft.Control]:
+        def build_node(node: dict[str, Any], depth: int, path_parts: tuple[str, ...]) -> list[ft.Control]:
             rows: list[ft.Control] = []
             subdirs = sorted(
                 [k for k in node if k != "_files" and isinstance(node[k], dict)],
                 key=str.casefold,
             )
             files_here = list(node.get("_files", []))
-            files_here = [
-                (n, p)
-                for n, p in files_here
-                if exclude_res is None or p.resolve() != exclude_res
-            ]
             files_here.sort(key=lambda x: x[0].casefold())
+            pad = ft.padding.only(left=max(0, depth) * 12, top=0, bottom=0)
             for fname, fpath in files_here:
+                r = fpath.resolve()
+                if exclude_res is not None and r == exclude_res:
+                    rows.append(
+                        ft.Container(
+                            content=ft.Row(
+                                [
+                                    ft.Icon(ft.Icons.EDIT_NOTE, size=16, color=config.ON_SURFACE_VARIANT),
+                                    ft.Column(
+                                        [
+                                            ft.Text(
+                                                fname,
+                                                size=11,
+                                                weight=ft.FontWeight.W_500,
+                                                color=config.ON_SURFACE,
+                                            ),
+                                            ft.Text(
+                                                "Open in editor — not used as context",
+                                                size=9,
+                                                color=config.ON_SURFACE_VARIANT,
+                                            ),
+                                        ],
+                                        tight=True,
+                                        spacing=0,
+                                        expand=True,
+                                    ),
+                                ],
+                                spacing=6,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            padding=ft.padding.only(left=max(0, depth) * 12, top=2, bottom=2),
+                        )
+                    )
+                    continue
+                if r in self._impact_context_file_cbs:
+                    rows.append(
+                        ft.Container(
+                            content=ft.Row(
+                                [
+                                    ft.Icon(ft.Icons.LINK, size=14, color=config.ON_SURFACE_VARIANT),
+                                    ft.Text(
+                                        fname,
+                                        size=11,
+                                        color=config.ON_SURFACE_VARIANT,
+                                    ),
+                                ],
+                                spacing=6,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            padding=pad,
+                            height=28,
+                            tooltip=f"Same file as elsewhere in this list ({fpath.name}); use the checkbox above.",
+                        )
+                    )
+                    continue
                 cb = ft.Checkbox(
                     value=True,
                     label=fname,
@@ -179,11 +253,11 @@ class MarkdownStudioImpactMixin:
                     tooltip=str(fpath),
                     on_change=lambda _e, fp=fpath: self._on_impact_file_checkbox_change(fp),
                 )
-                self._impact_context_file_cbs[fpath] = cb
+                self._impact_context_file_cbs[r] = cb
                 rows.append(
                     ft.Container(
                         content=cb,
-                        padding=ft.padding.only(left=max(0, depth) * 12, top=0, bottom=0),
+                        padding=pad,
                         height=28,
                     )
                 )
@@ -207,17 +281,39 @@ class MarkdownStudioImpactMixin:
                     )
                 )
                 self._impact_folder_rows.append((folder_cb, desc_paths))
-                rows.append(
-                    ft.Container(
-                        content=folder_cb,
-                        padding=ft.padding.only(left=max(0, depth) * 12, top=0, bottom=0),
-                        height=28,
-                    )
+                child_key = "/".join((*path_parts, key))
+                expanded = self._impact_folder_expanded.get(child_key, True)
+                inner_rows = build_node(sub, depth + 1, (*path_parts, key))
+                inner_col = ft.Column(
+                    inner_rows,
+                    spacing=0,
+                    tight=True,
+                    visible=expanded,
                 )
-                rows.extend(build_node(sub, depth + 1))
+                chevron = ft.IconButton(
+                    icon=ft.Icons.KEYBOARD_ARROW_DOWN if expanded else ft.Icons.KEYBOARD_ARROW_RIGHT,
+                    icon_size=18,
+                    icon_color=config.ON_SURFACE_VARIANT,
+                    tooltip="Show or hide files in this folder",
+                    style=ft.ButtonStyle(padding=4),
+                    on_click=lambda e, kid=child_key, ic=inner_col: self._toggle_impact_folder_expand(
+                        kid, ic, e.control, e
+                    ),
+                )
+                header = ft.Container(
+                    content=ft.Row(
+                        [chevron, folder_cb],
+                        spacing=0,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=pad,
+                    height=28,
+                )
+                rows.append(header)
+                rows.append(inner_col)
             return rows
 
-        scroll.controls.extend(build_node(tree, 0))
+        scroll.controls.extend(build_node(tree, 0, ()))
         self._impact_refresh_folder_states()
         if _ctrl_on_page(scroll):
             scroll.update()
@@ -295,20 +391,32 @@ class MarkdownStudioImpactMixin:
             getattr(self, "_main_tab_index", -1) == TAB_FUTURE
             and getattr(self, "_review_subtab_index", 0) == 1
         )
-        on = impact_subtab and self._active_impact_prompt_id is not None
+        # File tree: show whenever Review → Impact (not only after picking a prompt).
+        context_on = impact_subtab
+        prompt_ready = impact_subtab and self._active_impact_prompt_id is not None
         ki_analyse = int(getattr(self, "_ki_topic_index", 0)) == 2
-        impact_sidebar_composer = ki_analyse and on
+        # Run dock: any time Review → Impact and KI "Analyse" topic (index 2). Prompt is optional for
+        # visibility; the button stays disabled until a check pill is selected.
+        show_impact_run_dock = impact_subtab and ki_analyse
 
         chat_row = getattr(self, "_chat_input_row", None)
         run_dock = getattr(self, "_impact_run_dock", None)
-        if chat_row is not None and chat_row.visible != (not impact_sidebar_composer):
-            chat_row.visible = not impact_sidebar_composer
+        if chat_row is not None and chat_row.visible != (not show_impact_run_dock):
+            chat_row.visible = not show_impact_run_dock
             if _ctrl_on_page(chat_row):
                 chat_row.update()
-        if run_dock is not None and run_dock.visible != impact_sidebar_composer:
-            run_dock.visible = impact_sidebar_composer
+        if run_dock is not None and run_dock.visible != show_impact_run_dock:
+            run_dock.visible = show_impact_run_dock
             if _ctrl_on_page(run_dock):
                 run_dock.update()
+
+        run_btn = getattr(self, "_impact_run_btn", None)
+        if run_btn is not None:
+            dis = show_impact_run_dock and not self._active_impact_prompt_id
+            if bool(getattr(run_btn, "disabled", False)) != dis:
+                run_btn.disabled = dis
+                if _ctrl_on_page(run_btn):
+                    run_btn.update()
 
         analyse_pills = getattr(self, "_pill_row_analyse", None)
         if analyse_pills is not None:
@@ -326,25 +434,32 @@ class MarkdownStudioImpactMixin:
 
         panel = getattr(self, "_impact_ki_context_panel", None)
         title = getattr(self, "_impact_ki_context_title", None)
-        if panel is not None and panel.visible != on:
-            panel.visible = on
+        if panel is not None and panel.visible != context_on:
+            panel.visible = context_on
             if _ctrl_on_page(panel):
                 panel.update()
-        if title is not None and title.visible != on:
-            title.visible = on
+        if title is not None and title.visible != context_on:
+            title.visible = context_on
             if _ctrl_on_page(title):
                 title.update()
         scroll = getattr(self, "_impact_ki_context_scroll", None)
-        if scroll is not None and scroll.visible != on:
-            scroll.visible = on
+        if scroll is not None and scroll.visible != context_on:
+            scroll.visible = context_on
             if _ctrl_on_page(scroll):
                 scroll.update()
+        if (
+            context_on
+            and scroll is not None
+            and not scroll.controls
+            and getattr(self, "_impact_tab_initialized", False)
+        ):
+            self._rebuild_impact_context_tree()
         summary_r = getattr(self, "_impact_summary_right", None)
         if summary_r is not None:
             has_txt = bool(
                 getattr(self, "_impact_summary_right_text", None) and self._impact_summary_right_text.value
             )
-            want = on and has_txt
+            want = impact_subtab and has_txt
             if summary_r.visible != want:
                 summary_r.visible = want
                 if _ctrl_on_page(summary_r):
@@ -369,7 +484,7 @@ class MarkdownStudioImpactMixin:
         with session_scope() as s:
             ids: list[int] = []
             for p in paths:
-                doc = version_storage.get_or_create_document(s, p.resolve())
+                doc = version_storage.get_or_create_document(s, p)
                 ids.append(int(doc.id))
             s.commit()
             return ids
@@ -755,24 +870,42 @@ class MarkdownStudioImpactMixin:
     async def _run_impact_analysis_async(self) -> None:
         act = impact_checks.get_impact_check(self._active_impact_prompt_id or "")
         if act is None:
+            print("[impact] Run blocked: no Impact prompt selected (click a pill under Analyse).", file=sys.stderr, flush=True)
             self._snack("Select an Impact check first.")
             return
         cur = getattr(self, "current_path", None)
         if not cur:
+            print("[impact] Run blocked: no file open.", file=sys.stderr, flush=True)
             self._snack("Open a note first.")
             return
         ctx_ids = self._selected_impact_context_document_ids()
         if not ctx_ids:
+            n_files = len(getattr(self, "_impact_context_file_cbs", {}) or {})
+            print(
+                f"[impact] Run blocked: no context files selected (tree has {n_files} selectable .md rows).",
+                file=sys.stderr,
+                flush=True,
+            )
             self._snack("Select at least one context file.")
             return
         if not getattr(self, "_compare_right_fields", None):
             self._rebuild_compare_paragraph_ui()
-        buffers = self._active_compare_buffers()
-        pairs = aligned_compare_pairs(buffers.baseline or "", buffers.candidate or "")
-        paragraphs = [new for _, new in pairs] if pairs else []
+        paragraphs, _ann_stale = self._impact_paragraphs_for_display()
         if not any((x or "").strip() for x in paragraphs):
+            print(
+                "[impact] Run blocked: no non-empty paragraphs in the current note "
+                "(empty document or compare buffers).",
+                file=sys.stderr,
+                flush=True,
+            )
             self._snack("Nothing to analyse.")
             return
+
+        print(
+            "[impact] Run analysis starting (stderr always; set ITERTHINK_DEBUG_IMPACT=1 for full LLM payloads)",
+            file=sys.stderr,
+            flush=True,
+        )
 
         self._impact_summary_cache = ""
         if getattr(self, "_impact_summary_right_text", None):
@@ -806,6 +939,15 @@ class MarkdownStudioImpactMixin:
             self._impact_status_text.value = "Running analysis…"
             if _ctrl_on_page(self._impact_status_text):
                 self._impact_status_text.update()
+
+        if _impact_debug_llm_enabled():
+            n_work = sum(1 for p in paragraphs if (p or "").strip())
+            print(
+                f"\n[impact] run start check={act.id!r} context_doc_ids={ctx_ids!r} "
+                f"paragraph_rows={len(paragraphs)} non_empty={n_work}",
+                file=sys.stderr,
+                flush=True,
+            )
 
         try:
             with session_scope() as s:
@@ -921,6 +1063,13 @@ class MarkdownStudioImpactMixin:
                 if _ctrl_on_page(self._impact_status_text):
                     self._impact_status_text.update()
             self._refresh_impact_annotations_ui(act.id)
+        except Exception as exc:
+            print(traceback.format_exc(), file=sys.stderr, flush=True)
+            self._snack(f"Impact analysis failed: {exc}")
+            try:
+                self._refresh_impact_annotations_ui(act.id)
+            except Exception:  # noqa: BLE001
+                pass
         finally:
             self._impact_run_spinner.visible = False
             if _ctrl_on_page(self._impact_run_spinner):
