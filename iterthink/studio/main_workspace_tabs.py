@@ -117,6 +117,8 @@ class MainWorkspaceTabsMixin:
         if idx == self._review_subtab_index:
             return
         self._review_subtab_index = idx
+        if idx == 1 and hasattr(self, "_ensure_impact_tab_initialized"):
+            self._ensure_impact_tab_initialized()
         self._apply_active_tab_ui_state()
         if self._main_tab_index == TAB_FUTURE and hasattr(self, "_sync_future_pdf_layers_visibility"):
             self._sync_future_pdf_layers_visibility()
@@ -150,18 +152,20 @@ class MainWorkspaceTabsMixin:
             self._review_change_panel.update()
         if _ctrl_on_page(self._review_impact_panel):
             self._review_impact_panel.update()
-        # Keep impact file-selector expansions in sync with active subtab.
-        if hasattr(self, "_refresh_impact_expansion_visibility"):
-            self._refresh_impact_expansion_visibility()
-        # Re-render Impact tab results when switching into the Impact subtab.
-        if impact_active and hasattr(self, "_impact_results_check_id"):
-            cid = self._impact_results_check_id
-            if cid is not None and hasattr(self, "_refresh_impact_tab_results"):
-                self._refresh_impact_tab_results(cid)
+        # Re-render Impact tab when switching into the Impact subtab.
+        if impact_active:
+            pid = getattr(self, "_active_impact_prompt_id", None)
+            if pid and hasattr(self, "_refresh_impact_annotations_ui"):
+                self._refresh_impact_annotations_ui(str(pid))
+            elif not pid and hasattr(self, "_populate_impact_para_placeholders"):
+                self._populate_impact_para_placeholders()
         sub_col = getattr(self, "_review_subpanels_column", None)
         if sub_col is not None and _ctrl_on_page(sub_col):
             sub_col.update()
         self._refresh_tab_toolbar()
+        self._apply_focus_preview_mode()
+        if hasattr(self, "_sync_impact_ki_context_visibility"):
+            self._sync_impact_ki_context_visibility()
 
     def _refresh_review_subtab_strip(self) -> None:
         """Restyle the active/inactive Difference|Impact buttons."""

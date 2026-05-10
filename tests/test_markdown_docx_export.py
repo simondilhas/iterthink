@@ -105,3 +105,23 @@ def test_markdown_to_docx_smoke(tmp_path: Path) -> None:
     with zipfile.ZipFile(out) as z:
         names = z.namelist()
     assert "word/footnotes.xml" in names
+
+
+def test_markdown_to_docx_paragraph_comment(tmp_path: Path) -> None:
+    tpl = _minimal_template(tmp_path)
+    md = tmp_path / "note.md"
+    md.write_text("# Title\n\nFirst body.\n\nSecond body.\n", encoding="utf-8")
+    out = tmp_path / "out_comments.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="Author", date_iso="2099-01-01", comment_author="Author"),
+        paragraph_comments={1: "Annotation on first body paragraph."},
+    )
+    assert out.is_file()
+    with zipfile.ZipFile(out) as z:
+        assert "word/comments.xml" in z.namelist()
+        cxml = z.read("word/comments.xml").decode("utf-8")
+    assert "Annotation on first body paragraph" in cxml

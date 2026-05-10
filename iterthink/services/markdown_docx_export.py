@@ -53,6 +53,7 @@ class ExportMeta:
     title_stem: str
     author: str
     date_iso: str
+    comment_author: str = ""
 
 
 @dataclass(frozen=True)
@@ -269,11 +270,45 @@ def _collect_footnote_defs(fn_block: list[Any]) -> dict[int, list[Any]]:
 
 
 class _Ctx:
-    def __init__(self, doc: Document, md_path: Path, fn_id_map: dict[int, int], styles: _ExportStyles):
+    def __init__(
+        self,
+        doc: Document,
+        md_path: Path,
+        fn_id_map: dict[int, int],
+        styles: _ExportStyles,
+        *,
+        paragraph_comments: dict[int, str] | None = None,
+        comment_author: str = "",
+    ):
         self.doc = doc
         self.md_path = md_path
         self.fn_id_map = fn_id_map
         self.styles = styles
+        self.paragraph_comments = paragraph_comments
+        self.comment_author = (comment_author or "").strip()
+        self.para_comment_idx = 0
+
+
+def _attach_export_paragraph_comment(ctx: _Ctx, paragraph: Any) -> None:
+    """One index per top-level block (heading, body paragraph, fence)."""
+    if not ctx.paragraph_comments:
+        return
+    idx = ctx.para_comment_idx
+    ctx.para_comment_idx += 1
+    text = ctx.paragraph_comments.get(idx)
+    if not text or not str(text).strip():
+        return
+    auth = ctx.comment_author or "iterthink"
+    initials = (auth[:2] if len(auth) >= 2 else "it").upper()
+    try:
+        ctx.doc.add_comment(
+            runs=paragraph.runs,
+            text=str(text).strip(),
+            author=auth[:64],
+            initials=initials,
+        )
+    except Exception:
+        pass
 
 
 def _add_inline_image(ctx: _Ctx, paragraph: Any, t: Any) -> None:
@@ -406,6 +441,7 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: tuple[bool, int] | N
                 i += 1
             if i < n and tokens[i].type == "heading_close":
                 i += 1
+            _attach_export_paragraph_comment(ctx, p)
             continue
         if t.type == "paragraph_open":
             i += 1
@@ -423,6 +459,8 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: tuple[bool, int] | N
                 i += 1
             if i < n and tokens[i].type == "paragraph_close":
                 i += 1
+            if list_meta is None:
+                _attach_export_paragraph_comment(ctx, p)
             continue
         if t.type == "fence":
             body = (t.content or "").rstrip("\n")
@@ -437,6 +475,7 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: tuple[bool, int] | N
                 else:
                     r.font.name = "Courier New"
                     r.font.size = Pt(10)
+            _attach_export_paragraph_comment(ctx, p)
             i += 1
             continue
         if t.type == "bullet_list_open":
@@ -492,6 +531,7 @@ def markdown_to_docx(
     template_path: Path,
     output_path: Path,
     meta: ExportMeta,
+    paragraph_comments: dict[int, str] | None = None,
 ) -> None:
     """Write ``output_path`` from ``markdown_src`` using ``template_path``."""
     from markdown_it import MarkdownIt
@@ -517,7 +557,14 @@ def markdown_to_docx(
         blob = docx_footnotes.paragraph_xml_plain(plain)
         docx_footnotes.append_footnote_xml(fn_part, fn_map[pid], [blob])
 
-    ctx = _Ctx(doc, md_path.resolve(), fn_map, _build_export_styles(doc))
+    ctx = _Ctx(
+        doc,
+        md_path.resolve(),
+        fn_map,
+        _build_export_styles(doc),
+        paragraph_comments=paragraph_comments,
+        comment_author=meta.comment_author or meta.author,
+    )
     _render_blocks(ctx, main_toks, None)
 
     mapping = {

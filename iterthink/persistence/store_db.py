@@ -13,7 +13,7 @@ import sqlite_vec
 
 from iterthink import config
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SETTINGS_CHAT = "ollama_chat_model"
 SETTINGS_EMBED = "ollama_embed_model"
@@ -116,6 +116,26 @@ def init_schema(conn: sqlite3.Connection) -> None:
                 ingested_at REAL NOT NULL,
                 PRIMARY KEY (file_path, embed_model_id)
             );
+            """
+        )
+    if ver < 4:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS impact_version_chunk (
+                doc_id INTEGER NOT NULL,
+                ver_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                input_hash TEXT NOT NULL,
+                vec_rowid INTEGER NOT NULL,
+                embed_model_id TEXT NOT NULL,
+                chunk_text TEXT NOT NULL,
+                content_sha TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY (doc_id, ver_id, chunk_index)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_impact_version_chunk_doc_ver
+            ON impact_version_chunk (doc_id, ver_id);
             """
         )
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -282,3 +302,97 @@ def manifest_put(
         (file_path, embed_model_id, file_mtime, hashes_json, now),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Impact RAG: version-scoped chunks (retrieval uses MAX(ver_id) per doc_id)
+# ---------------------------------------------------------------------------
+
+
+def impact_version_chunk_delete_for_version(
+    conn: sqlite3.Connection, doc_id: int, ver_id: int
+) -> None:
+    conn.execute(
+        "DELETE FROM impact_version_chunk WHERE doc_id = ? AND ver_id = ?",
+        (doc_id, ver_id),
+    )
+    conn.commit()
+
+
+def impact_version_chunk_insert_row(
+    conn: sqlite3.Connection,
+    *,
+    doc_id: int,
+    ver_id: int,
+    chunk_index: int,
+    input_hash: str,
+    vec_rowid: int,
+    embed_model_id: str,
+    chunk_text: str,
+    content_sha: str,
+) -> None:
+    now = time.time()
+    conn.execute(
+        """
+        INSERT INTO impact_version_chunk (
+            doc_id, ver_id, chunk_index, input_hash, vec_rowid, embed_model_id,
+            chunk_text, content_sha, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            doc_id,
+            ver_id,
+            chunk_index,
+            input_hash,
+            vec_rowid,
+            embed_model_id,
+            chunk_text,
+            content_sha,
+            now,
+        ),
+    )
+
+
+def impact_version_chunk_fetch_latest_rows(
+    conn: sqlite3.Connection, doc_ids: list[int]
+) -> list[tuple[int, int, int, int, str]]:
+    """Rows for each doc_id at its highest stored ver_id: (doc_id, ver_id, idx, vec_rowid, chunk_text)."""
+    if not doc_ids:
+        return []
+    placeholders = ",".join("?" * len(doc_ids))
+    sql = f"""
+    SELECT c.doc_id, c.ver_id, c.chunk_index, c.vec_rowid, c.chunk_text
+    FROM impact_version_chunk c
+    INNER JOIN (
+        SELECT doc_id AS d, MAX(ver_id) AS mv
+        FROM impact_version_chunk
+        WHERE doc_id IN ({placeholders})
+        GROUP BY doc_id
+    ) t ON c.doc_id = t.d AND c.ver_id = t.mv
+    ORDER BY c.doc_id, c.chunk_index
+    """
+    rows = conn.execute(sql, doc_ids).fetchall()
+    return [(int(r[0]), int(r[1]), int(r[2]), int(r[3]), str(r[4])) for r in rows]
+
+
+def impact_version_embeddings_complete(
+    conn: sqlite3.Connection,
+    doc_id: int,
+    ver_id: int,
+    content_sha: str,
+    chunk_count: int,
+) -> bool:
+    """True if we already have chunk_count rows for this version with matching content_sha."""
+    if chunk_count == 0:
+        return False
+    row = conn.execute(
+        """
+        SELECT COUNT(*), MAX(content_sha) FROM impact_version_chunk
+        WHERE doc_id = ? AND ver_id = ?
+        """,
+        (doc_id, ver_id),
+    ).fetchone()
+    if row is None:
+        return False
+    cnt, sha = int(row[0]), str(row[1] or "")
+    return cnt == chunk_count and sha == content_sha

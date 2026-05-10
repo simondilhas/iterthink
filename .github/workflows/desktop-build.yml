@@ -133,6 +133,20 @@ jobs:
           if ($code -ge 8) { exit $code }
           "ITER_REPO=C:\b\w" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # serious_python extracts standalone CPython with `Process.run('tar', ...)`; Git Bash
+      # PATH can hide System32 from native Dart. Short TEMP avoids long-path edge cases.
+      - name: Windows Flet host environment
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'C:\b\t' | Out-Null
+          Add-Content -Path $env:GITHUB_PATH -Value 'C:\Windows\System32'
+          "TEMP=C:\b\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=C:\b\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $env:PATH = 'C:\Windows\System32;' + $env:PATH
+          Write-Host '--- tar (serious_python bootstrap) ---'
+          where.exe tar
+
       - name: Set build repo path (non-Windows)
         if: matrix.name != 'windows'
         shell: bash
@@ -159,7 +173,18 @@ jobs:
             echo "BUILD_VERSION=0.0.0+${GITHUB_RUN_NUMBER}" >> "${GITHUB_ENV}"
           fi
 
-      - name: Flet build
+      - name: Flet build (Windows)
+        if: matrix.name == 'windows'
+        working-directory: ${{ env.ITER_REPO }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          uv run flet build windows --yes -vv `
+            --build-version $env:BUILD_VERSION `
+            --build-number $env:GITHUB_RUN_NUMBER
+
+      - name: Flet build (macOS / Linux)
+        if: matrix.name != 'windows'
         working-directory: ${{ env.ITER_REPO }}
         shell: bash
         run: |

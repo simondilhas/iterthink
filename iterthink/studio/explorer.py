@@ -500,7 +500,7 @@ class MarkdownStudioExplorer:
             size=13,
         )
 
-        async def apply_delete(_e: ft.ControlEvent | None = None) -> None:
+        def apply_delete(_e: ft.ControlEvent | None = None) -> None:
             rp = path.resolve()
             was_current = self.current_path is not None and self.current_path.resolve() == rp
             if was_current:
@@ -537,7 +537,7 @@ class MarkdownStudioExplorer:
                     ft.TextButton(
                         "Delete",
                         style=ft.ButtonStyle(color=ft.Colors.RED_400),
-                        on_click=lambda _e: self.page.run_task(apply_delete),
+                        on_click=apply_delete,
                     ),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
@@ -565,7 +565,7 @@ class MarkdownStudioExplorer:
             size=13,
         )
 
-        async def apply_delete(_e: ft.ControlEvent | None = None) -> None:
+        def apply_delete(_e: ft.ControlEvent | None = None) -> None:
             folder_resolved = folder
             cur_resolved = self.current_path.resolve() if self.current_path else None
             opened_under = False
@@ -627,7 +627,7 @@ class MarkdownStudioExplorer:
                     ft.TextButton(
                         "Delete",
                         style=ft.ButtonStyle(color=ft.Colors.RED_400),
-                        on_click=lambda _e: self.page.run_task(apply_delete),
+                        on_click=apply_delete,
                     ),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,

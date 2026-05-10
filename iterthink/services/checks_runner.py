@@ -117,11 +117,18 @@ async def run_paragraph(
 ) -> tuple[dict | None, str | None]:
     """One LLM call (Ollama or routed HTTP). Returns ``(payload, error)``."""
     template = check.user_template
+    system = check.system_prompt
     if context:
         template = template + "\n\nCONTEXT FROM PROJECT FILES:\n{context}"
+        system = (
+            system.rstrip()
+            + "\n\nWhen CONTEXT FROM PROJECT FILES is provided, use it to ground "
+            "your evaluation in the broader project scope. Consider how this change "
+            "interacts with or affects the referenced project documents."
+        )
     user_text = template.format(old=old or "", new=new or "", context=context)
     messages = [
-        {"role": "system", "content": check.system_prompt},
+        {"role": "system", "content": system},
         {"role": "user", "content": user_text},
     ]
     try:

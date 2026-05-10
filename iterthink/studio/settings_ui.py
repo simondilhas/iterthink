@@ -8,7 +8,7 @@ from typing import Any
 import flet as ft
 import yaml
 
-from iterthink import config, licensing, prompts
+from iterthink import config, impact_checks, licensing, prompts
 from iterthink.persistence import store_db, vault_store
 from iterthink.services import remote_model_list
 from iterthink.ai import passphrase_keyring
@@ -419,7 +419,7 @@ async def open_settings_dialog(studio: Any) -> None:
         dense=True,
     )
     store_tf = ft.TextField(
-        label="Store directory (database + prompts.yaml)",
+        label="Store directory (database + prompts.yaml + impact_checks.yaml)",
         value=str(config.STORE_DIR),
         expand=True,
         dense=True,
@@ -610,6 +610,7 @@ async def open_settings_dialog(studio: Any) -> None:
         _apply_paths_and_theme(studio, store_changed=store_changed)
 
     margin_rows: list[dict[str, Any]] = []
+    impact_rows: list[dict[str, Any]] = []
     prompts_list = ft.Column(spacing=10, expand=True, scroll=ft.ScrollMode.AUTO)
 
     def _collect_margin_dicts() -> list[dict[str, str]]:
@@ -629,9 +630,37 @@ async def open_settings_dialog(studio: Any) -> None:
             )
         return out
 
+    def _collect_impact_dicts() -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        for r in impact_rows:
+            out.append(
+                {
+                    "id": (r["id"].value or "").strip(),
+                    "label": (r["label"].value or "").strip(),
+                    "system_prompt": (r["system"].value or "").strip(),
+                    "user_template": (r["user"].value or "").strip(),
+                }
+            )
+        return out
+
     def _rebuild_prompts_list() -> None:
         prompts_list.controls.clear()
+        prompts_list.controls.append(
+            ft.Text("Margin / KI (Discuss · Change · Evaluate)", weight=ft.FontWeight.W_600, size=13)
+        )
         for r in margin_rows:
+            prompts_list.controls.append(r["card"])
+        prompts_list.controls.append(
+            ft.Padding(
+                padding=ft.padding.only(top=8),
+                content=ft.Text(
+                    "Impact tab (Review → Impact). Templates need {text} and {context}.",
+                    weight=ft.FontWeight.W_600,
+                    size=13,
+                ),
+            )
+        )
+        for r in impact_rows:
             prompts_list.controls.append(r["card"])
         if _ctrl_on_page(prompts_list):
             prompts_list.update()
@@ -708,6 +737,64 @@ async def open_settings_dialog(studio: Any) -> None:
         if rebuild:
             _rebuild_prompts_list()
 
+    def _remove_impact_row(row: dict[str, Any], _e: ft.ControlEvent | None = None) -> None:
+        impact_rows.remove(row)
+        _rebuild_prompts_list()
+
+    def _add_impact_row(
+        *,
+        aid: str = "",
+        label: str = "",
+        system_prompt: str = "",
+        user_template: str = "{text}\n\n{context}",
+        rebuild: bool = True,
+    ) -> None:
+        id_f = ft.TextField(label="id", value=aid, dense=True, expand=True)
+        label_f = ft.TextField(label="Label", value=label, dense=True, expand=True)
+        system_f = ft.TextField(
+            label="System prompt",
+            multiline=True,
+            min_lines=2,
+            max_lines=8,
+            value=system_prompt,
+            expand=True,
+        )
+        user_f = ft.TextField(
+            label="User template ({text} = paragraph, {context} = RAG)",
+            multiline=True,
+            min_lines=2,
+            max_lines=6,
+            value=user_template,
+            expand=True,
+        )
+        row: dict[str, Any] = {"id": id_f, "label": label_f, "system": system_f, "user": user_f}
+        del_btn = ft.IconButton(
+            icon=ft.Icons.DELETE_OUTLINE,
+            tooltip="Remove impact check",
+            on_click=lambda e, rr=row: _remove_impact_row(rr, e),
+        )
+        row["card"] = ft.Container(
+            padding=10,
+            border=ft.border.all(1, ft.Colors.OUTLINE_VARIANT),
+            border_radius=6,
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [id_f, label_f, del_btn],
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    ),
+                    system_f,
+                    user_f,
+                ],
+                tight=True,
+                spacing=8,
+            ),
+        )
+        impact_rows.append(row)
+        if rebuild:
+            _rebuild_prompts_list()
+
+    prompts.reload()
     for act in prompts.MARGIN_ACTIONS:
         _add_margin_row(
             aid=act.id,
@@ -717,23 +804,35 @@ async def open_settings_dialog(studio: Any) -> None:
             user_template=act.user_template,
             rebuild=False,
         )
+    impact_checks.reload()
+    for act in impact_checks.IMPACT_CHECKS:
+        _add_impact_row(
+            aid=act.id,
+            label=act.label,
+            system_prompt=act.system_prompt,
+            user_template=act.user_template,
+            rebuild=False,
+        )
     _rebuild_prompts_list()
 
     async def save_margin_prompts(_e: ft.ControlEvent | None = None) -> None:
         try:
             prompts.write_margin_actions_dicts(_collect_margin_dicts())
+            impact_checks.write_impact_checks_dicts(_collect_impact_dicts())
         except (OSError, ValueError, yaml.YAMLError) as ex:
             studio._snack(f"Could not save prompts: {ex}")
             return
         try:
             if hasattr(studio, "_rebuild_topic_pills"):
                 studio._rebuild_topic_pills()
+            if hasattr(studio, "_rebuild_impact_prompt_pills"):
+                studio._rebuild_impact_prompt_pills()
             studio._margin_gen += 1
             page.run_task(studio._debounced_compose_rebuild, studio._margin_gen)
         except Exception as ex:
             studio._snack(f"Prompts saved, but UI refresh failed: {ex}")
             return
-        studio._snack("Margin prompts saved.")
+        studio._snack("Prompts saved.")
 
     def _on_settings_ki_tier_tabs_change(e: ft.ControlEvent) -> None:
         try:
@@ -1079,8 +1178,9 @@ async def open_settings_dialog(studio: Any) -> None:
         content=ft.Column(
             [
                 ft.Text(
-                    f"Margin / KI actions ({config.STORE_DIR / 'prompts.yaml'}). "
-                    "Each user template must include {{text}}. Topic selects the Discuss / Change / Evaluate tab.",
+                    f"Margin prompts: {config.STORE_DIR / 'prompts.yaml'}. "
+                    f"Impact tab checks: {config.STORE_DIR / 'impact_checks.yaml'}. "
+                    "Margin uses {{text}} and KI topic. Impact uses {{text}} + {{context}}.",
                     size=12,
                     color=ft.Colors.GREY_500,
                     selectable=True,
@@ -1089,13 +1189,19 @@ async def open_settings_dialog(studio: Any) -> None:
                 ft.Row(
                     [
                         ft.OutlinedButton(
-                            "Add action",
+                            "Add margin action",
                             icon=ft.Icons.ADD,
                             on_click=lambda _e: _add_margin_row(),
+                        ),
+                        ft.OutlinedButton(
+                            "Add impact check",
+                            icon=ft.Icons.ADD,
+                            on_click=lambda _e: _add_impact_row(),
                         ),
                         ft.FilledButton("Save prompts", on_click=lambda e: page.run_task(save_margin_prompts, e)),
                     ],
                     spacing=8,
+                    wrap=True,
                 ),
             ],
             expand=True,

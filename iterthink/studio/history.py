@@ -1263,6 +1263,13 @@ class MarkdownStudioCompareText:
         if _ctrl_on_page(self._future_rows_listview):
             self._future_rows_listview.update()
 
+        if (
+            self._main_tab_index == TAB_FUTURE
+            and int(getattr(self, "_review_subtab_index", 0)) == 1
+            and hasattr(self, "_sync_impact_paragraph_list_after_compare_rebuild")
+        ):
+            self._sync_impact_paragraph_list_after_compare_rebuild()
+
         _log.debug(
             "review_future_rebuild row_specs=%s list_controls=%s change_panel_visible=%s",
             len(rows),
