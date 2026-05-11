@@ -90,7 +90,7 @@ async def _open_settings_dialog(studio: Any) -> None:
     )
 
     status_txt = ft.Text(
-        f"{len(chat_opts)} chat model(s) on Ollama. Paragraph embeddings use the bundled Nomic model (ONNX).",
+        f"{len(chat_opts)} chat model(s) on Ollama. Paragraph embeddings use bundled GTE-Multilingual-Base (ONNX).",
         size=12,
         color=ft.Colors.GREY_500,
     )
@@ -109,7 +109,7 @@ async def _open_settings_dialog(studio: Any) -> None:
             chat_dd.value = chat_opts[0]
         status_txt.value = (
             f"{len(chat_opts)} chat model(s) on Ollama. "
-            "Paragraph embeddings use the bundled Nomic model (ONNX)."
+            "Paragraph embeddings use bundled GTE-Multilingual-Base (ONNX)."
         )
         if _ctrl_on_page(chat_dd):
             chat_dd.update()
@@ -871,7 +871,7 @@ async def _open_settings_dialog(studio: Any) -> None:
                 ft.Text("Local (Ollama)", weight=ft.FontWeight.W_600, size=14),
                 ft.Text(
                     "Used when Home is selected in the KI panel. "
-                    "Compare-tab paragraph embeddings run locally (bundled ONNX); no Ollama embedding model is required.",
+                    "Compare-tab paragraph embeddings run locally (GTE-Multilingual-Base ONNX); no Ollama embedding model is required.",
                     size=11,
                     color=ft.Colors.GREY_500,
                 ),

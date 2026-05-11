@@ -162,65 +162,80 @@ def _pdf_line_strip_key(line: dict, page_height: float) -> tuple[int, str] | Non
     return (bk, fp)
 
 
-def _pdf_repeated_strip_keys_dict(doc) -> frozenset[tuple[int, str]]:
+def _plumber_page_to_lines(page: object) -> list[dict]:
+    """Build line dicts (``bbox`` + ``spans`` with ``size``) from pdfplumber ``.chars``."""
+    chars = [c for c in (page.chars or []) if (c.get("text") or "").strip()]
+    if not chars:
+        return []
+    heights: list[float] = []
+    for c in chars:
+        t, b = float(c["top"]), float(c["bottom"])
+        h = max(b - t, float(c.get("height") or 0.0), 0.001)
+        heights.append(h)
+    med = statistics.median(heights) if heights else 10.0
+    row_unit = max(2.5, med * 0.55)
+
+    buckets: dict[int, list] = defaultdict(list)
+    for c in chars:
+        cy = (float(c["top"]) + float(c["bottom"])) / 2.0
+        key = int(cy / row_unit)
+        buckets[key].append(c)
+
+    lines: list[dict] = []
+    for _bk in sorted(buckets.keys()):
+        row = sorted(buckets[_bk], key=lambda c: float(c["x0"]))
+        spans: list[dict] = []
+        cur_parts: list[str] = []
+        cur_size = 0.0
+        cur_font = ""
+
+        def flush_span() -> None:
+            nonlocal cur_parts, cur_size, cur_font
+            s = "".join(cur_parts).strip()
+            if s:
+                spans.append({"text": s, "size": cur_size or 11.0})
+            cur_parts = []
+            cur_size = 0.0
+            cur_font = ""
+
+        for c in row:
+            ch = str(c.get("text") or "")
+            sz = float(c.get("size") or 0.0)
+            fn = str(c.get("fontname") or "")
+            if cur_parts and (
+                cur_font != fn or (cur_size > 0 and sz > 0 and abs(cur_size - sz) > 0.75)
+            ):
+                flush_span()
+            cur_parts.append(ch)
+            if sz > 0.0:
+                cur_size = sz
+            cur_font = fn
+        flush_span()
+        if not spans:
+            continue
+        x0 = min(float(c["x0"]) for c in row)
+        x1 = max(float(c["x1"]) for c in row)
+        y0 = min(float(c["top"]) for c in row)
+        y1 = max(float(c["bottom"]) for c in row)
+        lines.append({"bbox": [x0, y0, x1, y1], "spans": spans})
+    return lines
+
+
+def _pdf_repeated_strip_keys_lines(pages_data: list[tuple[float, list[dict]]]) -> frozenset[tuple[int, str]]:
     """
     Lines whose (relative-Y bucket, strip fingerprint) appear on enough distinct pages
-    (running heads / footers). Counts use unique page indices per key.
+    (running heads / footers). ``pages_data`` is ``(page_height, lines)`` per page index.
     """
-    n = len(doc)
+    n = len(pages_data)
     need = _pdf_strip_page_threshold(n)
     key_pages: dict[tuple[int, str], set[int]] = defaultdict(set)
-    for pi in range(n):
-        page = doc[pi]
-        ph = float(page.rect.height)
-        td = page.get_text("dict") or {}
-        for b in td.get("blocks", []):
-            if b.get("type") != 0:
-                continue
-            for line in b.get("lines", []):
-                key = _pdf_line_strip_key(line, ph)
-                if key is None:
-                    continue
-                key_pages[key].add(pi)
-    return frozenset(k for k, pages in key_pages.items() if len(pages) >= need)
-
-
-def _pdf_repeated_strip_keys_blocks(doc) -> frozenset[tuple[int, str]]:
-    """Same repetition rule using ``get_text(\"blocks\")`` lines (one key per block string)."""
-    n = len(doc)
-    need = _pdf_strip_page_threshold(n)
-    key_pages: dict[tuple[int, str], set[int]] = defaultdict(set)
-    for pi in range(n):
-        page = doc[pi]
-        ph = float(page.rect.height)
-        for b in page.get_text("blocks") or []:
-            key = _pdf_block_strip_key(b, ph)
+    for pi, (ph, page_lines) in enumerate(pages_data):
+        for line in page_lines:
+            key = _pdf_line_strip_key(line, ph)
             if key is None:
                 continue
             key_pages[key].add(pi)
     return frozenset(k for k, pages in key_pages.items() if len(pages) >= need)
-
-
-def _pdf_block_strip_key(block: list | tuple, page_height: float) -> tuple[int, str] | None:
-    if not isinstance(block, (list, tuple)) or len(block) < 5:
-        return None
-    t = block[4]
-    if not isinstance(t, str):
-        return None
-    norm = _normalize_pdf_line_text(t)
-    fp = _pdf_strip_fingerprint(norm)
-    if fp is None:
-        return None
-    try:
-        y0, y1 = float(block[1]), float(block[3])
-    except (TypeError, ValueError):
-        return None
-    cy = (y0 + y1) / 2.0
-    ph = max(float(page_height), 1e-6)
-    y_frac = max(0.0, min(1.0, cy / ph))
-    bk = int(round(y_frac * _PDF_Y_BUCKET_SCALE))
-    bk = max(0, min(_PDF_Y_BUCKET_SCALE, bk))
-    return (bk, fp)
 
 
 def _strip_inline_bullet(text: str) -> str | None:
@@ -235,37 +250,33 @@ def _strip_inline_bullet(text: str) -> str | None:
 
 def _pdf_dict_to_markdown(src: Path) -> str:
     """
-    Extract PDF using ``Page.get_text(\"dict\")``: reading order, font-size headings,
-    bullets / numbered lists, and paragraph merging from vertical gaps.
+    Structured PDF → Markdown via pdfplumber (char geometry → line/span dicts): reading order,
+    font-size headings, bullets / numbered lists, paragraph gaps from vertical positions.
 
     Repeated running heads/footers: lines whose strip fingerprint (digits folded to ``#``)
     and relative vertical bucket match on enough distinct pages are omitted entirely.
-    Single-page
-    PDFs never strip. ``get_text(\"text\")`` fallback in legacy cannot apply this rule.
+    Single-page PDFs never strip.
     """
-    import fitz
+    import pdfplumber
 
-    doc = fitz.open(str(src))
-    page_chunks: list[str] = []
-    try:
-        strip_keys = _pdf_repeated_strip_keys_dict(doc)
+    with pdfplumber.open(str(src)) as pdf:
+        pages_data: list[tuple[float, list[dict]]] = []
+        for page in pdf.pages:
+            ph = float(page.height) if page.height else 792.0
+            pages_data.append((ph, _plumber_page_to_lines(page)))
+
+        strip_keys = _pdf_repeated_strip_keys_lines(pages_data)
 
         all_sizes: list[float] = []
-        for pi in range(len(doc)):
-            page = doc[pi]
-            ph = float(page.rect.height)
-            td = page.get_text("dict") or {}
-            for b in td.get("blocks", []):
-                if b.get("type") != 0:
+        for ph, page_lines in pages_data:
+            for line in page_lines:
+                sk = _pdf_line_strip_key(line, ph)
+                if sk is not None and sk in strip_keys:
                     continue
-                for line in b.get("lines", []):
-                    sk = _pdf_line_strip_key(line, ph)
-                    if sk is not None and sk in strip_keys:
-                        continue
-                    for sp in line.get("spans", []):
-                        z = sp.get("size") or 0
-                        if z and float(z) > 0:
-                            all_sizes.append(float(z))
+                for sp in line.get("spans", []):
+                    z = sp.get("size") or 0
+                    if z and float(z) > 0:
+                        all_sizes.append(float(z))
         if len(all_sizes) >= 6:
             sorted_sz = sorted(all_sizes)
             body_med = sorted_sz[len(sorted_sz) // 4]
@@ -273,21 +284,17 @@ def _pdf_dict_to_markdown(src: Path) -> str:
             body_med = statistics.median(all_sizes) if all_sizes else 11.0
         body_med = max(6.0, min(body_med, 22.0))
 
-        for pi in range(len(doc)):
+        page_chunks: list[str] = []
+        for pi, (ph, page_lines) in enumerate(pages_data):
             page_num = pi + 1
-            page = doc[pi]
-            ph = float(page.rect.height)
-            td = page.get_text("dict") or {}
-            blocks = [b for b in td.get("blocks", []) if b.get("type") == 0]
             flat: list[tuple[float, float, float, float, dict]] = []
-            for b in blocks:
-                for line in b.get("lines", []):
-                    sk = _pdf_line_strip_key(line, ph)
-                    if sk is not None and sk in strip_keys:
-                        continue
-                    bbox = line.get("bbox") or [0.0, 0.0, 0.0, 0.0]
-                    x0, y0, _x1, y1 = bbox[0], bbox[1], bbox[2], bbox[3]
-                    flat.append((y0, x0, y1, line))
+            for line in page_lines:
+                sk = _pdf_line_strip_key(line, ph)
+                if sk is not None and sk in strip_keys:
+                    continue
+                bbox = line.get("bbox") or [0.0, 0.0, 0.0, 0.0]
+                x0, y0, _x1, y1 = bbox[0], bbox[1], bbox[2], bbox[3]
+                flat.append((y0, x0, y1, line))
             flat.sort(key=lambda t: (round(t[0], 2), round(t[1], 2)))
 
             events: list[tuple[str, tuple]] = []
@@ -350,8 +357,6 @@ def _pdf_dict_to_markdown(src: Path) -> str:
                 page_chunks.append(f"{marker}\n\n{md_body.strip()}")
             else:
                 page_chunks.append(marker)
-    finally:
-        doc.close()
 
     return "\n\n".join(page_chunks)
 
@@ -419,50 +424,68 @@ def _pdf_events_to_markdown(events: list[tuple[str, tuple]], body_med: float) ->
     return "\n\n".join(parts)
 
 
+def _pdf_to_markdown_pypdf_plain(src: Path) -> str:
+    """Per-page ``pypdf`` ``extract_text`` with ``<!-- page:N -->`` markers (no repetition strip)."""
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(src))
+    chunks: list[str] = []
+    for i, page in enumerate(reader.pages):
+        body = (page.extract_text() or "").strip()
+        marker = f"<!-- page:{i + 1} -->"
+        chunks.append(f"{marker}\n\n{body}" if body else marker)
+    return "\n\n".join(chunks)
+
+
 def _pdf_to_markdown_legacy(src: Path) -> str:
     """
-    Plain PyMuPDF ``get_text`` extraction (fallback).
+    Fallback: pdfplumber-derived lines with repetition strip; per-page ``pypdf`` text if empty.
 
     Inserts ``<!-- page:N -->`` (1-based) before each page's content for scroll mapping.
-    Omits block lines that match repetition-based strip keys (same rule as dict path,
-    keyed from blocks). Plain ``get_text(\"text\")`` fallback has no positions so
-    repetition stripping cannot apply there.
     """
-    import fitz
+    import pdfplumber
+    from pypdf import PdfReader
 
-    doc = fitz.open(str(src))
-    chunks: list[str] = []
+    pages_data: list[tuple[float, list[dict]]] = []
     try:
-        strip_keys = _pdf_repeated_strip_keys_blocks(doc)
-        for page_index in range(len(doc)):
-            page_num = page_index + 1
-            page = doc[page_index]
-            ph = float(page.rect.height)
-            blocks = page.get_text("blocks") or []
-            lines_filtered: list[str] = []
-            for b in blocks:
-                if isinstance(b, (list, tuple)) and len(b) >= 5:
-                    bk = _pdf_block_strip_key(b, ph)
-                    if bk is not None and bk in strip_keys:
-                        continue
-                    t = b[4]
-                    if isinstance(t, str) and t.strip():
-                        lines_filtered.append(t.strip())
-            raw2 = "\n".join(lines_filtered)
-            paras = [p.strip() for p in raw2.split("\n\n") if p.strip()]
-            if not paras and lines_filtered:
-                paras = [" ".join(lines_filtered)]
-            if not paras:
-                raw = page.get_text("text") or ""
-                paras = [p.strip() for p in raw.split("\n\n") if p.strip()]
-            body = "\n\n".join(paras) if paras else ""
-            marker = f"<!-- page:{page_num} -->"
-            if body.strip():
-                chunks.append(f"{marker}\n\n{body}")
-            else:
-                chunks.append(marker)
-    finally:
-        doc.close()
+        with pdfplumber.open(str(src)) as pdf:
+            for p in pdf.pages:
+                ph = float(p.height) if p.height else 792.0
+                pages_data.append((ph, _plumber_page_to_lines(p)))
+    except Exception as ex:
+        logger.debug("pdfplumber legacy prep failed: %s", ex)
+
+    strip_keys = _pdf_repeated_strip_keys_lines(pages_data) if pages_data else frozenset()
+
+    reader = PdfReader(str(src))
+    chunks: list[str] = []
+    for page_index, page in enumerate(reader.pages):
+        page_num = page_index + 1
+        if page_index < len(pages_data):
+            ph, page_lines = pages_data[page_index]
+        else:
+            ph, page_lines = 792.0, []
+        lines_filtered: list[str] = []
+        for line in page_lines:
+            bk = _pdf_line_strip_key(line, ph)
+            if bk is not None and bk in strip_keys:
+                continue
+            raw = "".join(str(sp.get("text", "")) for sp in (line.get("spans") or []))
+            if raw.strip():
+                lines_filtered.append(raw.strip())
+        raw2 = "\n".join(lines_filtered)
+        paras = [p.strip() for p in raw2.split("\n\n") if p.strip()]
+        if not paras and lines_filtered:
+            paras = [" ".join(lines_filtered)]
+        if not paras:
+            raw = (page.extract_text() or "").strip()
+            paras = [p.strip() for p in raw.split("\n\n") if p.strip()] if raw else []
+        body = "\n\n".join(paras) if paras else ""
+        marker = f"<!-- page:{page_num} -->"
+        if body.strip():
+            chunks.append(f"{marker}\n\n{body}")
+        else:
+            chunks.append(marker)
 
     return "\n\n".join(chunks)
 
@@ -471,11 +494,10 @@ def pdf_to_markdown(src: Path) -> str:
     """
     PDF → Markdown with ``<!-- page:N -->`` markers.
 
-    Primary path: structured PyMuPDF ``dict`` extraction (reading order, font-size headings,
+    Primary path: structured pdfplumber extraction (reading order, font-size headings,
     bullets / numbered lists, paragraph gaps). Repeated running heads/footers are dropped when
     the same strip fingerprint and relative vertical position recur on enough distinct pages.
-    Optional: PyMuPDF4LLM (no repetition-based strip). Last resort: plain ``get_text``;
-    the unstructured text fallback cannot strip by repetition.
+    Then plain per-page ``pypdf`` text, then legacy hybrid (plumber lines + strip + ``pypdf``).
     """
 
     def _has_body(md: str) -> bool:
@@ -489,40 +511,12 @@ def pdf_to_markdown(src: Path) -> str:
     except Exception as ex:
         logger.warning("Structured PDF extraction failed: %s", ex)
 
-    src_abs = str(src.resolve())
-    chunks_out: list[str] | None = None
-
     try:
-        import pymupdf4llm  # type: ignore[import-untyped]
-
-        result = pymupdf4llm.to_markdown(
-            src_abs,
-            page_chunks=True,
-            write_images=False,
-            embed_images=False,
-        )
-        if isinstance(result, list):
-            chunks_out = []
-            for chunk in result:
-                meta = chunk.get("metadata") or {}
-                page_num = meta.get("page_number")
-                if not isinstance(page_num, int):
-                    page_num = len(chunks_out) + 1
-                body = (chunk.get("text") or "").strip()
-                marker = f"<!-- page:{page_num} -->"
-                if body:
-                    chunks_out.append(f"{marker}\n\n{body}")
-                else:
-                    chunks_out.append(marker)
-    except ImportError:
-        logger.debug("pymupdf4llm not available")
+        md_plain = _pdf_to_markdown_pypdf_plain(src)
+        if _has_body(md_plain):
+            return md_plain
     except Exception as ex:
-        logger.warning("PyMuPDF4LLM PDF extraction failed: %s", ex)
-
-    if chunks_out:
-        md = "\n\n".join(chunks_out)
-        if _has_body(md):
-            return md
+        logger.warning("Plain pypdf PDF extraction failed: %s", ex)
 
     md = _pdf_to_markdown_legacy(src)
     if not md.strip():
@@ -537,23 +531,19 @@ def classify_pdf_profile(src: Path) -> PdfProfileHeuristic:
     """
     Rough split: text-heavy PDFs → ``text``; sparse extraction → ``plan`` / drawing-like.
     """
-    import fitz
+    from pypdf import PdfReader
 
-    doc = fitz.open(str(src))
-    try:
-        n = len(doc)
-        if n == 0:
-            return "plan"
-        total_chars = 0
-        for i in range(n):
-            total_chars += len((doc[i].get_text() or "").strip())
-        avg = total_chars / max(n, 1)
-        # Few readable characters per page → treat as drawing-first.
-        if avg < 120:
-            return "plan"
-        return "text"
-    finally:
-        doc.close()
+    reader = PdfReader(str(src))
+    n = len(reader.pages)
+    if n == 0:
+        return "plan"
+    total_chars = 0
+    for page in reader.pages:
+        total_chars += len((page.extract_text() or "").strip())
+    avg = total_chars / max(n, 1)
+    if avg < 120:
+        return "plan"
+    return "text"
 
 
 def pdf_render_cache_dir(pdf_abs: Path) -> Path:
@@ -568,10 +558,10 @@ def pdf_render_cache_dir(pdf_abs: Path) -> Path:
 
 def render_pdf_to_png_pages(pdf_abs: Path) -> list[Path]:
     """
-    Rasterize each PDF page to PNG under the render cache.
+    Rasterize each PDF page to PNG under the render cache (pypdfium2 + Pillow).
     Returns ordered list of PNG paths.
     """
-    import fitz
+    import pypdfium2 as pdfium
 
     cache = pdf_render_cache_dir(pdf_abs)
     marker = cache / ".source"
@@ -584,17 +574,19 @@ def render_pdf_to_png_pages(pdf_abs: Path) -> list[Path]:
     for old in cache.glob("page_*.png"):
         old.unlink(missing_ok=True)
 
-    doc = fitz.open(str(pdf_abs))
+    pdf = pdfium.PdfDocument(str(pdf_abs))
     out: list[Path] = []
     try:
-        for i in range(len(doc)):
-            page = doc[i]
-            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+        scale = 1.5
+        for i in range(len(pdf)):
+            page = pdf[i]
+            bitmap = page.render(scale=scale)
+            pil_image = bitmap.to_pil()
             p = cache / f"page_{i + 1:04d}.png"
-            pix.save(str(p))
+            pil_image.save(str(p))
             out.append(p)
     finally:
-        doc.close()
+        pdf.close()
 
     marker.write_text(src_tag, encoding="utf-8")
     return out
