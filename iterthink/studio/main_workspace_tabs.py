@@ -16,6 +16,7 @@ async switch queue and toolbar/subtab reconciliation.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import flet as ft
 
@@ -31,6 +32,8 @@ from .constants import (
     TAB_PRESENT,
 )
 from .util import ctrl_on_page as _ctrl_on_page
+
+_log = logging.getLogger(__name__)
 
 
 class MainWorkspaceTabsMixin:
@@ -359,34 +362,8 @@ class MainWorkspaceTabsMixin:
 
         # Entering Future (TAB_FUTURE): auto-load the most recent ai_proposal / legacy ai_staged when nothing is staged.
         elif new_ix == TAB_FUTURE:
-            already_staged = (
-                self._compare_candidate_source == "ai_preview"
-                and self._pending_ai_accept_action_id
-                and self._compare_snapshot_version_id is not None
-            )
-            pdf_import_review = self._compare_candidate_source == "pdf_original"
-            if not already_staged and not pdf_import_review:
-                target_vid = self._latest_ai_proposal_vid
-                if target_vid is None and self.current_path:
-                    with session_scope() as s:
-                        snaps = version_storage.list_snapshots(s, self.current_path.resolve())
-                    for sn in snaps:  # newest first
-                        if sn.reason in ("ai_proposal", "ai_staged", "review_edit"):
-                            target_vid = sn.version_id
-                            break
-                if target_vid is not None:
-                    self._select_proposal_as_review_candidate(target_vid)
-                    self._latest_ai_proposal_vid = target_vid
-                else:
-                    # No proposals: mirror compose into the candidate so rows are editable (equal/replace),
-                    # and set a synthetic action id so Accept / approve-all still write disk + snapshots.
-                    seeded = self.editor.value or ""
-                    self._compare_candidate_source = "ai_preview"
-                    self._compare_editor.value = seeded
-                    self._pending_ai_accept_action_id = REVIEW_MANUAL_CANDIDATE_ACTION_ID
-                    self._compare_snapshot_version_id = None
-                    self._loaded_proposal_sha = version_storage.content_sha256(seeded)
-            # Show a loading spinner while the snapshot is loaded and rows are built.
+            # Tab bar + Review chrome were still on the previous tab until now, so DB/list work looked frozen.
+            self._apply_active_tab_ui_state()
             self._future_rows_listview.controls.clear()
             self._future_rows_listview.controls.append(
                 ft.Container(
@@ -400,13 +377,47 @@ class MainWorkspaceTabsMixin:
             )
             if _ctrl_on_page(self._future_rows_listview):
                 self._future_rows_listview.update()
-            await asyncio.sleep(0)  # yield so the client renders the spinner
-            if self._is_tab_switch_stale(switch_seq):
+            await asyncio.sleep(0)  # yield so the client paints Review + spinner before snapshot IO
+
+            try:
+                already_staged = (
+                    self._compare_candidate_source == "ai_preview"
+                    and self._pending_ai_accept_action_id
+                    and self._compare_snapshot_version_id is not None
+                )
+                pdf_import_review = self._compare_candidate_source == "pdf_original"
+                if not already_staged and not pdf_import_review:
+                    target_vid = self._latest_ai_proposal_vid
+                    if target_vid is None and self.current_path:
+                        with session_scope() as s:
+                            snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+                        for sn in snaps:  # newest first
+                            if sn.reason in ("ai_proposal", "ai_staged", "review_edit"):
+                                target_vid = sn.version_id
+                                break
+                    if target_vid is not None:
+                        self._select_proposal_as_review_candidate(target_vid)
+                        self._latest_ai_proposal_vid = target_vid
+                    else:
+                        # No proposals: mirror compose into the candidate so rows are editable (equal/replace),
+                        # and set a synthetic action id so Accept / approve-all still write disk + snapshots.
+                        seeded = self.editor.value or ""
+                        self._compare_candidate_source = "ai_preview"
+                        self._compare_editor.value = seeded
+                        self._pending_ai_accept_action_id = REVIEW_MANUAL_CANDIDATE_ACTION_ID
+                        self._compare_snapshot_version_id = None
+                        self._loaded_proposal_sha = version_storage.content_sha256(seeded)
+                if self._is_tab_switch_stale(switch_seq):
+                    self._discard_future_tab_loading_spinner()
+                    self._main_tab_index = prev
+                    self._apply_active_tab_ui_state()
+                    return
+                self._rebuild_future_paragraph_ui()
+            except BaseException as ex:
+                _log.exception("Review tab: failed while loading snapshot or building rows")
                 self._discard_future_tab_loading_spinner()
-                self._main_tab_index = prev
-                self._apply_active_tab_ui_state()
-                return
-            self._rebuild_future_paragraph_ui()
+                if hasattr(self, "_future_review_load_failed_ui"):
+                    self._future_review_load_failed_ui(ex)
 
         if self._is_tab_switch_stale(switch_seq):
             self._main_tab_index = prev

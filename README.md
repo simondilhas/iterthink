@@ -105,6 +105,26 @@ To pin a release or commit, append `@v0.1.0` or `@<commit-sha>` inside the quote
 
 **From a clone (editable):** `git clone https://github.com/simondilhas/iterthink.git`, then `pip install -e .`, then `iterthink` or `python -m iterthink`.
 
+### App menu (pip install)
+
+`pip` does not register an OS launcher. Add one if you want iterthink in the system menu, not only from a terminal.
+
+**Linux** (GNOME, KDE, and other Freedesktop desktops): Activate the same environment you use for `iterthink`, run `which iterthink`, then create `~/.local/share/applications/iterthink.desktop` with that path in `Exec=`:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=Iterthink
+Exec=/ABSOLUTE/PATH/TO/iterthink
+Icon=applications-office
+Terminal=false
+Categories=Office;TextEditor;
+```
+
+If the entry does not show up, run `update-desktop-database ~/.local/share/applications/`, then search the app grid / Activities for **Iterthink**.
+
+**Windows:** Shortcut → target `...\your-project\.venv\Scripts\iterthink.exe`, or the `iterthink.exe` under `%USERPROFILE%\AppData\Roaming\Python\` if you used `pip install --user`. Put the `.lnk` in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\` for Start; pin to the taskbar from there if you want.
+
 ---
 
 ## Prompts (margin actions)
@@ -139,6 +159,7 @@ Using a cloud API key (OpenAI, Anthropic, Gemini) sends your text to that provid
 - Team review features for collaborative workflows
 - Deeper [{yourcompany}os](https://yourcompanyos.io) integration — from change detection to closed decisions
 - Redesign with Dart (instead of python and flet) for better performance.
+- Performance Improvments for long documents
 
 ---
 

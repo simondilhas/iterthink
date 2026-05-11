@@ -520,7 +520,8 @@ class MarkdownStudioCompareText:
             self._flush_review_edits_if_changed()
             with session_scope() as s:
                 row = version_storage.get_version_row(s, vid)
-            if row is not None and row.reason in ("ai_proposal", "ai_staged", "review_edit"):
+                row_reason = row.reason if row is not None else None
+            if row_reason in ("ai_proposal", "ai_staged", "review_edit"):
                 self._select_proposal_as_review_candidate(vid)
             else:
                 # Imports: text-only snapshots use ai_preview for accept flow; PDF/Word keep asset sources.
@@ -573,6 +574,8 @@ class MarkdownStudioCompareText:
             with session_scope() as s:
                 body = version_storage.load_version_body(s, vid)
                 row = version_storage.get_version_row(s, vid)
+                # Read columns inside the session; ORM rows detach on scope exit.
+                fallback_label = (row.display_label or "").strip() if row is not None else ""
         except BaseException:
             self._snack("Could not load that proposal.")
             return
@@ -582,7 +585,7 @@ class MarkdownStudioCompareText:
         self._compare_candidate_source = "ai_preview"
         self._pending_ai_accept_action_id = (
             self._ai_proposal_action_ids.get(vid)
-            or (row.display_label if row else None)
+            or (fallback_label or None)
             or "ai_proposal"
         )
         self._loaded_proposal_sha = version_storage.content_sha256(body)
@@ -807,6 +810,21 @@ class MarkdownStudioCompareText:
                 self._compare_newer_cached_body = merged
         else:
             self._compare_editor.value = merged
+
+    def _future_review_candidate_para_count_mismatch(self, n_candidate_paras: int) -> bool:
+        """True when the merged candidate buffer's paragraph count no longer matches the Review grid.
+
+        Review rows include pure ``delete`` slots (no candidate paragraph). Comparing
+        ``len(split_paragraphs(cand))`` to ``len(_compare_right_fields)`` therefore
+        spuriously mismatches whenever deletes exist, forcing a full rebuild on every
+        keystroke and wiping edits such as trailing spaces.
+        """
+        kinds = getattr(self, "_future_row_kinds", None) or []
+        n_fields = len(self._compare_right_fields)
+        if not kinds or len(kinds) != n_fields:
+            return n_candidate_paras != n_fields
+        expected = sum(1 for k in kinds if k != "delete")
+        return n_candidate_paras != expected
 
     def _capture_compare_baseline_snapshot(self) -> None:
         """Store Compose buffer as the Compare left baseline (draft mode only uses this via _compare_latest_baseline_text)."""
@@ -1144,6 +1162,44 @@ class MarkdownStudioCompareText:
         self._compare_refine_gen += 1
         self.page.run_task(self._debounced_refine_compare_slots, self._compare_refine_gen)
 
+    def _future_review_load_failed_ui(self, exc: BaseException | None = None) -> None:
+        """Replace the Review row list with a safe message; reset tracking lists on hard failure."""
+        self._future_rows_listview.controls.clear()
+        self._future_left_diff_texts.clear()
+        self._future_row_pill_hosts.clear()
+        self._compare_right_fields.clear()
+        self._compare_eval_hosts.clear()
+        self._future_row_kinds = []
+        self._future_row_cand_idx = []
+        self._future_row_stable_texts = []
+        self._future_row_old_index = []
+        self._future_row_insert_after_old = []
+        msg = (
+            "Review could not build the comparison for this file. "
+            "Try adding blank lines between sections, or reopen the note."
+        )
+        if exc is not None:
+            msg = f"{msg}\n\n({type(exc).__name__})"
+        self._future_rows_listview.controls.append(
+            ft.Container(
+                content=ft.Text(msg, size=13, color=config.ON_SURFACE_VARIANT, selectable=True),
+                alignment=ft.Alignment.TOP_LEFT,
+                padding=ft.padding.all(20),
+                expand=True,
+            )
+        )
+        if _ctrl_on_page(self._future_rows_listview):
+            self._future_rows_listview.update()
+        else:
+            pg = getattr(self, "page", None)
+            if pg is not None:
+                try:
+                    pg.update()
+                except Exception:
+                    pass
+        if hasattr(self, "_snack"):
+            self._snack("Review failed to load.")
+
     def _rebuild_future_paragraph_ui(self) -> None:
         """Future tab: eval | current(read-only diff with deletions) | pill | AI proposal(editable) | actions.
 
@@ -1172,6 +1228,13 @@ class MarkdownStudioCompareText:
             self._refresh_compare_bulk_buttons()
             return
 
+        try:
+            self._rebuild_future_paragraph_md_core()
+        except BaseException as ex:
+            _log.exception("Review (Future) paragraph UI rebuild failed")
+            self._future_review_load_failed_ui(ex)
+
+    def _rebuild_future_paragraph_md_core(self) -> None:
         # Guarantee the change panel is visible before rows reach the client.
         # _apply_active_tab_ui_state() sets visible=True later, but the listview
         # update below runs first; if the panel is still False from a prior
@@ -1337,13 +1400,23 @@ class MarkdownStudioCompareText:
 
         if _ctrl_on_page(self._future_rows_listview):
             self._future_rows_listview.update()
+        else:
+            pg = getattr(self, "page", None)
+            if pg is not None:
+                try:
+                    pg.update()
+                except Exception:
+                    pass
 
         if (
             self._main_tab_index == TAB_FUTURE
             and int(getattr(self, "_review_subtab_index", 0)) == 1
             and hasattr(self, "_sync_impact_paragraph_list_after_compare_rebuild")
         ):
-            self._sync_impact_paragraph_list_after_compare_rebuild()
+            try:
+                self._sync_impact_paragraph_list_after_compare_rebuild()
+            except Exception:
+                _log.exception("Impact paragraph list sync after Review rebuild failed")
 
         _log.debug(
             "review_future_rebuild row_specs=%s list_controls=%s change_panel_visible=%s",
@@ -1377,7 +1450,12 @@ class MarkdownStudioCompareText:
         else:
             cand = self._compare_editor.value or ""
             n_rows = len(split_paragraphs(cand))
-        if n_rows != len(self._compare_right_fields):
+        need_rebuild = (
+            self._future_review_candidate_para_count_mismatch(n_rows)
+            if self._main_tab_index == TAB_FUTURE
+            else n_rows != len(self._compare_right_fields)
+        )
+        if need_rebuild:
             if self._main_tab_index == TAB_FUTURE:
                 self._rebuild_future_paragraph_ui()
             else:
@@ -1470,7 +1548,12 @@ class MarkdownStudioCompareText:
         on_future = self._main_tab_index == TAB_FUTURE
         cand = (self.editor.value if not on_future else self._compare_editor.value) or ""
         n_rows = len(split_paragraphs(cand))
-        if n_rows != len(self._compare_right_fields):
+        need_rebuild = (
+            self._future_review_candidate_para_count_mismatch(n_rows)
+            if on_future
+            else n_rows != len(self._compare_right_fields)
+        )
+        if need_rebuild:
             if on_future:
                 self._rebuild_future_paragraph_ui()
             else:

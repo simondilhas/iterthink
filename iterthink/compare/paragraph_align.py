@@ -148,16 +148,25 @@ def compute_token_ratio_matrix(
     if not HAS_TFIDF or np is None:
         return None
     ratios = np.zeros((len(old_paras), len(new_paras)))
+    # ``fuzz.token_sort_ratio`` is very slow on huge strings; skip when blocks are large.
+    _FUZZ_PAIR_MAX = 8_000
+
     if tfidf_prefilter is not None:
         for i, old_para in enumerate(old_paras):
             for j, new_para in enumerate(new_paras):
                 if i < tfidf_prefilter.shape[0] and j < tfidf_prefilter.shape[1]:
                     if float(tfidf_prefilter[i, j]) > tfidf_threshold:
-                        ratios[i, j] = fuzz.token_sort_ratio(old_para, new_para) / 100.0
+                        if len(old_para) + len(new_para) > _FUZZ_PAIR_MAX:
+                            ratios[i, j] = 0.0
+                        else:
+                            ratios[i, j] = fuzz.token_sort_ratio(old_para, new_para) / 100.0
     else:
         for i, old_para in enumerate(old_paras):
             for j, new_para in enumerate(new_paras):
-                ratios[i, j] = fuzz.token_sort_ratio(old_para, new_para) / 100.0
+                if len(old_para) + len(new_para) > _FUZZ_PAIR_MAX:
+                    ratios[i, j] = 0.0
+                else:
+                    ratios[i, j] = fuzz.token_sort_ratio(old_para, new_para) / 100.0
     return ratios
 
 
@@ -221,9 +230,17 @@ def para_id_for(text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
+# ``SequenceMatcher`` can take effectively forever on huge single-line blocks (no ``\n\n`` splits).
+_WORD_DIFF_HTML_MAX_COMBINED = 10_000
+
+
 def word_diff_html(old: str, new: str) -> tuple[str, str]:
     if not old or not new:
         return old, new
+    if len(old) + len(new) > _WORD_DIFF_HTML_MAX_COMBINED:
+        if old == new:
+            return escape(old), escape(new)
+        return f"<del>{escape(old)}</del>", f"<ins>{escape(new)}</ins>"
     old_words = old.split()
     new_words = new.split()
     sm = SequenceMatcher(a=old_words, b=new_words)
