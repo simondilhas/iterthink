@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sqlalchemy.exc import OperationalError
+
 from iterthink.db.models import CredentialVault
 from iterthink.db.session import session_scope
 
@@ -9,17 +11,23 @@ VAULT_ROW_ID = 1
 
 
 def vault_exists() -> bool:
-    with session_scope() as sess:
-        return sess.get(CredentialVault, VAULT_ROW_ID) is not None
+    try:
+        with session_scope() as sess:
+            return sess.get(CredentialVault, VAULT_ROW_ID) is not None
+    except OperationalError:
+        return False
 
 
 def vault_read() -> tuple[bytes, bytes, bytes] | None:
     """Return (salt, ciphertext, verifier) or None if no vault row."""
-    with session_scope() as sess:
-        row = sess.get(CredentialVault, VAULT_ROW_ID)
-        if row is None:
-            return None
-        return (row.kdf_salt, row.ciphertext, row.verifier)
+    try:
+        with session_scope() as sess:
+            row = sess.get(CredentialVault, VAULT_ROW_ID)
+            if row is None:
+                return None
+            return (row.kdf_salt, row.ciphertext, row.verifier)
+    except OperationalError:
+        return None
 
 
 def vault_write(*, kdf_salt: bytes, ciphertext: bytes, verifier: bytes) -> None:

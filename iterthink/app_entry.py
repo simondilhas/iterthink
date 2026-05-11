@@ -8,6 +8,7 @@ from flet.controls.types import PagePlatform
 from iterthink import config
 from iterthink.studio import ui_theme
 from iterthink.db import bootstrap
+from iterthink.db.session import reset_engine_cache
 from iterthink.ai.ollama_util import ollama_error_message
 from iterthink.studio import MarkdownStudio
 
@@ -36,6 +37,9 @@ async def main(page: ft.Page) -> None:
     page.bgcolor = config.PAGE_BG
     page.theme = ft.Theme(color_scheme=ui_theme.page_color_scheme())
 
+    # Match MarkdownStudio: same store path + fresh engine after YAML paths load.
+    config.refresh()
+    reset_engine_cache()
     bootstrap.bootstrap_database()
 
     studio = MarkdownStudio(page)

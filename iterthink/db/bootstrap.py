@@ -10,6 +10,7 @@ from alembic.config import Config
 
 from iterthink import config
 from iterthink.persistence import store_db
+from iterthink.db.session import reset_engine_cache
 
 # When adding a new Alembic revision, set this to the new head (only used if
 # migration scripts are missing from the install — see _ensure_orm_schema).
@@ -97,3 +98,4 @@ def bootstrap_database() -> None:
         conn.close()
     run_alembic_upgrade()
     _ensure_orm_schema()
+    reset_engine_cache()
