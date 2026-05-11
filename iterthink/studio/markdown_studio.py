@@ -35,7 +35,6 @@ from .constants import (
     COMPARE_KEY_CURRENT as _COMPARE_KEY_CURRENT,
     HISTORY_COMPARE_DROPDOWN_COLUMNS_GAP_PX,
     KI_TAB_BAR_TO_PILLS_GAP_PX,
-    KI_TAB_BODY_MIN_HEIGHT_PX,
     KI_TAB_ICON_PX,
     KI_TAB_PAGE_PAD_V_PX,
     KI_TIER_TAB_ICON_PX,
@@ -91,6 +90,8 @@ class MarkdownStudio(
 ):
     def __init__(self, page: ft.Page) -> None:
         self.page = page
+        # Re-read bootstrap YAML so Review layout matches disk (import-time refresh can be stale).
+        config.refresh()
         self._store_dir_resolved = config.STORE_DIR.resolve()
         self._fp_documents = ft.FilePicker()
         self._fp_store = ft.FilePicker()
@@ -113,13 +114,13 @@ class MarkdownStudio(
             store_db.settings_get(self._db, store_db.SETTINGS_COMPANY_OPENAI_BASE_URL) or "https://api.openai.com/v1"
         )
         self.cloud_anthropic_model: str = (
-            store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_ANTHROPIC_MODEL) or "claude-3-5-sonnet-20241022"
+            (store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_ANTHROPIC_MODEL) or "").strip()
         )
         self.cloud_openai_model: str = (
-            store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_OPENAI_MODEL) or "gpt-4o-mini"
+            (store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_OPENAI_MODEL) or "").strip()
         )
         self.cloud_google_model: str = (
-            store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_GOOGLE_MODEL) or "gemini-1.5-flash"
+            (store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_GOOGLE_MODEL) or "").strip()
         )
         self.current_path: Path | None = None
         self.last_saved_text: str = ""
@@ -168,6 +169,10 @@ class MarkdownStudio(
         self._future_row_kinds: list[str] = []
         self._future_row_cand_idx: list[int | None] = []
         self._future_row_stable_texts: list[str] = []
+        self._future_row_old_index: list[int] = []
+        self._future_row_insert_after_old: list[int] = []
+        # Eval column index → candidate paragraph index (Review rows can interleave deletes/ghosts).
+        self._future_eval_cand_indices: list[int] = []
         self._compare_pill_gen: int = 0
         self._compare_refine_gen: int = 0
         # Future tab: left column = current draft (read-only diff with deletions),
@@ -207,7 +212,8 @@ class MarkdownStudio(
         self.editor = ft.TextField(
             multiline=True,
             max_lines=None,
-            min_lines=1,
+            min_lines=3,
+            text_vertical_align=ft.VerticalAlignment.START,
             border=ft.InputBorder.NONE,
             filled=False,
             hint_text="Write…",
@@ -286,6 +292,7 @@ class MarkdownStudio(
             value="",
             selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_FLAVORED,
+            soft_line_break=True,
         )
         self._compose_preview_host = ft.Container(
             expand=True,
@@ -449,7 +456,7 @@ class MarkdownStudio(
             options=[],
             disabled=True,
             visible=False,
-            tooltip="Pick an AI proposal or import to review against the current draft.",
+            tooltip="Pick draft vs draft, an AI proposal, or an import to review against the current draft.",
             on_select=lambda e: self.page.run_task(self._on_compare_candidate_change_async, e),
         )
         _compare_bulk_icon_style = ft.ButtonStyle(
@@ -800,16 +807,22 @@ class MarkdownStudio(
             visible=False,
             on_click=lambda _e: self._toggle_focus_preview_mode(),
         )
-        self._compose_tab_filename_row = ft.Row(
-            [
-                self._compose_tab_filename_hit,
-                self._compose_tab_filename_field,
-                self._compose_tab_filename_suffix_text,
-                self._focus_preview_toggle_btn,
-            ],
-            tight=True,
-            spacing=4,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        # Stable height: preview IconButton is taller than the filename text; toggling
+        # it must not resize this row or the label shifts when changing main tabs.
+        self._compose_tab_filename_row = ft.Container(
+            height=48,
+            alignment=ft.Alignment(0, 0),
+            content=ft.Row(
+                [
+                    self._compose_tab_filename_hit,
+                    self._compose_tab_filename_field,
+                    self._compose_tab_filename_suffix_text,
+                    self._focus_preview_toggle_btn,
+                ],
+                tight=True,
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
         )
         # Under main History | Focus | Review tabs on every mode (rename targets this row).
         self._workspace_filename_band = ft.Container(
@@ -948,14 +961,19 @@ class MarkdownStudio(
             expand=True,
             spacing=0,
         )
+        _future_tab_col_children: list[ft.Control] = []
+        if config.RAG_SYSTEM:
+            _future_tab_col_children.append(self._review_subtab_strip)
+        _future_tab_col_children.extend(
+            [
+                self._review_difference_chrome_row,
+                self._review_subpanels_column,
+            ]
+        )
         self._future_tab_body = ft.Container(
             expand=True,
             content=ft.Column(
-                [
-                    self._review_subtab_strip,
-                    self._review_difference_chrome_row,
-                    self._review_subpanels_column,
-                ],
+                _future_tab_col_children,
                 expand=True,
                 spacing=0,
             ),
@@ -1189,7 +1207,7 @@ class MarkdownStudio(
         self._check_running: dict[str, bool] = {}
         # Monotonic generation per check; cancels stale background runs.
         self._check_run_gen: dict[str, int] = {}
-        # Current candidate-paragraph hashes (used to invalidate results on edit).
+        # Aligned-pair fingerprints (baseline+candidate per row) for in-memory invalidation.
         self._check_para_hashes: list[str] = []
         # Eval-cell host containers, parallel to _compare_right_fields, for O(1) refresh.
         self._compare_eval_hosts: list[ft.Container] = []
@@ -1250,43 +1268,40 @@ class MarkdownStudio(
                 tight=True,
             ),
         )
-        self._ki_tab_body_heights: list[float] = [
-            float(KI_TAB_BODY_MIN_HEIGHT_PX),
-            float(KI_TAB_BODY_MIN_HEIGHT_PX),
-            float(KI_TAB_BODY_MIN_HEIGHT_PX),
-            140.0,
+        # Pages are kept separately so we can hot-swap them as the active tab
+        # changes. A plain Container (without bounded height) lets the wrap Row
+        # render its full intrinsic height instead of being clipped by a
+        # TabBarView's PageView constraint.
+        self._ki_tab_pages: list[ft.Control] = [
+            ft.Container(
+                padding=ft.padding.symmetric(
+                    horizontal=4,
+                    vertical=KI_TAB_PAGE_PAD_V_PX,
+                ),
+                content=self._pill_row_discuss,
+            ),
+            ft.Container(
+                padding=ft.padding.symmetric(
+                    horizontal=4,
+                    vertical=KI_TAB_PAGE_PAD_V_PX,
+                ),
+                content=self._pill_row_change,
+            ),
+            ft.Container(
+                padding=ft.padding.symmetric(
+                    horizontal=4,
+                    vertical=KI_TAB_PAGE_PAD_V_PX,
+                ),
+                content=ft.Column(
+                    [self._pill_row_analyse, self._impact_analyse_section],
+                    spacing=0,
+                    tight=True,
+                ),
+            ),
+            self._ki_act_container,
         ]
-
-        self._ki_tab_bar_view = ft.TabBarView(
-            controls=[
-                ft.Container(
-                    padding=ft.padding.symmetric(
-                        horizontal=4,
-                        vertical=KI_TAB_PAGE_PAD_V_PX,
-                    ),
-                    content=self._pill_row_discuss,
-                ),
-                ft.Container(
-                    padding=ft.padding.symmetric(
-                        horizontal=4,
-                        vertical=KI_TAB_PAGE_PAD_V_PX,
-                    ),
-                    content=self._pill_row_change,
-                ),
-                ft.Container(
-                    padding=ft.padding.symmetric(
-                        horizontal=4,
-                        vertical=KI_TAB_PAGE_PAD_V_PX,
-                    ),
-                    content=ft.Column(
-                        [self._pill_row_analyse, self._impact_analyse_section],
-                        spacing=0,
-                        tight=True,
-                    ),
-                ),
-                self._ki_act_container,
-            ],
-            height=float(KI_TAB_BODY_MIN_HEIGHT_PX + 2 * KI_TAB_PAGE_PAD_V_PX),
+        self._ki_tab_bar_view = ft.Container(
+            content=self._ki_tab_pages[0],
         )
         _ki_mode_btn_style = ft.ButtonStyle(
             bgcolor=ft.Colors.TRANSPARENT,
@@ -1341,14 +1356,9 @@ class MarkdownStudio(
             padding=ft.padding.symmetric(horizontal=4, vertical=0),
             content=self._ki_topic_top_strip,
         )
-        self._ki_topic_tabs = ft.Tabs(
-            content=ft.Container(
-                padding=ft.padding.only(top=float(KI_TAB_BAR_TO_PILLS_GAP_PX)),
-                content=self._ki_tab_bar_view,
-            ),
-            length=4,
-            selected_index=0,
-            on_change=self._on_ki_tabs_change,
+        self._ki_topic_tabs = ft.Container(
+            padding=ft.padding.only(top=float(KI_TAB_BAR_TO_PILLS_GAP_PX)),
+            content=self._ki_tab_bar_view,
         )
 
         self._chat_history = ft.ListView(
@@ -1502,12 +1512,6 @@ class MarkdownStudio(
             ),
         )
         self._right_ki_column = self._ki_sidebar_well
-
-        self._pill_row_discuss.on_size_change = self._on_ki_pill_row_size_discuss
-        self._pill_row_change.on_size_change = self._on_ki_pill_row_size_change
-        self._pill_row_analyse.on_size_change = self._on_ki_pill_row_size_analyse
-        self._pill_row_impact.on_size_change = self._on_ki_pill_row_size_analyse
-        self._ki_act_container.on_size_change = self._on_ki_pill_row_size_act
 
         self.right_panel = ft.Container(
             width=SIDEBAR_EXPANDED_WIDTH_PX,
@@ -1913,12 +1917,15 @@ class MarkdownStudio(
                 self._snack("Choose a template.")
                 return
             self.page.pop_dialog()
+            # Let the modal dismiss before opening the native save dialog (Linux/GTK).
+            await asyncio.sleep(0)
             stem = md_path.stem
             try:
                 dest = await self._fp_export_docx.save_file(
                     dialog_title="Export Word document",
                     file_name=f"{stem}.docx",
                     initial_directory=str(config.DOCUMENTS) if config.DOCUMENTS.is_dir() else None,
+                    file_type=ft.FilePickerFileType.CUSTOM,
                     allowed_extensions=["docx"],
                 )
             except BaseException as ex:
@@ -1964,38 +1971,41 @@ class MarkdownStudio(
                 return
             self._snack(f"Exported to {out.name}")
 
-        self.page.show_dialog(
-            ft.AlertDialog(
-                modal=True,
-                title=ft.Text("Export", weight=ft.FontWeight.W_600),
-                content=ft.Container(
-                    width=560,
-                    content=ft.Tabs(
-                        selected_index=0,
-                        tabs=[
-                            ft.Tab(
-                                text="Export to Word",
-                                content=ft.Container(
-                                    content=ft.Column(
-                                        [
-                                            ft.Text(md_path.name, size=12, font_family="monospace"),
-                                            tpl_dd,
-                                        ],
-                                        tight=True,
-                                    ),
-                                    padding=ft.padding.only(top=8),
+        # Yield so the File menu / Material menu overlay can finish closing before we
+        # stack a modal dialog; opening both in the same frame often shows nothing (Flet desktop).
+        await asyncio.sleep(0)
+        try:
+            self.page.show_dialog(
+                ft.AlertDialog(
+                    modal=True,
+                    title=ft.Text("Export", weight=ft.FontWeight.W_600),
+                    content=ft.Container(
+                        width=560,
+                        padding=ft.padding.only(top=8),
+                        content=ft.Column(
+                            [
+                                ft.Text(
+                                    "Export to Word",
+                                    size=13,
+                                    weight=ft.FontWeight.W_500,
+                                    color=config.ON_SURFACE,
                                 ),
-                            ),
-                        ],
+                                ft.Text(md_path.name, size=12, font_family="monospace"),
+                                tpl_dd,
+                            ],
+                            tight=True,
+                            spacing=8,
+                        ),
                     ),
-                ),
-                actions=[
-                    ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
-                    ft.TextButton("Continue…", on_click=lambda _e: self.page.run_task(on_export)),
-                ],
-                actions_alignment=ft.MainAxisAlignment.END,
+                    actions=[
+                        ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
+                        ft.TextButton("Continue…", on_click=lambda _e: self.page.run_task(on_export)),
+                    ],
+                    actions_alignment=ft.MainAxisAlignment.END,
+                )
             )
-        )
+        except BaseException as ex:
+            self._snack(f"Export dialog failed: {ex}")
 
     async def _periodic_file_drift_loop(self) -> None:
         while True:

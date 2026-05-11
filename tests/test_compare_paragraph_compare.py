@@ -64,3 +64,24 @@ def test_build_history_display_rows_reorder_includes_true_mover_ghost() -> None:
     ghosts = [r for r in rows if r.row_type == "ghost_moved"]
     assert len(ghosts) >= 1
     assert all(r.is_true_mover for r in ghosts)
+    for g in ghosts:
+        assert g.old_paragraph_index >= 0
+        assert g.new_paragraph_index >= 0
+
+
+def test_build_history_display_rows_removed_row_indices() -> None:
+    rows = build_history_display_rows("A\n\nB", "A")
+    rem = next(r for r in rows if r.row_type == "removed")
+    assert rem.old_paragraph_index == 1
+    assert rem.new_paragraph_index == -1
+    comp = next(r for r in rows if r.row_type == "comparison" and r.new_text == "A")
+    assert comp.old_paragraph_index == 0
+    assert comp.new_paragraph_index == 0
+
+
+def test_build_history_display_rows_trailing_addition_indices() -> None:
+    rows = build_history_display_rows("A", "A\n\nB")
+    added = rows[1]
+    assert added.row_type == "comparison" and added.slot_kind == "added"
+    assert added.old_paragraph_index == -1
+    assert added.new_paragraph_index == 1

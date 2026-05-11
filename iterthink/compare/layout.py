@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .margin import split_paragraphs
-from .paragraph_align import compute_alignment, old_text_per_new_slot
+from .paragraph_align import DiffParagraph, compute_alignment, old_text_per_new_slot
 
 
 @dataclass(frozen=True)
@@ -16,12 +16,28 @@ class ReviewRow:
     ``cand_idx`` is the index in the candidate (right) document for ``replace``,
     ``insert``, and ``equal`` rows; ``None`` for ``delete`` rows that have no
     candidate paragraph (so the eval cell can render an empty placeholder).
+
+    ``old_index`` is the compose-document paragraph index for ``delete`` / ``replace`` /
+    ``equal`` (-1 for ``insert``). ``insert_after_old`` is only used for ``insert``:
+    splice after this old paragraph index (-1 = before first paragraph); -1 for
+    non-insert rows.
     """
 
     kind: str
     old_text: str
     new_text: str
     cand_idx: int | None
+    old_index: int = -1
+    insert_after_old: int = -1
+
+
+def _insert_after_old_for_added(diffs: list[DiffParagraph], new_index: int) -> int:
+    """Max ``old_index`` among matched diffs strictly before ``new_index`` in the candidate."""
+    insert_after = -1
+    for d2 in diffs:
+        if d2.old_index >= 0 and d2.new_index >= 0 and d2.new_index < new_index:
+            insert_after = max(insert_after, d2.old_index)
+    return insert_after
 
 
 def aligned_review_rows(current: str, ai: str) -> list[ReviewRow]:
@@ -51,21 +67,31 @@ def aligned_review_rows(current: str, ai: str) -> list[ReviewRow]:
                         old_text=d.old_text,
                         new_text="",
                         cand_idx=None,
+                        old_index=d.old_index,
+                        insert_after_old=-1,
                     ),
                 )
             )
             continue
         if d.label == "added" or d.old_index < 0:
             kind = "insert"
+            oi = -1
+            ia = _insert_after_old_for_added(diffs, d.new_index)
         elif d.old_text == d.new_text:
             kind = "equal"
+            oi = d.old_index
+            ia = -1
         else:
             kind = "replace"
+            oi = d.old_index
+            ia = -1
         by_cand[d.new_index] = ReviewRow(
             kind=kind,
             old_text=d.old_text or "",
             new_text=d.new_text or "",
             cand_idx=d.new_index,
+            old_index=oi,
+            insert_after_old=ia if kind == "insert" else -1,
         )
 
     # Map each deleted-old-index to the candidate slot it should appear before.

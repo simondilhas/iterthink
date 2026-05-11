@@ -2,13 +2,13 @@
 
 **See every change. Understand the impact. Act on what matters.**
 
-AI edits are silent by default. You see the result, never the delta. iterthink makes the delta visible — word by word — and tells you whether the meaning survived and how it impacts the project.
+AI edits are silent by default. You see the result, never the delta. iterthink makes the delta visible — word by word — and tells you whether the meaning survived and how it impacts the text.
 
 ---
 
 ## What iterthink does
 
-iterthink is a local review layer for documents. It covers four distinct workflows — each one building on the last.
+iterthink is the desktop first review layer for documents. It covers three distinct workflows — each one building on the last.
 
 ---
 
@@ -17,9 +17,10 @@ iterthink is a local review layer for documents. It covers four distinct workflo
 Every edit is captured. Every version is stored. Compare any two states of a document side by side — word-level highlights, not just line diffs. Paragraphs that moved are tracked as moved, not deleted and reinserted. Nothing gets lost silently.
 
 - Word-level inline diff — additions and deletions highlighted inline
-- Paragraph-level change classification: `unchanged` · `minor` · `major` · `rewritten` · `new` · `deleted`
-- Full version timeline — every save, every AI action, manually labeled snapshots
 - Compare any two versions at any time
+- Paragraph-level change classification (per new paragraph slot) in the compare column with: — · Refined · Modified · Rephrased · Added · Removed
+- Full version timeline — every save, every AI action
+
 
 ---
 
@@ -41,25 +42,11 @@ Run predefined prompts on any paragraph. Discuss, rewrite, shorten, translate �
 
 Not all changes are equal. iterthink uses local embeddings and an LLM tiebreak to classify whether a paragraph change was cosmetic or substantive — without sending your documents to a cloud service.
 
-- **`STABLE`** — core meaning and intent held
-- **`NEW`** — main message, recommendation, or stance materially changed
-
 Cosine similarity on local embeddings handles the clear cases fast. The LLM is only called in the uncertain band — minimizing cost and latency while maximizing accuracy.
 
 This is the judgment layer. It tells you not just *what* changed, but *whether it matters*.
 
 When a change matters, trigger a follow-up workflow directly through [{yourcompany}os](https://yourcompanyos.io).
-
----
-
-### 4. Check a document against your project
-
-Upload your project documents as context. Then check any paragraph — does this spec still align with the brief? Does this clause contradict something agreed last week? Does the new version introduce a conflict with another document?
-
-- RAG over your project folder — one document checked against all others
-- Surfaces contradictions, gaps, and alignment issues
-- Runs locally — your project documents never leave your machine
-- Especially useful in AEC, legal, and research workflows where documents reference each other
 
 ---
 
@@ -74,23 +61,32 @@ Upload your project documents as context. Then check any paragraph — does this
 
 ## Get started
 
-**You'll need:** [Python 3.11+](https://www.python.org/downloads/) and an AI backend — either a local Ollama install or an API key.
+
+### Install from Github
+
+Prerequisites: Python 3.11+ · an AI backend (local Ollama or a cloud API key)
+
+Install from [GitHub](https://github.com/simondilhas/iterthink) (latest default branch: `main`).
+
+**Linux and macOS** (bash/zsh — Terminal, iTerm, etc.):
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -U pip
-pip install iterthink
+pip install "git+https://github.com/simondilhas/iterthink.git"
 iterthink
 ```
 
-On Windows (Command Prompt or PowerShell):
+**Windows** (Command Prompt or PowerShell):
 
 ```bat
 py -3.11 -m venv .venv
 .\.venv\Scripts\activate
-pip install -U pip iterthink
+pip install -U pip "git+https://github.com/simondilhas/iterthink.git"
 iterthink
 ```
+
+To pin a release or commit, append `@v0.1.0` or `@<commit-sha>` inside the quotes (same URL).
 
 **First launch:**
 1. Go to **File → Settings → Paths** — point it to your documents folder (default store is `Documents/.iterthink`)
@@ -107,7 +103,27 @@ iterthink
 
 **Where data lives:** settings under your OS config path (`~/.config/iterthink` on Linux, `~/Library/Application Support/iterthink` on macOS, `%APPDATA%\iterthink` on Windows); documents and the local database under `Documents/.iterthink`.
 
-**From a clone (developers):** `pip install -e .`, then `iterthink` or `python -m iterthink`.
+**From a clone (editable):** `git clone https://github.com/simondilhas/iterthink.git`, then `pip install -e .`, then `iterthink` or `python -m iterthink`.
+
+### App menu (pip install)
+
+`pip` does not register an OS launcher. Add one if you want iterthink in the system menu, not only from a terminal.
+
+**Linux** (GNOME, KDE, and other Freedesktop desktops): Activate the same environment you use for `iterthink`, run `which iterthink`, then create `~/.local/share/applications/iterthink.desktop` with that path in `Exec=`:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=Iterthink
+Exec=/ABSOLUTE/PATH/TO/iterthink
+Icon=applications-office
+Terminal=false
+Categories=Office;TextEditor;
+```
+
+If the entry does not show up, run `update-desktop-database ~/.local/share/applications/`, then search the app grid / Activities for **Iterthink**.
+
+**Windows:** Shortcut → target `...\your-project\.venv\Scripts\iterthink.exe`, or the `iterthink.exe` under `%USERPROFILE%\AppData\Roaming\Python\` if you used `pip install --user`. Put the `.lnk` in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\` for Start; pin to the taskbar from there if you want.
 
 ---
 
@@ -132,13 +148,18 @@ Using a cloud API key (OpenAI, Anthropic, Gemini) sends your text to that provid
 
 ---
 
-## Roadmap
+## Roadmap (not in order)
 
-- IFC model comparison — see what changed between two BIM models
-- Windows and macOS installers
+- Evaluate not only change, but consistency against other files (RAG functionality)
+- Compare Excel sheets
+- Compare PDF Plans (Floorplans, Sections)
+- IFC model comparison — see what changed between two BIM model versions
+- Linux, Windows and macOS installers
 - Sync and version history across devices
 - Team review features for collaborative workflows
 - Deeper [{yourcompany}os](https://yourcompanyos.io) integration — from change detection to closed decisions
+- Redesign with Dart (instead of python and flet) for better performance.
+- Performance Improvments for long documents
 
 ---
 

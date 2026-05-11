@@ -21,6 +21,37 @@ _PDF_COMPARE_SCROLL_SOURCES = ("pdf_original", "docx_original")
 
 
 class MarkdownStudioAssetCompare:
+    def _release_pdf_compare_disk_refs(self) -> None:
+        """Drop rendered PDF page controls (``Image`` src may reference store/cache paths)."""
+        for name in (
+            "_compare_pdf_left_lv",
+            "_compare_pdf_right_lv",
+            "_future_pdf_left_lv",
+            "_future_pdf_right_lv",
+        ):
+            lv = getattr(self, name, None)
+            if lv is not None and isinstance(lv, ft.ListView):
+                lv.controls.clear()
+                if _ctrl_on_page(lv):
+                    lv.update()
+        pc = getattr(self, "_plan_compare", None)
+        if pc is not None:
+            ov = getattr(pc, "overlay_list", None)
+            if ov is not None and isinstance(ov, ft.ListView):
+                ov.controls.clear()
+                if _ctrl_on_page(ov):
+                    ov.update()
+
+    def _detach_pdf_import_ui_for_store_delete(self) -> None:
+        """Release viewers before ``purge_document_store_dirs`` removes PDF assets under STORE."""
+        self._compare_pdf_peer_snapshot_id = None
+        if hasattr(self, "_pending_post_import_history_vid"):
+            self._pending_post_import_history_vid = None
+        self._compare_candidate_source = "draft"
+        self._release_pdf_compare_disk_refs()
+        self._sync_compare_pdf_layers_visibility()
+        self._sync_future_pdf_layers_visibility()
+
     def _on_future_pdf_import_md_change(self, _e: ft.ControlEvent) -> None:
         v = self._future_pdf_import_md_tf.value or ""
         if (self.editor.value or "") == v and (self._compare_editor.value or "") == v:
@@ -39,9 +70,9 @@ class MarkdownStudioAssetCompare:
             return
         if self._compare_candidate_source not in _PDF_COMPARE_SCROLL_SOURCES:
             return
+        self._compare_pdf_left_max_scroll = max(float(e.max_scroll_extent), 1e-6)
         if e.event_type != ft.ScrollType.UPDATE:
             return
-        self._compare_pdf_left_max_scroll = max(e.max_scroll_extent, 1e-6)
         ratio = max(0.0, min(1.0, e.pixels / self._compare_pdf_left_max_scroll))
         target = ratio * max(self._compare_pdf_right_max_scroll, 1e-6)
         self._compare_pdf_scroll_guard = True
@@ -63,9 +94,9 @@ class MarkdownStudioAssetCompare:
             return
         if self._compare_candidate_source not in _PDF_COMPARE_SCROLL_SOURCES:
             return
+        self._compare_pdf_right_max_scroll = max(float(e.max_scroll_extent), 1e-6)
         if e.event_type != ft.ScrollType.UPDATE:
             return
-        self._compare_pdf_right_max_scroll = max(e.max_scroll_extent, 1e-6)
         ratio = max(0.0, min(1.0, e.pixels / self._compare_pdf_right_max_scroll))
         target = ratio * max(self._compare_pdf_left_max_scroll, 1e-6)
         self._compare_pdf_scroll_guard = True
@@ -82,9 +113,9 @@ class MarkdownStudioAssetCompare:
             return
         if self._main_tab_index != TAB_FUTURE or self._compare_candidate_source != "pdf_original":
             return
+        self._compare_pdf_left_max_scroll = max(float(e.max_scroll_extent), 1e-6)
         if e.event_type != ft.ScrollType.UPDATE:
             return
-        self._compare_pdf_left_max_scroll = max(e.max_scroll_extent, 1e-6)
         ratio = max(0.0, min(1.0, e.pixels / self._compare_pdf_left_max_scroll))
         target = ratio * max(self._compare_pdf_right_max_scroll, 1e-6)
         self._compare_pdf_scroll_guard = True
@@ -101,9 +132,9 @@ class MarkdownStudioAssetCompare:
             return
         if self._main_tab_index != TAB_FUTURE or self._compare_candidate_source != "pdf_original":
             return
+        self._compare_pdf_right_max_scroll = max(float(e.max_scroll_extent), 1e-6)
         if e.event_type != ft.ScrollType.UPDATE:
             return
-        self._compare_pdf_right_max_scroll = max(e.max_scroll_extent, 1e-6)
         ratio = max(0.0, min(1.0, e.pixels / self._compare_pdf_right_max_scroll))
         target = ratio * max(self._compare_pdf_left_max_scroll, 1e-6)
         self._compare_pdf_scroll_guard = True
@@ -114,6 +145,29 @@ class MarkdownStudioAssetCompare:
             await self._future_pdf_left_lv.scroll_to(offset=target, duration=0)
         finally:
             self._compare_pdf_scroll_guard = False
+
+    async def _seed_pdf_pair_scroll_metrics_async(
+        self,
+        left_lv: ft.ListView,
+        right_lv: ft.ListView,
+        settle_s: float = 0.0,
+    ) -> None:
+        """Nudge both ListViews after rebuild so each emits scroll metrics; avoids
+        cross-pane sync using the default max (1.0) until the user has scrolled both
+        columns manually."""
+        await asyncio.sleep(0)
+        if settle_s > 0:
+            await asyncio.sleep(settle_s)
+        if not _ctrl_on_page(left_lv) or not _ctrl_on_page(right_lv):
+            return
+        try:
+            await left_lv.scroll_to(offset=0, duration=0)
+        except BaseException:
+            pass
+        try:
+            await right_lv.scroll_to(offset=0, duration=0)
+        except BaseException:
+            pass
 
     def _sync_future_pdf_layers_visibility(self) -> None:
         sub = int(getattr(self, "_review_subtab_index", 0) or 0)
@@ -403,6 +457,8 @@ class MarkdownStudioAssetCompare:
 
     def _rebuild_future_pdf_import_panes(self) -> None:
         """Review tab: PDF left, editable markdown right (import snapshot)."""
+        self._compare_pdf_left_max_scroll = 1.0
+        self._compare_pdf_right_max_scroll = 1.0
         self._future_pdf_left_lv.controls.clear()
         self._future_pdf_right_lv.controls.clear()
         body = self.editor.value or ""
@@ -416,12 +472,22 @@ class MarkdownStudioAssetCompare:
             self._future_pdf_right_lv.update()
         if _ctrl_on_page(self._future_pdf_import_md_tf):
             self._future_pdf_import_md_tf.update()
+        pg = getattr(self, "page", None)
+        if pg is not None:
+            pg.run_task(
+                self._seed_pdf_pair_scroll_metrics_async,
+                self._future_pdf_left_lv,
+                self._future_pdf_right_lv,
+                0.06,
+            )
 
     def _rebuild_compare_pdf_panes(self) -> None:
         if self._compare_candidate_source == "docx_original":
             self._rebuild_compare_docx_panes()
             return
         self._sync_plan_overlay_pane_visibility()
+        self._compare_pdf_left_max_scroll = 1.0
+        self._compare_pdf_right_max_scroll = 1.0
         self._compare_pdf_left_lv.controls.clear()
         self._compare_pdf_right_lv.controls.clear()
         body = self._compare_editor.value or ""
@@ -453,9 +519,19 @@ class MarkdownStudioAssetCompare:
             self._compare_pdf_left_lv.update()
         if _ctrl_on_page(self._compare_pdf_right_lv):
             self._compare_pdf_right_lv.update()
+        pg = getattr(self, "page", None)
+        if pg is not None:
+            pg.run_task(
+                self._seed_pdf_pair_scroll_metrics_async,
+                self._compare_pdf_left_lv,
+                self._compare_pdf_right_lv,
+                0.0,
+            )
 
     def _rebuild_compare_docx_panes(self) -> None:
         """History: older snapshot extraction left, History newer-side text right."""
+        self._compare_pdf_left_max_scroll = 1.0
+        self._compare_pdf_right_max_scroll = 1.0
         self._compare_pdf_left_lv.controls.clear()
         self._compare_pdf_right_lv.controls.clear()
         _md_style = ft.TextStyle(
@@ -492,3 +568,11 @@ class MarkdownStudioAssetCompare:
             self._compare_pdf_left_lv.update()
         if _ctrl_on_page(self._compare_pdf_right_lv):
             self._compare_pdf_right_lv.update()
+        pg = getattr(self, "page", None)
+        if pg is not None:
+            pg.run_task(
+                self._seed_pdf_pair_scroll_metrics_async,
+                self._compare_pdf_left_lv,
+                self._compare_pdf_right_lv,
+                0.0,
+            )

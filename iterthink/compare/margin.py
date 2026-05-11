@@ -131,6 +131,36 @@ def replace_paragraph_at_index(text: str, idx: int, new_paragraph: str) -> str:
     return join_paragraphs(parts)
 
 
+def remove_paragraph_at_index(text: str, idx: int) -> str:
+    """Return text with paragraph at ``idx`` removed (empty string if no paragraphs left)."""
+    parts = split_paragraphs(text)
+    if not parts:
+        return text
+    if idx < 0 or idx >= len(parts):
+        return text
+    del parts[idx]
+    if not parts:
+        return ""
+    return join_paragraphs(parts)
+
+
+def insert_paragraph_after_old_index(text: str, insert_after_old: int, new_paragraph: str) -> str:
+    """Insert ``new_paragraph`` after compose index ``insert_after_old`` (-1 = before first)."""
+    parts = split_paragraphs(text)
+    if not parts:
+        parts = [""]
+    # Single empty slot: inserting at document start becomes one paragraph.
+    if len(parts) == 1 and parts[0] == "" and insert_after_old < 0:
+        return join_paragraphs([new_paragraph])
+    at = insert_after_old + 1
+    if at < 0:
+        at = 0
+    if at > len(parts):
+        at = len(parts)
+    parts.insert(at, new_paragraph)
+    return join_paragraphs(parts)
+
+
 def split_paragraphs(text: str) -> list[str]:
     """
     Split text into paragraphs aligned with common markdown block boundaries.

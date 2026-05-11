@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import flet as ft
 import httpx
 
@@ -17,36 +15,62 @@ from iterthink.ai.ollama_util import chat_response_text, chat_stream_delta, olla
 from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS
 from .constants import (
     KI_PILL_TEXT_SIZE,
-    KI_TAB_BAR_TO_PILLS_GAP_PX,
-    KI_TAB_BODY_MIN_HEIGHT_PX,
-    KI_TAB_PAGE_PAD_V_PX,
     SIDEBAR_EXPANDED_WIDTH_PX,
     COLLAPSED_RAIL_WIDTH_PX,
     TAB_HISTORY,
     TAB_FUTURE,
+    TAB_PRESENT,
 )
 from .llm_backend import sync_llm_tier_tab_icons
 from .util import KI_TIERS, ctrl_on_page as _ctrl_on_page, normalize_ki_tier
 
+# KI strip icon tooltips (must match markdown_studio.py topic mode row order).
+_KI_TOPIC_STRIP_LABELS = ("Discuss", "Change", "Analyse", "Act")
+
 
 class MarkdownStudioKiSidebar:
-    def _on_ki_tabs_change(self, e: ft.ControlEvent) -> None:
-        try:
-            self._ki_topic_index = int(e.data)
-        except (TypeError, ValueError):
-            self._ki_topic_index = int(self._ki_topic_tabs.selected_index)
-        self._sync_ki_topic_mode_buttons()
-        self._apply_ki_tab_bar_view_height()
-        # Impact sidebar (Ask vs Run dock) depends on KI topic as well as Review subtab.
-        if hasattr(self, "_sync_impact_ki_context_visibility"):
-            self._sync_impact_ki_context_visibility()
+    def _ki_topic_allowed_indices(self) -> frozenset[int]:
+        tab = int(getattr(self, "_main_tab_index", TAB_PRESENT))
+        if tab == TAB_HISTORY:
+            return frozenset({0})
+        if tab == TAB_PRESENT:
+            return frozenset({0, 1})
+        return frozenset({0, 1, 2, 3})
+
+    def _ki_topic_strip_disabled_tooltip(self, index: int) -> str:
+        if index == 1:
+            return "Switch to Focus Area to use Change."
+        if index == 2:
+            return "Switch to Review to use Analyse."
+        return "Switch to Review to use Act."
 
     def _sync_ki_topic_mode_buttons(self) -> None:
-        ix = self._ki_topic_index
+        ix = int(getattr(self, "_ki_topic_index", 0))
+        allowed = self._ki_topic_allowed_indices()
+        if ix not in allowed:
+            ix = min(allowed)
+            self._ki_topic_index = ix
         u_w = 1.5
+        grey = ft.Colors.with_opacity(0.42, config.ON_SURFACE_VARIANT)
         for i, b in enumerate(self._ki_topic_mode_buttons):
             want = i == ix
-            col = config.HIGHLIGHT if want else config.ON_SURFACE_VARIANT
+            dis = i not in allowed
+            base_tip = _KI_TOPIC_STRIP_LABELS[i] if i < len(_KI_TOPIC_STRIP_LABELS) else ""
+            tip = self._ki_topic_strip_disabled_tooltip(i) if dis else base_tip
+            if getattr(b, "tooltip", None) != tip:
+                b.tooltip = tip
+                if _ctrl_on_page(b):
+                    b.update()
+            if bool(getattr(b, "disabled", False)) != dis:
+                b.disabled = dis
+                if _ctrl_on_page(b):
+                    b.update()
+            if dis:
+                col = grey
+            elif want:
+                col = config.HIGHLIGHT
+            else:
+                col = config.ON_SURFACE_VARIANT
             if getattr(b, "icon_color", None) != col:
                 b.icon_color = col
                 if _ctrl_on_page(b):
@@ -63,48 +87,32 @@ class MarkdownStudioKiSidebar:
                 c.update()
 
     def _set_ki_topic(self, index: int) -> None:
-        max_index = max(0, len(getattr(self, "_ki_topic_mode_buttons", [])) - 1)
+        pages = getattr(self, "_ki_tab_pages", None) or []
+        max_index = max(0, len(pages) - 1)
         ix = max(0, min(max_index, int(index)))
+        allowed = self._ki_topic_allowed_indices()
+        if ix not in allowed:
+            ix = min(allowed)
         self._ki_topic_index = ix
-        if self._ki_topic_tabs.selected_index != ix:
-            self._ki_topic_tabs.selected_index = ix
-        if _ctrl_on_page(self._ki_topic_tabs):
-            self._ki_topic_tabs.update()
+        if pages:
+            new_content = pages[ix]
+            if self._ki_tab_bar_view.content is not new_content:
+                self._ki_tab_bar_view.content = new_content
+                if _ctrl_on_page(self._ki_tab_bar_view):
+                    self._ki_tab_bar_view.update()
         self._sync_ki_topic_mode_buttons()
-        self._apply_ki_tab_bar_view_height()
         if hasattr(self, "_sync_impact_ki_context_visibility"):
             self._sync_impact_ki_context_visibility()
 
-    def _on_ki_pill_row_size_discuss(self, e: ft.LayoutSizeChangeEvent) -> None:
-        self._ki_tab_body_heights[0] = max(float(e.height), 28.0)
-        self._apply_ki_tab_bar_view_height()
+    def _sync_ki_topic_strip_after_workspace_tab_change(self) -> None:
+        """After ``_main_tab_index`` updates: reclamp topic, pill page, strip, impact dock.
 
-    def _on_ki_pill_row_size_change(self, e: ft.LayoutSizeChangeEvent) -> None:
-        self._ki_tab_body_heights[1] = max(float(e.height), 28.0)
-        self._apply_ki_tab_bar_view_height()
-
-    def _on_ki_pill_row_size_analyse(self, e: ft.LayoutSizeChangeEvent) -> None:
-        self._ki_tab_body_heights[2] = max(float(e.height), 28.0)
-        self._apply_ki_tab_bar_view_height()
-
-    def _on_ki_pill_row_size_act(self, e: ft.LayoutSizeChangeEvent) -> None:
-        self._ki_tab_body_heights[3] = max(float(e.height), 28.0)
-        self._apply_ki_tab_bar_view_height()
-
-    def _apply_ki_tab_bar_view_height(self) -> None:
-        ix = max(0, min(len(self._ki_tab_body_heights) - 1, int(self._ki_topic_index)))
-        inner = max(self._ki_tab_body_heights[ix], float(KI_TAB_BODY_MIN_HEIGHT_PX))
-        h = inner + 2 * float(KI_TAB_PAGE_PAD_V_PX)
-        cur = float(self._ki_tab_bar_view.height or 0)
-        if abs(cur - h) < 0.75:
+        Kept on the KI mixin so workspace tab code does not call ``_set_ki_topic`` / impact
+        helpers directly (avoids coupling tab switching to sidebar implementation details).
+        """
+        if not getattr(self, "_ki_topic_mode_buttons", None):
             return
-        self._ki_tab_bar_view.height = h
-        if _ctrl_on_page(self._ki_tab_bar_view):
-            self._ki_tab_bar_view.update()
-
-    async def _defer_sync_ki_tab_height(self) -> None:
-        await asyncio.sleep(0.06)
-        self._apply_ki_tab_bar_view_height()
+        self._set_ki_topic(int(getattr(self, "_ki_topic_index", 0)))
 
     def _rebuild_topic_pills(self) -> None:
         def fill_row(row: ft.Row, topic: str) -> None:
@@ -141,8 +149,6 @@ class MarkdownStudioKiSidebar:
 
         if hasattr(self, "_refresh_editor_ctx_menu_items"):
             self._refresh_editor_ctx_menu_items()
-
-        self.page.run_task(self._defer_sync_ki_tab_height)
 
     def _on_page_keyboard(self, e: ft.KeyboardEvent) -> None:
         key = (e.key or "").lower()

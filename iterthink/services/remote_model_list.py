@@ -108,7 +108,7 @@ async def fetch_anthropic_models(api_key: str) -> tuple[list[str], str | None]:
 
 
 def _gemini_model_short_name(full_name: str) -> str:
-    """``models/gemini-1.5-flash`` -> ``gemini-1.5-flash``."""
+    """``models/gemini-2.5-flash`` -> ``gemini-2.5-flash``."""
     s = (full_name or "").strip()
     if s.startswith("models/"):
         return s[7:]

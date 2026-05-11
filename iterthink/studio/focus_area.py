@@ -908,13 +908,8 @@ class MarkdownStudioCompose:
                 pass
 
         if act.topic == TOPIC_CHANGE:
-            apply_snippet = (
-                (self.editor.value or "")[replace_span[0] : replace_span[1]]
-                if replace_span is not None
-                else ""
-            )
-            apply_btn: ft.IconButton | None = None
             if replace_span is not None:
+                apply_snippet = (self.editor.value or "")[replace_span[0] : replace_span[1]]
                 apply_btn = ft.IconButton(
                     ft.Icons.CHECK_ROUNDED,
                     icon_size=ACTION_RAIL_ICON_SIZE,
@@ -923,6 +918,17 @@ class MarkdownStudioCompose:
                     style=action_rail_icon_button_style(),
                     on_click=lambda _e, r=reply, f=footer, aid=action_id, sp=replace_span, sn=apply_snippet: self.page.run_task(
                         self._apply_margin_reply_to_selection_async, r, f, aid, sp, sn
+                    ),
+                )
+            else:
+                apply_btn = ft.IconButton(
+                    ft.Icons.CHECK_ROUNDED,
+                    icon_size=ACTION_RAIL_ICON_SIZE,
+                    icon_color=config.PRIMARY_COLOR,
+                    tooltip="Apply: replace this paragraph with the reply",
+                    style=action_rail_icon_button_style(),
+                    on_click=lambda _e, i=idx, r=reply, f=footer, aid=action_id: self.page.run_task(
+                        self._apply_margin_reply_to_paragraph_async, i, r, f, aid
                     ),
                 )
             review_btn = ft.IconButton(
@@ -943,9 +949,8 @@ class MarkdownStudioCompose:
                 style=action_rail_icon_button_style(),
                 on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
             )
-            footer.controls = (
-                [apply_btn, review_btn, dismiss_btn] if apply_btn is not None else [review_btn, dismiss_btn]
-            )
+            footer.controls = [apply_btn, review_btn, dismiss_btn]
+            footer.visible = True
         else:
             footer.controls = [
                 ft.IconButton(
@@ -957,6 +962,6 @@ class MarkdownStudioCompose:
                     on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
                 ),
             ]
-        footer.visible = True
+            footer.visible = True
         if _ctrl_on_page(footer):
             footer.update()

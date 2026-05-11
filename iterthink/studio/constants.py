@@ -39,6 +39,10 @@ COMPOSE_READING_WIDTH_FRAC = 0.92
 
 DIFF_SPAN_CHAR_CAP = 120_000
 
+# Review (Future) tab: TF-IDF paragraph alignment cost explodes with block count; above this
+# we pair baseline vs candidate by index only (still editable; gap deletes not mapped).
+REVIEW_ALIGN_PARAGRAPH_CAP = 320
+
 COMPARE_COL_LINE_HEIGHT = 1.6
 # Compose main editor: line height for rail Y math (must match TextField text_style size × height).
 COMPOSE_EDITOR_LINE_HEIGHT_PX = float(COMPARE_COL_FONT_SIZE * COMPARE_COL_LINE_HEIGHT)
@@ -72,6 +76,11 @@ COMPARE_KEY_CANDIDATE = "__candidate__"
 TAB_HISTORY = 0
 TAB_PRESENT = 1
 TAB_FUTURE = 2
+
+# Review tab: no DB proposal loaded; candidate mirrors compose so Accept still persists.
+REVIEW_MANUAL_CANDIDATE_ACTION_ID = "manual_review"
+# Review candidate dropdown: compare editor draft against an editable copy (no AI snapshot).
+REVIEW_KEY_DRAFT_MIRROR = "__review_draft_mirror__"
 
 # History toolbar: horizontal gap between Older vs Newer version dropdown columns.
 # At ~96 dpi, 76 px ≈ 2 cm total; with equal flex children each dropdown column is ~1 cm narrower.

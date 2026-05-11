@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,15 @@ def _ctrl_on_page(ctrl: ft.Control) -> bool:
 
 
 async def open_settings_dialog(studio: Any) -> None:
+    try:
+        await _open_settings_dialog(studio)
+    except BaseException as ex:
+        import traceback
+        studio._snack(f"Settings error: {ex}")
+        traceback.print_exc()
+
+
+async def _open_settings_dialog(studio: Any) -> None:
     page = studio.page
     ollama = studio.ollama
 
@@ -205,11 +215,12 @@ async def open_settings_dialog(studio: Any) -> None:
         expand=True,
         dense=True,
     )
-    _am = studio.cloud_anthropic_model or "claude-3-5-sonnet-20241022"
+    _am = (studio.cloud_anthropic_model or "").strip()
     cloud_anthropic_model_dd = ft.Dropdown(
         label="Claude model",
         value=_am,
-        options=_model_dd_options([_am], current=_am),
+        options=_model_dd_options([_am], current=_am) if _am else [],
+        hint_text="Use «List Claude models» (needs API key) to load ids from Anthropic.",
         editable=True,
         enable_search=True,
         dense=True,
@@ -222,11 +233,12 @@ async def open_settings_dialog(studio: Any) -> None:
         expand=True,
         dense=True,
     )
-    _com = studio.cloud_openai_model or "gpt-4o-mini"
+    _com = (studio.cloud_openai_model or "").strip()
     cloud_openai_model_dd = ft.Dropdown(
         label="OpenAI model (cloud)",
         value=_com,
-        options=_model_dd_options([_com], current=_com),
+        options=_model_dd_options([_com], current=_com) if _com else [],
+        hint_text="Use «List OpenAI models» (needs API key) to load ids from OpenAI.",
         editable=True,
         enable_search=True,
         dense=True,
@@ -239,11 +251,12 @@ async def open_settings_dialog(studio: Any) -> None:
         expand=True,
         dense=True,
     )
-    _gm = studio.cloud_google_model or "gemini-1.5-flash"
+    _gm = (studio.cloud_google_model or "").strip()
     cloud_google_model_dd = ft.Dropdown(
         label="Gemini model",
         value=_gm,
-        options=_model_dd_options([_gm], current=_gm),
+        options=_model_dd_options([_gm], current=_gm) if _gm else [],
+        hint_text="Use «List Gemini models» (needs API key) to load ids from Google.",
         editable=True,
         enable_search=True,
         dense=True,
@@ -382,9 +395,9 @@ async def open_settings_dialog(studio: Any) -> None:
         store_db.settings_set(studio._db, store_db.SETTINGS_CLOUD_ANTHROPIC_MODEL, (cloud_anthropic_model_dd.value or "").strip())
         store_db.settings_set(studio._db, store_db.SETTINGS_CLOUD_OPENAI_MODEL, (cloud_openai_model_dd.value or "").strip())
         store_db.settings_set(studio._db, store_db.SETTINGS_CLOUD_GOOGLE_MODEL, (cloud_google_model_dd.value or "").strip())
-        studio.cloud_anthropic_model = (cloud_anthropic_model_dd.value or "").strip() or "claude-3-5-sonnet-20241022"
-        studio.cloud_openai_model = (cloud_openai_model_dd.value or "").strip() or "gpt-4o-mini"
-        studio.cloud_google_model = (cloud_google_model_dd.value or "").strip() or "gemini-1.5-flash"
+        studio.cloud_anthropic_model = (cloud_anthropic_model_dd.value or "").strip()
+        studio.cloud_openai_model = (cloud_openai_model_dd.value or "").strip()
+        studio.cloud_google_model = (cloud_google_model_dd.value or "").strip()
         updates = {
             SECRET_CLOUD_ANTHROPIC: (cloud_anthropic_key_tf.value or "").strip(),
             SECRET_CLOUD_OPENAI: (cloud_openai_key_tf.value or "").strip(),
@@ -651,7 +664,7 @@ async def open_settings_dialog(studio: Any) -> None:
         for r in margin_rows:
             prompts_list.controls.append(r["card"])
         prompts_list.controls.append(
-            ft.Padding(
+            ft.Container(
                 padding=ft.padding.only(top=8),
                 content=ft.Text(
                     "Impact tab (Review → Impact). Templates need {text} and {context}.",
@@ -1401,4 +1414,6 @@ async def open_settings_dialog(studio: Any) -> None:
         actions=[ft.TextButton("Close", on_click=lambda e: page.pop_dialog())],
         actions_alignment=ft.MainAxisAlignment.END,
     )
+    # Yield so the File menu overlay finishes closing before the modal is stacked.
+    await asyncio.sleep(0)
     page.show_dialog(dlg)

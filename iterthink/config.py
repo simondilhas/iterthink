@@ -42,24 +42,25 @@ OLLAMA_HOST: str | None = None
 APPEARANCE: str = "dark"
 IS_LIGHT: bool = False
 
-PAGE_BG: str = "#230F33"
-PRIMARY_COLOR: str = "#B38FC1"
-HIGHLIGHT: str = "#B38FC1"
-ON_PRIMARY: str = "#FFFFFF"
-ON_SURFACE: str = "#FFFFFF"
-ON_SURFACE_SOFT: str = "#B8CEE8"
-ON_SURFACE_VARIANT: str = "#959799"
-OUTLINE: str = "#959799"
+PAGE_BG: str = "#0F0F12"
+PRIMARY_COLOR: str = "#B8A8D4"
+HIGHLIGHT: str = "#D2C4E8"
+ON_PRIMARY: str = "#141416"
+ON_SURFACE: str = "#F2EEF8"
+ON_SURFACE_SOFT: str = "#9A9AA8"
+ON_SURFACE_VARIANT: str = "#A8A6B4"
+OUTLINE: str = "#3E3E4A"
 SUCCESS: str = "#C8E4C4"
 
-SURFACE: str = "#230F33"
-SURFACE_VARIANT: str = "#1A0A26"
-SIDEBAR_SURFACE: str = "#1A0A26"
+SURFACE: str = "#18181C"
+SURFACE_VARIANT: str = "#1E1E24"
+SIDEBAR_SURFACE: str = "#1E1E24"
 CHAT_SYSTEM: str = "You are a prose editor focusing on intent and clarity."
-SELECTION_OVERLAY: str = "#88B38FC1"
+SELECTION_OVERLAY: str = "#88B8A8D4"
 
 STARTUP_DAILY_LOG: bool = True
 NEW_NOTE_NAME_TEMPLATE: str = "unnamed-{n}.md"
+RAG_SYSTEM: bool = False
 
 
 def _bundled_defaults_dict() -> dict[str, Any]:
@@ -69,6 +70,18 @@ def _bundled_defaults_dict() -> dict[str, Any]:
     if not isinstance(data, dict):
         raise RuntimeError(f"Invalid bundled config: {path}")
     return data
+
+
+def _coerce_rag_system_value(raw: Any) -> bool:
+    """Normalize bootstrap ``rag_system`` to bool (unknown shapes default to True)."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int):
+        return raw != 0
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        return False if s in ("false", "no", "0", "off") else True
+    return True
 
 
 def _ensure_bootstrap_file() -> None:
@@ -144,7 +157,7 @@ def refresh() -> None:
     global PAGE_BG, PRIMARY_COLOR, HIGHLIGHT, ON_PRIMARY, ON_SURFACE, ON_SURFACE_SOFT
     global ON_SURFACE_VARIANT, OUTLINE, SUCCESS
     global SURFACE, SURFACE_VARIANT, SIDEBAR_SURFACE, CHAT_SYSTEM, SELECTION_OVERLAY
-    global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE
+    global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE, RAG_SYSTEM
 
     merged = _merged_config()
     DOCUMENTS = _as_path("documents_root", merged)
@@ -185,19 +198,19 @@ def refresh() -> None:
         v = pal.get(key, fallback)
         return v.strip() if isinstance(v, str) and v.strip() else fallback
 
-    PAGE_BG = _tok("page_background", "#230F33" if not IS_LIGHT else "#FFFFFF")
-    SURFACE = _tok("surface", "#230F33" if not IS_LIGHT else "#FFFFFF")
-    SURFACE_VARIANT = _tok("sidebar_surface", "#1A0A26" if not IS_LIGHT else "#F8F9FA")
-    SIDEBAR_SURFACE = _tok("sidebar_surface", "#1A0A26" if not IS_LIGHT else "#F8F9FA")
-    PRIMARY_COLOR = _tok("primary", "#B38FC1" if not IS_LIGHT else "#312F8A")
-    HIGHLIGHT = _tok("highlight", PRIMARY_COLOR)
-    ON_PRIMARY = _tok("on_primary", "#FFFFFF")
-    ON_SURFACE = _tok("on_surface", "#FFFFFF" if not IS_LIGHT else "#230F33")
-    ON_SURFACE_SOFT = _tok("on_surface_soft", "#B8CEE8" if not IS_LIGHT else "#230F33")
-    ON_SURFACE_VARIANT = _tok("on_sidebar_surface", "#959799")
-    OUTLINE = _tok("outline", "#959799")
+    PAGE_BG = _tok("page_background", "#0F0F12" if not IS_LIGHT else "#FFFFFF")
+    SURFACE = _tok("surface", "#18181C" if not IS_LIGHT else "#FFFFFF")
+    SURFACE_VARIANT = _tok("sidebar_surface", "#1E1E24" if not IS_LIGHT else "#F6F6F8")
+    SIDEBAR_SURFACE = _tok("sidebar_surface", "#1E1E24" if not IS_LIGHT else "#F6F6F8")
+    PRIMARY_COLOR = _tok("primary", "#B8A8D4" if not IS_LIGHT else "#2E2C6E")
+    HIGHLIGHT = _tok("highlight", "#D2C4E8" if not IS_LIGHT else "#8B76B8")
+    ON_PRIMARY = _tok("on_primary", "#141416" if not IS_LIGHT else "#FFFFFF")
+    ON_SURFACE = _tok("on_surface", "#F2EEF8" if not IS_LIGHT else "#1A1A24")
+    ON_SURFACE_SOFT = _tok("on_surface_soft", "#9A9AA8" if not IS_LIGHT else "#5A5A68")
+    ON_SURFACE_VARIANT = _tok("on_sidebar_surface", "#A8A6B4" if not IS_LIGHT else "#6B6B78")
+    OUTLINE = _tok("outline", "#3E3E4A" if not IS_LIGHT else "#C6C6D2")
     SUCCESS = _tok("success", "#C8E4C4")
-    SELECTION_OVERLAY = _tok("selection_overlay", "#88B38FC1" if not IS_LIGHT else "#55312F8A")
+    SELECTION_OVERLAY = _tok("selection_overlay", "#88B8A8D4" if not IS_LIGHT else "#552E2C6E")
 
     cs = merged.get("chat_system")
     if isinstance(cs, str) and cs.strip():
@@ -208,6 +221,13 @@ def refresh() -> None:
 
     sdl = merged.get("startup_daily_log", True)
     STARTUP_DAILY_LOG = bool(sdl) if isinstance(sdl, bool) else True
+
+    _bd_rag = _bundled_defaults_dict()
+    _bundled_rag = _bd_rag.get("rag_system", False)
+    rs = merged.get("rag_system", _bundled_rag)
+    if rs is None:
+        rs = _bundled_rag
+    RAG_SYSTEM = _coerce_rag_system_value(rs)
 
     nt = merged.get("new_note_name_template")
     if isinstance(nt, str) and nt.strip() and nt.count("{n}") == 1:

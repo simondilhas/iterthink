@@ -6,8 +6,10 @@ import pytest
 
 from iterthink.compare.margin import (
     distribute_heights,
+    insert_paragraph_after_old_index,
     join_paragraphs,
     paragraph_index_at_offset,
+    remove_paragraph_at_index,
     replace_paragraph_at_index,
     split_paragraphs,
     wrapped_line_count,
@@ -52,6 +54,22 @@ def test_replace_paragraph_at_index_out_of_bounds_unchanged() -> None:
     text = "a\n\nb"
     assert replace_paragraph_at_index(text, 99, "x") == text
     assert replace_paragraph_at_index(text, -1, "x") == text
+
+
+def test_remove_paragraph_at_index_drops_slot() -> None:
+    assert remove_paragraph_at_index("a\n\nb\n\nc", 1) == "a\n\nc"
+
+
+def test_remove_paragraph_at_index_last_slot_yields_empty() -> None:
+    assert remove_paragraph_at_index("only", 0) == ""
+
+
+def test_insert_paragraph_after_old_index_before_first() -> None:
+    assert insert_paragraph_after_old_index("a\n\nb", -1, "Z") == "Z\n\na\n\nb"
+
+
+def test_insert_paragraph_after_old_index_after_slot() -> None:
+    assert insert_paragraph_after_old_index("a\n\nb", 0, "mid") == "a\n\nmid\n\nb"
 
 
 @pytest.mark.parametrize(

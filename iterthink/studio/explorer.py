@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import sys
+import traceback
 from pathlib import Path
 from typing import Any, Literal
 
 import flet as ft
 
 from iterthink import config
-from iterthink.persistence import version_storage
+from iterthink.persistence import store_db, version_storage
 from iterthink.services import document_import
 from iterthink.db.session import session_scope
 from .constants import TAB_FUTURE, TAB_PRESENT
@@ -455,6 +457,177 @@ class MarkdownStudioExplorer:
             )
         )
 
+    async def _defer_show_delete_file_dialog(self, path: Path) -> None:
+        """Open delete confirmation after the tree popup menu has closed (Flet event ordering)."""
+        await asyncio.sleep(0)
+        self._show_delete_file_dialog(path)
+
+    async def _defer_show_delete_folder_dialog(self, path: Path) -> None:
+        await asyncio.sleep(0)
+        self._show_delete_folder_dialog(path)
+
+    def _tree_delete_target_is_open_note(self, rp: Path) -> bool:
+        """True when ``rp`` is the note currently open in the editor (symlink-safe)."""
+        cur = self.current_path
+        if cur is None:
+            return False
+        try:
+            if cur.exists() and rp.exists():
+                return cur.samefile(rp)
+        except OSError:
+            pass
+        try:
+            return cur.resolve() == rp.resolve()
+        except OSError:
+            return False
+
+    async def _apply_delete_file_confirmed_async(self, path: Path) -> None:
+        """Confirm-handler: remove DB row, store assets, and the ``.md`` file on disk."""
+        try:
+            await asyncio.sleep(0)
+            root = config.DOCUMENTS.resolve()
+            try:
+                rp = path.resolve()
+                rp.relative_to(root)
+            except (ValueError, OSError):
+                self._snack("Cannot delete outside the documents folder.")
+                return
+            if rp.suffix.lower() != ".md":
+                self._snack("Only markdown files can be deleted here.")
+                return
+
+            open_here = self._tree_delete_target_is_open_note(rp)
+            if open_here:
+                self._flush_review_edits_if_changed()
+
+            doc_id: int | None = None
+            try:
+                with session_scope() as s:
+                    doc_id = version_storage.document_id_for_resolved_path(s, rp)
+                    version_storage.delete_document_row_if_any(s, rp)
+            except BaseException as ex:
+                print(traceback.format_exc(), file=sys.stderr, flush=True)
+                self._snack(f"Could not update library: {ex}")
+                return
+
+            if open_here:
+                self._detach_pdf_import_ui_for_store_delete()
+                await asyncio.sleep(0.06)
+
+            if doc_id is not None:
+                try:
+                    store_db.impact_version_chunk_delete_for_document(self._db, doc_id)
+                except BaseException:
+                    print(traceback.format_exc(), file=sys.stderr, flush=True)
+
+            try:
+                version_storage.purge_document_store_dirs(rp)
+            except BaseException as ex:
+                print(traceback.format_exc(), file=sys.stderr, flush=True)
+                self._snack(f"Could not remove stored assets: {ex}")
+                return
+            try:
+                rp.unlink(missing_ok=True)
+            except OSError as ex:
+                print(traceback.format_exc(), file=sys.stderr, flush=True)
+                self._snack(f"Could not delete file: {ex}")
+                return
+
+            self.page.pop_dialog()
+            if open_here:
+                self._clear_open_document_ui()
+            self._rebuild_tree_ui()
+            if _ctrl_on_page(self.tree_column):
+                self.tree_column.update()
+            self._refresh_compare_tab_candidate_ui()
+            self._refresh_title_bar()
+            self._snack("File deleted.")
+        except BaseException as ex:
+            print(traceback.format_exc(), file=sys.stderr, flush=True)
+            try:
+                self._snack(f"Delete failed: {ex}")
+            except BaseException:
+                pass
+
+    async def _apply_delete_folder_confirmed_async(self, folder: Path) -> None:
+        """Confirm-handler: remove all ``.md`` notes under ``folder`` and the folder itself."""
+        try:
+            await asyncio.sleep(0)
+            folder_resolved = folder.resolve()
+            cur_resolved = self.current_path.resolve() if self.current_path else None
+            opened_under = False
+            if cur_resolved:
+                try:
+                    cur_resolved.relative_to(folder_resolved)
+                    opened_under = True
+                except ValueError:
+                    pass
+            if opened_under:
+                self._flush_review_edits_if_changed()
+                self._detach_pdf_import_ui_for_store_delete()
+                await asyncio.sleep(0.06)
+
+            md_paths: list[Path] = []
+            try:
+                for p in folder.rglob("*.md"):
+                    if is_excluded_from_doc_tree(p):
+                        continue
+                    md_paths.append(p.resolve())
+            except OSError as ex:
+                print(traceback.format_exc(), file=sys.stderr, flush=True)
+                self._snack(f"Could not scan folder: {ex}")
+                return
+
+            try:
+                for rp in md_paths:
+                    doc_id: int | None = None
+                    try:
+                        with session_scope() as s:
+                            doc_id = version_storage.document_id_for_resolved_path(s, rp)
+                            version_storage.delete_document_row_if_any(s, rp)
+                    except BaseException as ex:
+                        print(traceback.format_exc(), file=sys.stderr, flush=True)
+                        self._snack(f"Could not update library: {ex}")
+                        return
+                    if doc_id is not None:
+                        try:
+                            store_db.impact_version_chunk_delete_for_document(self._db, doc_id)
+                        except BaseException:
+                            print(traceback.format_exc(), file=sys.stderr, flush=True)
+                    try:
+                        version_storage.purge_document_store_dirs(rp)
+                    except BaseException as ex:
+                        print(traceback.format_exc(), file=sys.stderr, flush=True)
+                        self._snack(f"Could not remove stored assets: {ex}")
+                        return
+                    try:
+                        rp.unlink(missing_ok=True)
+                    except OSError as ex:
+                        print(traceback.format_exc(), file=sys.stderr, flush=True)
+                        self._snack(f"Could not delete file: {ex}")
+                        return
+                shutil.rmtree(folder_resolved, ignore_errors=False)
+            except OSError as ex:
+                print(traceback.format_exc(), file=sys.stderr, flush=True)
+                self._snack(f"Could not delete folder: {ex}")
+                return
+
+            self.page.pop_dialog()
+            if opened_under:
+                self._clear_open_document_ui()
+            self._rebuild_tree_ui()
+            if _ctrl_on_page(self.tree_column):
+                self.tree_column.update()
+            self._refresh_compare_tab_candidate_ui()
+            self._refresh_title_bar()
+            self._snack("Folder deleted.")
+        except BaseException as ex:
+            print(traceback.format_exc(), file=sys.stderr, flush=True)
+            try:
+                self._snack(f"Delete failed: {ex}")
+            except BaseException:
+                pass
+
     def _clear_open_document_ui(self) -> None:
         """Reset editor and compare state when no file is open (e.g. after delete)."""
         self._cancel_autosave_timers()
@@ -500,33 +673,6 @@ class MarkdownStudioExplorer:
             size=13,
         )
 
-        def apply_delete(_e: ft.ControlEvent | None = None) -> None:
-            rp = path.resolve()
-            was_current = self.current_path is not None and self.current_path.resolve() == rp
-            if was_current:
-                self._flush_review_edits_if_changed()
-            try:
-                with session_scope() as s:
-                    version_storage.delete_document_row_if_any(s, rp)
-            except BaseException as ex:
-                self._snack(f"Could not update library: {ex}")
-                return
-            version_storage.purge_document_store_dirs(rp)
-            try:
-                path.unlink(missing_ok=True)
-            except OSError as ex:
-                self._snack(f"Could not delete file: {ex}")
-                return
-            self.page.pop_dialog()
-            if was_current:
-                self._clear_open_document_ui()
-            self._rebuild_tree_ui()
-            if _ctrl_on_page(self.tree_column):
-                self.tree_column.update()
-            self._refresh_compare_tab_candidate_ui()
-            self._refresh_title_bar()
-            self._snack("File deleted.")
-
         self.page.show_dialog(
             ft.AlertDialog(
                 modal=True,
@@ -537,7 +683,7 @@ class MarkdownStudioExplorer:
                     ft.TextButton(
                         "Delete",
                         style=ft.ButtonStyle(color=ft.Colors.RED_400),
-                        on_click=apply_delete,
+                        on_click=lambda _e, p=path: self.page.run_task(self._apply_delete_file_confirmed_async, p),
                     ),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
@@ -565,58 +711,6 @@ class MarkdownStudioExplorer:
             size=13,
         )
 
-        def apply_delete(_e: ft.ControlEvent | None = None) -> None:
-            folder_resolved = folder
-            cur_resolved = self.current_path.resolve() if self.current_path else None
-            opened_under = False
-            if cur_resolved:
-                try:
-                    cur_resolved.relative_to(folder_resolved)
-                    opened_under = True
-                except ValueError:
-                    pass
-            if opened_under:
-                self._flush_review_edits_if_changed()
-
-            md_paths: list[Path] = []
-            try:
-                for p in folder.rglob("*.md"):
-                    if is_excluded_from_doc_tree(p):
-                        continue
-                    md_paths.append(p.resolve())
-            except OSError as ex:
-                self._snack(f"Could not scan folder: {ex}")
-                return
-
-            try:
-                for rp in md_paths:
-                    try:
-                        with session_scope() as s:
-                            version_storage.delete_document_row_if_any(s, rp)
-                    except BaseException as ex:
-                        self._snack(f"Could not update library: {ex}")
-                        return
-                    version_storage.purge_document_store_dirs(rp)
-                    try:
-                        rp.unlink(missing_ok=True)
-                    except OSError as ex:
-                        self._snack(f"Could not delete file: {ex}")
-                        return
-                shutil.rmtree(folder, ignore_errors=False)
-            except OSError as ex:
-                self._snack(f"Could not delete folder: {ex}")
-                return
-
-            self.page.pop_dialog()
-            if opened_under:
-                self._clear_open_document_ui()
-            self._rebuild_tree_ui()
-            if _ctrl_on_page(self.tree_column):
-                self.tree_column.update()
-            self._refresh_compare_tab_candidate_ui()
-            self._refresh_title_bar()
-            self._snack("Folder deleted.")
-
         self.page.show_dialog(
             ft.AlertDialog(
                 modal=True,
@@ -627,7 +721,9 @@ class MarkdownStudioExplorer:
                     ft.TextButton(
                         "Delete",
                         style=ft.ButtonStyle(color=ft.Colors.RED_400),
-                        on_click=apply_delete,
+                        on_click=lambda _e, fd=folder: self.page.run_task(
+                            self._apply_delete_folder_confirmed_async, fd
+                        ),
                     ),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
@@ -826,15 +922,12 @@ class MarkdownStudioExplorer:
             return
         stem = src.stem
         name_tf = ft.TextField(label="Save as (name without .md)", value=stem, dense=True, autofocus=True)
-        ext = document_import.validate_extension(src)
-        plan_cb = ft.Checkbox(
-            label="Picture-first plan / drawing",
-            value=False,
-        )
-        dialog_body: ft.Control = (
-            ft.Column([name_tf, plan_cb], tight=True, spacing=8)
-            if ext == "pdf"
-            else name_tf
+        warn_color = ft.Colors.AMBER_700 if config.IS_LIGHT else ft.Colors.AMBER_400
+        warning_txt = ft.Text(
+            "A file with that name already exists in that folder.",
+            size=12,
+            color=warn_color,
+            visible=False,
         )
 
         async def apply(_e: ft.ControlEvent | None = None) -> None:
@@ -851,24 +944,48 @@ class MarkdownStudioExplorer:
                 self._snack("A file with that name already exists in that folder.")
                 return
             self.page.pop_dialog()
-            pf = plan_cb.value if ext == "pdf" else None
-            await self._write_import_result(src, dest, pdf_plan_first=pf)
+            await self._write_import_result(src, dest)
 
+        import_btn = ft.TextButton("Import", on_click=lambda _e: self.page.run_task(apply))
+
+        def sync_name_warning(_e: ft.ControlEvent | None = None) -> None:
+            name = (name_tf.value or "").strip()
+            if not name:
+                warning_txt.visible = False
+                import_btn.disabled = False
+            else:
+                safe = "".join(c for c in name if c.isalnum() or c in " ._-")[:200].strip()
+                if not safe:
+                    warning_txt.visible = False
+                    import_btn.disabled = False
+                else:
+                    dest = base / f"{safe}.md"
+                    conflict = dest.exists()
+                    warning_txt.visible = conflict
+                    import_btn.disabled = conflict
+            if _ctrl_on_page(warning_txt):
+                warning_txt.update()
+            if _ctrl_on_page(import_btn):
+                import_btn.update()
+
+        name_tf.on_change = sync_name_warning
         name_tf.on_submit = lambda _e: self.page.run_task(apply)
+        sync_name_warning()
+        dialog_col = ft.Column([name_tf, warning_txt], tight=True, spacing=4)
         self.page.show_dialog(
             ft.AlertDialog(
                 modal=True,
                 title=ft.Text("Save imported markdown"),
-                content=dialog_body,
+                content=dialog_col,
                 actions=[
                     ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
-                    ft.TextButton("Import", on_click=lambda _e: self.page.run_task(apply)),
+                    import_btn,
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )
         )
 
-    async def _write_import_result(self, src: Path, dest: Path, *, pdf_plan_first: bool | None = None) -> None:
+    async def _write_import_result(self, src: Path, dest: Path) -> None:
         try:
             md = document_import.import_file_to_markdown(src, dest)
         except BaseException as ex:
@@ -885,7 +1002,7 @@ class MarkdownStudioExplorer:
         docx_src = src if ext == "docx" else None
         pdf_prof: version_storage.PdfProfile | None = None
         if pdf_src is not None:
-            pdf_prof = "plan" if pdf_plan_first else document_import.classify_pdf_profile(src)
+            pdf_prof = document_import.classify_pdf_profile(src)
         new_vid: int | None = None
         try:
             with session_scope() as s:
@@ -993,7 +1110,7 @@ class MarkdownStudioExplorer:
                 ),
                 ft.PopupMenuItem(
                     content=ft.Text("Delete file…", size=13),
-                    on_click=lambda _e, p=fp: self._show_delete_file_dialog(p),
+                    on_click=lambda _e, p=fp: self.page.run_task(self._defer_show_delete_file_dialog, p),
                 ),
             ],
         )
@@ -1088,7 +1205,7 @@ class MarkdownStudioExplorer:
                 ),
                 ft.PopupMenuItem(
                     content=ft.Text("Delete folder…", size=13),
-                    on_click=lambda _e, p=fp: self._show_delete_folder_dialog(p),
+                    on_click=lambda _e, p=fp: self.page.run_task(self._defer_show_delete_folder_dialog, p),
                 ),
             ],
         )

@@ -24,10 +24,18 @@ ProgressCb = Callable[[int, dict | None, str | None], Awaitable[None] | None]
 # Cache
 # ---------------------------------------------------------------------------
 
-def load_cached(check_id: str, old: str, new: str, model: str) -> dict | None:
-    """Look up a cached result by (check_id, old_sha, new_sha, model)."""
+def load_cached(
+    check_id: str,
+    old: str,
+    new: str,
+    model: str,
+    *,
+    document_path_key: str = "",
+) -> dict | None:
+    """Look up a cached result by (check_id, old_sha, new_sha, model, document_path_key)."""
     old_h = compute_hash(old)
     new_h = compute_hash(new)
+    pk = document_path_key or ""
     with session_scope() as sess:
         row = (
             sess.query(ParagraphAnalysis)
@@ -36,6 +44,7 @@ def load_cached(check_id: str, old: str, new: str, model: str) -> dict | None:
                 ParagraphAnalysis.old_sha256 == old_h,
                 ParagraphAnalysis.new_sha256 == new_h,
                 ParagraphAnalysis.model == model,
+                ParagraphAnalysis.document_path_key == pk,
             )
             .order_by(ParagraphAnalysis.created_at.desc())
             .first()
@@ -48,9 +57,18 @@ def load_cached(check_id: str, old: str, new: str, model: str) -> dict | None:
             return None
 
 
-def save_result(check_id: str, old: str, new: str, model: str, payload: dict) -> None:
+def save_result(
+    check_id: str,
+    old: str,
+    new: str,
+    model: str,
+    payload: dict,
+    *,
+    document_path_key: str = "",
+) -> None:
     old_h = compute_hash(old)
     new_h = compute_hash(new)
+    pk = document_path_key or ""
     body = json.dumps(payload, ensure_ascii=False)
     with session_scope() as sess:
         existing = (
@@ -60,6 +78,7 @@ def save_result(check_id: str, old: str, new: str, model: str, payload: dict) ->
                 ParagraphAnalysis.old_sha256 == old_h,
                 ParagraphAnalysis.new_sha256 == new_h,
                 ParagraphAnalysis.model == model,
+                ParagraphAnalysis.document_path_key == pk,
             )
             .first()
         )
@@ -72,6 +91,7 @@ def save_result(check_id: str, old: str, new: str, model: str, payload: dict) ->
                 old_sha256=old_h,
                 new_sha256=new_h,
                 model=model,
+                document_path_key=pk,
                 result_json=body,
             )
         )
@@ -160,6 +180,7 @@ async def run_check_for_document(
     on_progress: ProgressCb | None = None,
     use_cache: bool = True,
     context_per_pair: list[str | None] | None = None,
+    document_path_key: str = "",
 ) -> list[dict | None]:
     """Run ``check`` over each ``(old, new)`` pair.
 
@@ -187,7 +208,9 @@ async def run_check_for_document(
             payload = unchanged_paragraph_payload(check)
             if use_cache and not ctx:
                 try:
-                    save_result(check.id, old, new, model, payload)
+                    save_result(
+                        check.id, old, new, model, payload, document_path_key=document_path_key
+                    )
                 except BaseException as exc:  # noqa: BLE001
                     err = f"Cache write failed: {type(exc).__name__}: {exc}"
             results[i] = payload
@@ -195,14 +218,18 @@ async def run_check_for_document(
             continue
         # Skip cache when context is present (context not factored into cache key).
         if use_cache and not ctx:
-            payload = load_cached(check.id, old, new, model)
+            payload = load_cached(
+                check.id, old, new, model, document_path_key=document_path_key
+            )
         if payload is None:
             payload, err = await run_paragraph(
                 llm_chat, model=model, check=check, old=old, new=new, context=ctx
             )
             if payload is not None and not ctx:
                 try:
-                    save_result(check.id, old, new, model, payload)
+                    save_result(
+                        check.id, old, new, model, payload, document_path_key=document_path_key
+                    )
                 except BaseException as exc:  # noqa: BLE001
                     err = err or f"Cache write failed: {type(exc).__name__}: {exc}"
         results[i] = payload

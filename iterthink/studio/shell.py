@@ -316,6 +316,7 @@ class MarkdownStudioShell:
             value=md_source,
             selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_FLAVORED,
+            soft_line_break=True,
         )
         self.page.show_dialog(
             ft.AlertDialog(
