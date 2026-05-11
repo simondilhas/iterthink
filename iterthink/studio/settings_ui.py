@@ -90,7 +90,8 @@ async def _open_settings_dialog(studio: Any) -> None:
     )
 
     status_txt = ft.Text(
-        f"{len(chat_opts)} chat model(s) on Ollama. Paragraph embeddings use bundled GTE-Multilingual-Base (ONNX).",
+        f"{len(chat_opts)} chat model(s) on Ollama. Paragraph compare uses GTE-Multilingual-Base (ONNX): "
+        "downloaded once into your store folder from Hugging Face, then offline.",
         size=12,
         color=ft.Colors.GREY_500,
     )
@@ -108,8 +109,8 @@ async def _open_settings_dialog(studio: Any) -> None:
         if chat_dd.value not in chat_opts and chat_opts:
             chat_dd.value = chat_opts[0]
         status_txt.value = (
-            f"{len(chat_opts)} chat model(s) on Ollama. "
-            "Paragraph embeddings use bundled GTE-Multilingual-Base (ONNX)."
+            f"{len(chat_opts)} chat model(s) on Ollama. Paragraph compare uses GTE-Multilingual-Base (ONNX): "
+            "downloaded once into your store folder from Hugging Face, then offline."
         )
         if _ctrl_on_page(chat_dd):
             chat_dd.update()
@@ -871,7 +872,8 @@ async def _open_settings_dialog(studio: Any) -> None:
                 ft.Text("Local (Ollama)", weight=ft.FontWeight.W_600, size=14),
                 ft.Text(
                     "Used when Home is selected in the KI panel. "
-                    "Compare-tab paragraph embeddings run locally (GTE-Multilingual-Base ONNX); no Ollama embedding model is required.",
+                    "Compare-tab paragraph embeddings run locally (GTE-Multilingual-Base ONNX, fetched once into your store folder); "
+                    "no Ollama embedding model is required.",
                     size=11,
                     color=ft.Colors.GREY_500,
                 ),

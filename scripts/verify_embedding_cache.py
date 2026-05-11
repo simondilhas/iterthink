@@ -1,6 +1,7 @@
-"""CI helper: assert that ONNX weights are present in the bundle directory.
+"""Optional check: assert ONNX weights exist under the package bundle directory.
 
-Fails fast (exit 1) if the prefetch step was skipped or incomplete.
+Use after ``scripts/prefetch_embed_model.py`` when validating a local bundle layout.
+Desktop CI does not call this script.
 """
 
 import sys

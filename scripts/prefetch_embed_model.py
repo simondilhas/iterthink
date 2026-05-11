@@ -1,6 +1,7 @@
-"""CI helper: download the FastEmbed ONNX weights into the package bundle directory.
+"""Developer helper: download FastEmbed ONNX weights into ``iterthink/embedded_models/``.
 
-Run before `flet build` so the model ships inside the app and works offline.
+Use for local offline Flet builds or testing; desktop CI no longer prefetches here.
+Run before ``flet build`` if you want the model inside the package tree.
 """
 
 from iterthink.ai.local_embedding import ensure_bundle_model_downloaded

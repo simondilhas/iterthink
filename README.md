@@ -91,6 +91,7 @@ To pin a release or commit, use the `@…` form shown above (same URL pattern in
 **First launch:**
 1. Go to **File → Settings → Paths** — point it to your documents folder (default store is `Documents/.iterthink`)
 2. Go to **Settings → Models** — choose your AI backend and configure it
+3. **Paragraph compare:** the app downloads a local ONNX embedding model (~0.35 GB) from Hugging Face into your store folder on first launch; stay online once (set `HF_TOKEN` if your network requires it). GitHub desktop installers behave the same way.
 
 **AI backend options:**
 
@@ -150,6 +151,7 @@ Using a cloud API key (OpenAI, Anthropic, Gemini) sends your text to that provid
 
 ## Roadmap (not in order)
 
+- Refracture MarkdownStudio
 - Evaluate not only change, but consistency against other files (RAG functionality)
 - Compare Excel sheets
 - Compare PDF Plans (Floorplans, Sections)
@@ -159,7 +161,6 @@ Using a cloud API key (OpenAI, Anthropic, Gemini) sends your text to that provid
 - Team review features for collaborative workflows
 - Deeper [{yourcompany}os](https://yourcompanyos.io) integration — from change detection to closed decisions
 - Redesign with Dart (instead of python and flet) for better performance.
-- Performance Improvments for long documents
 
 ---
 

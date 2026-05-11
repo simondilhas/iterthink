@@ -148,6 +148,20 @@ def ensure_bundle_model_downloaded() -> None:
     _ensure_hf_snapshot(_snapshot_dir(root))
 
 
+def prepare_runtime_embedding_model_sync() -> None:
+    """Download ONNX + tokenizer into ``STORE_DIR/embedded_models`` if missing.
+
+    Does not construct ``TextEmbedding`` (lighter than :func:`embed_batch_sync`).
+    Safe to call from a worker thread at app startup.
+    """
+    _register_custom_embedding_model()
+    store_db.ensure_store_dir()
+    _seed_runtime_cache_from_bundle()
+    root = embedded_models_root()
+    root.mkdir(parents=True, exist_ok=True)
+    _ensure_hf_snapshot(_snapshot_dir(root))
+
+
 def ensure_model_downloaded() -> None:
     """Backward-compatible alias: same as :func:`ensure_bundle_model_downloaded`."""
     ensure_bundle_model_downloaded()
