@@ -1649,8 +1649,7 @@ class MarkdownStudio(
             self._refresh_analyse_button_state()
         if self._header_shell:
             self._header_shell.bgcolor = config.SURFACE_VARIANT
-        if self._menu_bar:
-            self._menu_bar.style = self._menu_bar_style()
+        self._rebuild_header_menu_bar()
         self.page.theme = ft.Theme(color_scheme=ui_theme.page_color_scheme())
         _hs = ft.TextStyle(color=config.ON_SURFACE_VARIANT)
         self.editor.hint_style = _hs
@@ -1711,8 +1710,6 @@ class MarkdownStudio(
             self._chat_input.update()
         if self._header_shell and _ctrl_on_page(self._header_shell):
             self._header_shell.update()
-        if self._menu_bar and _ctrl_on_page(self._menu_bar):
-            self._menu_bar.update()
         self._refresh_compare_tab_candidate_ui()
         self._refresh_compose_tab_label()
         self.page.update()

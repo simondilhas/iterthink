@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iterthink"
-version = "0.1.0"
+version = "0.1.1"
 description = "Iterthink local Markdown writer (Flet + Ollama)"
 readme = "README.md"
 license = { text = "BUSL-1.1" }

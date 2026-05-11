@@ -77,6 +77,14 @@ pip install "git+https://github.com/simondilhas/iterthink.git"
 iterthink
 ```
 
+**Install a specific Git tag** (for example `v0.0.1`): append `@` and the tag name to the URL. The tag must exist on that repository.
+
+```bash
+pip install "git+https://github.com/simondilhas/iterthink.git@v0.0.1"
+```
+
+Same for a branch (`@dev`) or a commit SHA (`@87eb27b…`).
+
 **Windows** (Command Prompt or PowerShell):
 
 ```bat
@@ -86,7 +94,7 @@ pip install -U pip "git+https://github.com/simondilhas/iterthink.git"
 iterthink
 ```
 
-To pin a release or commit, append `@v0.1.0` or `@<commit-sha>` inside the quotes (same URL).
+To pin a release or commit, use the `@…` form shown above (same URL pattern inside the quotes).
 
 **First launch:**
 1. Go to **File → Settings → Paths** — point it to your documents folder (default store is `Documents/.iterthink`)

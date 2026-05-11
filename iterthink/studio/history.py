@@ -45,6 +45,7 @@ from .focus_area import (
 )
 from . import ui_theme
 from .constants import (
+    COMPARE_ACTION_COL_W,
     COMPARE_ACTION_GRID_CELL,
     COMPARE_COL_FONT_SIZE,
     COMPARE_COL_LINE_HEIGHT,
@@ -1387,8 +1388,23 @@ class MarkdownStudioCompareText:
                 )
                 eval_ctrl = ft.Container(width=eval_spacer_w)
                 right_cell = ft.Container(expand=1, padding=_COMPARE_HISTORY_CELL_PAD)
+                ghost_row_cells: list[ft.Control] = [
+                    eval_ctrl,
+                    left_cell,
+                    pill_host,
+                    right_cell,
+                ]
+                # Match comparison/removed rows: reserve action rail width so expand columns
+                # split the same way and the pill column stays aligned.
+                if show_actions:
+                    ghost_row_cells.append(
+                        ft.Container(
+                            width=COMPARE_ACTION_COL_W,
+                            padding=ft.padding.only(top=4),
+                        )
+                    )
                 row_inner = ft.Row(
-                    [eval_ctrl, left_cell, pill_host, right_cell],
+                    ghost_row_cells,
                     spacing=4,
                     vertical_alignment=ft.CrossAxisAlignment.START,
                 )
