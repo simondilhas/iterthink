@@ -49,7 +49,7 @@ from .constants import (
 )
 from .explorer import MarkdownStudioExplorer, first_markdown_in_tree
 from .focus_area import MarkdownStudioCompose
-from .history import MarkdownStudioCompareText
+from .history import CompareCandidateSource, MarkdownStudioCompareText
 from .ki_sidebar import MarkdownStudioKiSidebar
 from .llm_backend import MarkdownStudioLlmBackend, build_llm_tier_tabs
 from .main_workspace_tabs import MainWorkspaceTabsMixin
@@ -63,15 +63,6 @@ from .util import (
 )
 # Autosave: disk idle vs snapshot idle (see constants). Compare: left = latest Compose; right = draft / snapshot / AI.
 # Layout literals: iterthink.studio.constants
-
-CompareCandidateSource = Literal[
-    "draft",
-    "ai_preview",
-    "snapshot",
-    "pdf_original",   # PDF asset attached to a snapshot (e.g. an uploaded plan)
-    "docx_original",  # Word import: extracted snapshot text left, newer text right
-    "ifc_original",   # IFC BIM model — renderer in studio.formats.ifc (placeholder)
-]
 
 
 class MarkdownStudio(
@@ -140,7 +131,7 @@ class MarkdownStudio(
         self._file_drift_dialog_open: bool = False
         self._compare_dropdown_hover: bool = False
         self._compare_version_dd_focused: bool = False
-        self._compare_candidate_source: CompareCandidateSource = "draft"
+        self._compare_candidate_source: CompareCandidateSource = CompareCandidateSource.DRAFT
         self._compare_snapshot_version_id: int | None = None
         # History tab: newer side (right column) — None means live current draft in ``editor``.
         self._compare_newer_version_id: int | None = None

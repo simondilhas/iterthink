@@ -31,7 +31,7 @@ class MarkdownStudioImpactMixin:
     chat_model_for_requests, _impact_status_text, _impact_results_list,
     _pill_row_impact, _impact_ki_context_panel, _impact_summary_right,
     _right_chat_section, _chat_input_row, _impact_run_dock, _ki_sidebar_well,
-    _active_compare_buffers, _rebuild_compare_paragraph_ui.
+    _active_compare_buffers, _rebuild_compare_paragraph_ui (provided by ``iterthink.studio.history``).
     """
 
     def _init_impact_ui_fields(self) -> None:

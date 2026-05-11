@@ -77,14 +77,6 @@ pip install "git+https://github.com/simondilhas/iterthink.git"
 iterthink
 ```
 
-**Install a specific Git tag** (for example `v0.0.1`): append `@` and the tag name to the URL. The tag must exist on that repository.
-
-```bash
-pip install "git+https://github.com/simondilhas/iterthink.git@v0.0.1"
-```
-
-Same for a branch (`@dev`) or a commit SHA (`@87eb27b…`).
-
 **Windows** (Command Prompt or PowerShell):
 
 ```bat
