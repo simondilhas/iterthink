@@ -19,7 +19,7 @@ from iterthink.services import markdown_docx_export
 from . import ui_theme
 
 from . import plan_compare_panel
-from iterthink.db.session import session_scope
+from iterthink.db.session import reset_engine_cache, session_scope
 from .formats.ifc import MarkdownStudioIfcFormat
 from .formats.pdf_docx import MarkdownStudioAssetCompare
 
@@ -92,6 +92,7 @@ class MarkdownStudio(
         self.page = page
         # Re-read bootstrap YAML so Review layout matches disk (import-time refresh can be stale).
         config.refresh()
+        reset_engine_cache()
         self._store_dir_resolved = config.STORE_DIR.resolve()
         self._fp_documents = ft.FilePicker()
         self._fp_store = ft.FilePicker()
