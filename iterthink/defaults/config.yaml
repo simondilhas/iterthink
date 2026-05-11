@@ -13,32 +13,34 @@ ollama_host: null
 appearance: dark
 
 theme:
+  # Dark: near-black panels, muted lavender pills (dark text on fill), lavender accents.
   dark:
-    page_background: "#1A1A1A"
-    surface: "#230F33"
-    sidebar_surface: "#1A0A26"
-    primary: "#B38FC1"
-    highlight: "#B38FC1"
-    on_primary: "#FFFFFF"
-    on_surface: "#FFFFFF"
-    on_surface_soft: "#B8CEE8"
-    on_sidebar_surface: "#959799"
-    outline: "#959799"
+    page_background: "#0F0F12"
+    surface: "#18181C"
+    sidebar_surface: "#1E1E24"
+    primary: "#B8A8D4"
+    highlight: "#D2C4E8"
+    on_primary: "#141416"
+    on_surface: "#F2EEF8"
+    on_surface_soft: "#9A9AA8"
+    on_sidebar_surface: "#A8A6B4"
+    outline: "#3E3E4A"
     success: "#C8E4C4"
-    selection_overlay: "#88B38FC1"
+    selection_overlay: "#88B8A8D4"
+  # Light: white editor, soft gray sidebars, indigo action pills, lavender tab/icons.
   light:
     page_background: "#FFFFFF"
     surface: "#FFFFFF"
-    sidebar_surface: "#F8F9FA"
-    primary: "#312F8A"
-    highlight: "#B38FC1"
+    sidebar_surface: "#F6F6F8"
+    primary: "#2E2C6E"
+    highlight: "#8B76B8"
     on_primary: "#FFFFFF"
-    on_surface: "#230F33"
-    on_surface_soft: "#230F33"
-    on_sidebar_surface: "#959799"
-    outline: "#959799"
+    on_surface: "#1A1A24"
+    on_surface_soft: "#5A5A68"
+    on_sidebar_surface: "#6B6B78"
+    outline: "#C6C6D2"
     success: "#C8E4C4"
-    selection_overlay: "#55312F8A"
+    selection_overlay: "#552E2C6E"
 
 chat_system: "You are a prose editor focusing on intent and clarity."
 
