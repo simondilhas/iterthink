@@ -60,6 +60,7 @@ SELECTION_OVERLAY: str = "#88B38FC1"
 
 STARTUP_DAILY_LOG: bool = True
 NEW_NOTE_NAME_TEMPLATE: str = "unnamed-{n}.md"
+RAG_SYSTEM: bool = False
 
 
 def _bundled_defaults_dict() -> dict[str, Any]:
@@ -69,6 +70,18 @@ def _bundled_defaults_dict() -> dict[str, Any]:
     if not isinstance(data, dict):
         raise RuntimeError(f"Invalid bundled config: {path}")
     return data
+
+
+def _coerce_rag_system_value(raw: Any) -> bool:
+    """Normalize bootstrap ``rag_system`` to bool (unknown shapes default to True)."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int):
+        return raw != 0
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        return False if s in ("false", "no", "0", "off") else True
+    return True
 
 
 def _ensure_bootstrap_file() -> None:
@@ -144,7 +157,7 @@ def refresh() -> None:
     global PAGE_BG, PRIMARY_COLOR, HIGHLIGHT, ON_PRIMARY, ON_SURFACE, ON_SURFACE_SOFT
     global ON_SURFACE_VARIANT, OUTLINE, SUCCESS
     global SURFACE, SURFACE_VARIANT, SIDEBAR_SURFACE, CHAT_SYSTEM, SELECTION_OVERLAY
-    global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE
+    global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE, RAG_SYSTEM
 
     merged = _merged_config()
     DOCUMENTS = _as_path("documents_root", merged)
@@ -208,6 +221,13 @@ def refresh() -> None:
 
     sdl = merged.get("startup_daily_log", True)
     STARTUP_DAILY_LOG = bool(sdl) if isinstance(sdl, bool) else True
+
+    _bd_rag = _bundled_defaults_dict()
+    _bundled_rag = _bd_rag.get("rag_system", False)
+    rs = merged.get("rag_system", _bundled_rag)
+    if rs is None:
+        rs = _bundled_rag
+    RAG_SYSTEM = _coerce_rag_system_value(rs)
 
     nt = merged.get("new_note_name_template")
     if isinstance(nt, str) and nt.strip() and nt.count("{n}") == 1:

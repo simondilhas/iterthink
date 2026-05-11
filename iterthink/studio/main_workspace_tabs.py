@@ -94,7 +94,7 @@ class MainWorkspaceTabsMixin:
         the toolbar so the Review chrome only shows on the Change subtab.
         """
         is_active = getattr(self, "_review_subtab_index", 0) == idx
-        display_label = f"{label} (Experimental)" if idx == 1 else label
+        display_label = f"{label} (Comming Soon)" if idx == 1 else label
         return ft.Container(
             content=ft.Text(
                 display_label,
@@ -115,6 +115,8 @@ class MainWorkspaceTabsMixin:
         )
 
     def _select_review_subtab(self, idx: int) -> None:
+        if not config.RAG_SYSTEM and idx != 0:
+            return
         if idx == self._review_subtab_index:
             return
         self._review_subtab_index = idx
@@ -139,6 +141,8 @@ class MainWorkspaceTabsMixin:
                 self._future_rows_listview.update()
 
     def _apply_active_tab_ui_state(self) -> None:
+        if not config.RAG_SYSTEM and self._review_subtab_index != 0:
+            self._review_subtab_index = 0
         self._main_tabs.selected_index = self._main_tab_index
         if _ctrl_on_page(self._main_tabs):
             self._main_tabs.update()
@@ -170,6 +174,8 @@ class MainWorkspaceTabsMixin:
 
     def _refresh_review_subtab_strip(self) -> None:
         """Restyle the active/inactive Difference|Impact buttons."""
+        if not config.RAG_SYSTEM:
+            return
         for idx, btn in (
             (0, self._review_subtab_change_btn),
             (1, self._review_subtab_impact_btn),

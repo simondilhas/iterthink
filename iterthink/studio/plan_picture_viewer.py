@@ -1,4 +1,4 @@
-"""Reusable Flet plan / PDF page strip with zoom and pan (InteractiveViewer)."""
+"""Reusable Flet plan / PDF page strip (optional per-page zoom/pan)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,14 @@ def plan_picture_column(
     inner_scroll: bool = True,
 ) -> ft.Column:
     """
-    Vertical strip of page images; each page is zoom/pannable independently.
+    Vertical strip of page images.
+
+    With ``inner_scroll=True`` (default), each page uses ``InteractiveViewer`` for
+    zoom/pan and the column scrolls itself.
+
+    With ``inner_scroll=False``, each page is a plain ``Image`` so an outer
+    ``ListView`` receives vertical wheel scroll (paired-column sync); zoom/pan per
+    page is disabled in that mode.
     """
     rows: list[ft.Control] = []
     for i, p in enumerate(page_png_paths):
@@ -28,20 +35,24 @@ def plan_picture_column(
             fit=ft.BoxFit.CONTAIN,
             filter_quality=ft.FilterQuality.MEDIUM,
         )
-        viewer = ft.InteractiveViewer(
-            content=img,
-            pan_enabled=True,
-            scale_enabled=True,
-            min_scale=min_scale,
-            max_scale=max_scale,
-            constrained=True,
-            clip_behavior=ft.ClipBehavior.HARD_EDGE,
-        )
+        if inner_scroll:
+            page_content: ft.Control = ft.InteractiveViewer(
+                content=img,
+                pan_enabled=True,
+                scale_enabled=True,
+                min_scale=min_scale,
+                max_scale=max_scale,
+                constrained=True,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            )
+        else:
+            page_content = img
         rows.append(
             ft.Container(
-                content=viewer,
+                content=page_content,
                 height=page_viewport_height,
                 alignment=ft.Alignment.TOP_CENTER,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
                 border=ft.border.all(1, ft.Colors.with_opacity(0.35, ft.Colors.GREY_600)),
                 border_radius=8,
             )

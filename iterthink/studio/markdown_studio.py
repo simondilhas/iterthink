@@ -35,7 +35,6 @@ from .constants import (
     COMPARE_KEY_CURRENT as _COMPARE_KEY_CURRENT,
     HISTORY_COMPARE_DROPDOWN_COLUMNS_GAP_PX,
     KI_TAB_BAR_TO_PILLS_GAP_PX,
-    KI_TAB_BODY_MIN_HEIGHT_PX,
     KI_TAB_ICON_PX,
     KI_TAB_PAGE_PAD_V_PX,
     KI_TIER_TAB_ICON_PX,
@@ -91,6 +90,8 @@ class MarkdownStudio(
 ):
     def __init__(self, page: ft.Page) -> None:
         self.page = page
+        # Re-read bootstrap YAML so Review layout matches disk (import-time refresh can be stale).
+        config.refresh()
         self._store_dir_resolved = config.STORE_DIR.resolve()
         self._fp_documents = ft.FilePicker()
         self._fp_store = ft.FilePicker()
@@ -168,6 +169,8 @@ class MarkdownStudio(
         self._future_row_kinds: list[str] = []
         self._future_row_cand_idx: list[int | None] = []
         self._future_row_stable_texts: list[str] = []
+        self._future_row_old_index: list[int] = []
+        self._future_row_insert_after_old: list[int] = []
         self._compare_pill_gen: int = 0
         self._compare_refine_gen: int = 0
         # Future tab: left column = current draft (read-only diff with deletions),
@@ -948,14 +951,19 @@ class MarkdownStudio(
             expand=True,
             spacing=0,
         )
+        _future_tab_col_children: list[ft.Control] = []
+        if config.RAG_SYSTEM:
+            _future_tab_col_children.append(self._review_subtab_strip)
+        _future_tab_col_children.extend(
+            [
+                self._review_difference_chrome_row,
+                self._review_subpanels_column,
+            ]
+        )
         self._future_tab_body = ft.Container(
             expand=True,
             content=ft.Column(
-                [
-                    self._review_subtab_strip,
-                    self._review_difference_chrome_row,
-                    self._review_subpanels_column,
-                ],
+                _future_tab_col_children,
                 expand=True,
                 spacing=0,
             ),
@@ -1250,43 +1258,40 @@ class MarkdownStudio(
                 tight=True,
             ),
         )
-        self._ki_tab_body_heights: list[float] = [
-            float(KI_TAB_BODY_MIN_HEIGHT_PX),
-            float(KI_TAB_BODY_MIN_HEIGHT_PX),
-            float(KI_TAB_BODY_MIN_HEIGHT_PX),
-            140.0,
+        # Pages are kept separately so we can hot-swap them as the active tab
+        # changes. A plain Container (without bounded height) lets the wrap Row
+        # render its full intrinsic height instead of being clipped by a
+        # TabBarView's PageView constraint.
+        self._ki_tab_pages: list[ft.Control] = [
+            ft.Container(
+                padding=ft.padding.symmetric(
+                    horizontal=4,
+                    vertical=KI_TAB_PAGE_PAD_V_PX,
+                ),
+                content=self._pill_row_discuss,
+            ),
+            ft.Container(
+                padding=ft.padding.symmetric(
+                    horizontal=4,
+                    vertical=KI_TAB_PAGE_PAD_V_PX,
+                ),
+                content=self._pill_row_change,
+            ),
+            ft.Container(
+                padding=ft.padding.symmetric(
+                    horizontal=4,
+                    vertical=KI_TAB_PAGE_PAD_V_PX,
+                ),
+                content=ft.Column(
+                    [self._pill_row_analyse, self._impact_analyse_section],
+                    spacing=0,
+                    tight=True,
+                ),
+            ),
+            self._ki_act_container,
         ]
-
-        self._ki_tab_bar_view = ft.TabBarView(
-            controls=[
-                ft.Container(
-                    padding=ft.padding.symmetric(
-                        horizontal=4,
-                        vertical=KI_TAB_PAGE_PAD_V_PX,
-                    ),
-                    content=self._pill_row_discuss,
-                ),
-                ft.Container(
-                    padding=ft.padding.symmetric(
-                        horizontal=4,
-                        vertical=KI_TAB_PAGE_PAD_V_PX,
-                    ),
-                    content=self._pill_row_change,
-                ),
-                ft.Container(
-                    padding=ft.padding.symmetric(
-                        horizontal=4,
-                        vertical=KI_TAB_PAGE_PAD_V_PX,
-                    ),
-                    content=ft.Column(
-                        [self._pill_row_analyse, self._impact_analyse_section],
-                        spacing=0,
-                        tight=True,
-                    ),
-                ),
-                self._ki_act_container,
-            ],
-            height=float(KI_TAB_BODY_MIN_HEIGHT_PX + 2 * KI_TAB_PAGE_PAD_V_PX),
+        self._ki_tab_bar_view = ft.Container(
+            content=self._ki_tab_pages[0],
         )
         _ki_mode_btn_style = ft.ButtonStyle(
             bgcolor=ft.Colors.TRANSPARENT,
@@ -1341,14 +1346,9 @@ class MarkdownStudio(
             padding=ft.padding.symmetric(horizontal=4, vertical=0),
             content=self._ki_topic_top_strip,
         )
-        self._ki_topic_tabs = ft.Tabs(
-            content=ft.Container(
-                padding=ft.padding.only(top=float(KI_TAB_BAR_TO_PILLS_GAP_PX)),
-                content=self._ki_tab_bar_view,
-            ),
-            length=4,
-            selected_index=0,
-            on_change=self._on_ki_tabs_change,
+        self._ki_topic_tabs = ft.Container(
+            padding=ft.padding.only(top=float(KI_TAB_BAR_TO_PILLS_GAP_PX)),
+            content=self._ki_tab_bar_view,
         )
 
         self._chat_history = ft.ListView(
@@ -1502,12 +1502,6 @@ class MarkdownStudio(
             ),
         )
         self._right_ki_column = self._ki_sidebar_well
-
-        self._pill_row_discuss.on_size_change = self._on_ki_pill_row_size_discuss
-        self._pill_row_change.on_size_change = self._on_ki_pill_row_size_change
-        self._pill_row_analyse.on_size_change = self._on_ki_pill_row_size_analyse
-        self._pill_row_impact.on_size_change = self._on_ki_pill_row_size_analyse
-        self._ki_act_container.on_size_change = self._on_ki_pill_row_size_act
 
         self.right_panel = ft.Container(
             width=SIDEBAR_EXPANDED_WIDTH_PX,

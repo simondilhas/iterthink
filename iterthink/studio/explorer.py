@@ -455,6 +455,15 @@ class MarkdownStudioExplorer:
             )
         )
 
+    async def _defer_show_delete_file_dialog(self, path: Path) -> None:
+        """Open delete confirmation after the tree popup menu has closed (Flet event ordering)."""
+        await asyncio.sleep(0)
+        self._show_delete_file_dialog(path)
+
+    async def _defer_show_delete_folder_dialog(self, path: Path) -> None:
+        await asyncio.sleep(0)
+        self._show_delete_folder_dialog(path)
+
     def _clear_open_document_ui(self) -> None:
         """Reset editor and compare state when no file is open (e.g. after delete)."""
         self._cancel_autosave_timers()
@@ -500,7 +509,8 @@ class MarkdownStudioExplorer:
             size=13,
         )
 
-        def apply_delete(_e: ft.ControlEvent | None = None) -> None:
+        async def apply_delete_async(_e: ft.ControlEvent | None = None) -> None:
+            await asyncio.sleep(0)
             rp = path.resolve()
             was_current = self.current_path is not None and self.current_path.resolve() == rp
             if was_current:
@@ -511,9 +521,13 @@ class MarkdownStudioExplorer:
             except BaseException as ex:
                 self._snack(f"Could not update library: {ex}")
                 return
-            version_storage.purge_document_store_dirs(rp)
             try:
-                path.unlink(missing_ok=True)
+                version_storage.purge_document_store_dirs(rp)
+            except BaseException as ex:
+                self._snack(f"Could not remove stored assets: {ex}")
+                return
+            try:
+                rp.unlink(missing_ok=True)
             except OSError as ex:
                 self._snack(f"Could not delete file: {ex}")
                 return
@@ -537,7 +551,7 @@ class MarkdownStudioExplorer:
                     ft.TextButton(
                         "Delete",
                         style=ft.ButtonStyle(color=ft.Colors.RED_400),
-                        on_click=apply_delete,
+                        on_click=lambda e: self.page.run_task(apply_delete_async, e),
                     ),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
@@ -565,7 +579,8 @@ class MarkdownStudioExplorer:
             size=13,
         )
 
-        def apply_delete(_e: ft.ControlEvent | None = None) -> None:
+        async def apply_delete_async(_e: ft.ControlEvent | None = None) -> None:
+            await asyncio.sleep(0)
             folder_resolved = folder
             cur_resolved = self.current_path.resolve() if self.current_path else None
             opened_under = False
@@ -596,7 +611,11 @@ class MarkdownStudioExplorer:
                     except BaseException as ex:
                         self._snack(f"Could not update library: {ex}")
                         return
-                    version_storage.purge_document_store_dirs(rp)
+                    try:
+                        version_storage.purge_document_store_dirs(rp)
+                    except BaseException as ex:
+                        self._snack(f"Could not remove stored assets: {ex}")
+                        return
                     try:
                         rp.unlink(missing_ok=True)
                     except OSError as ex:
@@ -627,7 +646,7 @@ class MarkdownStudioExplorer:
                     ft.TextButton(
                         "Delete",
                         style=ft.ButtonStyle(color=ft.Colors.RED_400),
-                        on_click=apply_delete,
+                        on_click=lambda e: self.page.run_task(apply_delete_async, e),
                     ),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
@@ -826,16 +845,6 @@ class MarkdownStudioExplorer:
             return
         stem = src.stem
         name_tf = ft.TextField(label="Save as (name without .md)", value=stem, dense=True, autofocus=True)
-        ext = document_import.validate_extension(src)
-        plan_cb = ft.Checkbox(
-            label="Picture-first plan / drawing",
-            value=False,
-        )
-        dialog_body: ft.Control = (
-            ft.Column([name_tf, plan_cb], tight=True, spacing=8)
-            if ext == "pdf"
-            else name_tf
-        )
 
         async def apply(_e: ft.ControlEvent | None = None) -> None:
             name = (name_tf.value or "").strip()
@@ -851,15 +860,14 @@ class MarkdownStudioExplorer:
                 self._snack("A file with that name already exists in that folder.")
                 return
             self.page.pop_dialog()
-            pf = plan_cb.value if ext == "pdf" else None
-            await self._write_import_result(src, dest, pdf_plan_first=pf)
+            await self._write_import_result(src, dest)
 
         name_tf.on_submit = lambda _e: self.page.run_task(apply)
         self.page.show_dialog(
             ft.AlertDialog(
                 modal=True,
                 title=ft.Text("Save imported markdown"),
-                content=dialog_body,
+                content=name_tf,
                 actions=[
                     ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
                     ft.TextButton("Import", on_click=lambda _e: self.page.run_task(apply)),
@@ -868,7 +876,7 @@ class MarkdownStudioExplorer:
             )
         )
 
-    async def _write_import_result(self, src: Path, dest: Path, *, pdf_plan_first: bool | None = None) -> None:
+    async def _write_import_result(self, src: Path, dest: Path) -> None:
         try:
             md = document_import.import_file_to_markdown(src, dest)
         except BaseException as ex:
@@ -885,7 +893,7 @@ class MarkdownStudioExplorer:
         docx_src = src if ext == "docx" else None
         pdf_prof: version_storage.PdfProfile | None = None
         if pdf_src is not None:
-            pdf_prof = "plan" if pdf_plan_first else document_import.classify_pdf_profile(src)
+            pdf_prof = document_import.classify_pdf_profile(src)
         new_vid: int | None = None
         try:
             with session_scope() as s:
@@ -993,7 +1001,7 @@ class MarkdownStudioExplorer:
                 ),
                 ft.PopupMenuItem(
                     content=ft.Text("Delete file…", size=13),
-                    on_click=lambda _e, p=fp: self._show_delete_file_dialog(p),
+                    on_click=lambda _e, p=fp: self.page.run_task(self._defer_show_delete_file_dialog, p),
                 ),
             ],
         )
@@ -1088,7 +1096,7 @@ class MarkdownStudioExplorer:
                 ),
                 ft.PopupMenuItem(
                     content=ft.Text("Delete folder…", size=13),
-                    on_click=lambda _e, p=fp: self._show_delete_folder_dialog(p),
+                    on_click=lambda _e, p=fp: self.page.run_task(self._defer_show_delete_folder_dialog, p),
                 ),
             ],
         )

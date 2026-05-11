@@ -36,7 +36,9 @@ def test_aligned_review_rows_includes_delete_kind_with_none_cand_idx() -> None:
     assert "delete" in kinds
     delete_rows = [r for r in rows if r.kind == "delete"]
     assert all(r.cand_idx is None for r in delete_rows)
-    assert any(r.old_text == "Remove me" for r in delete_rows)
+    remove_row = next(r for r in delete_rows if r.old_text == "Remove me")
+    assert remove_row.old_index == 1  # compose paragraph index, not UI row index
+    assert remove_row.insert_after_old == -1
 
 
 def test_aligned_review_rows_orders_by_candidate_with_deletes_before_target_slot() -> None:
@@ -44,3 +46,18 @@ def test_aligned_review_rows_orders_by_candidate_with_deletes_before_target_slot
     rows = aligned_review_rows("A\n\nB", "A\n\nX\n\nB")
     cand_indices = [r.cand_idx for r in rows if r.kind != "delete"]
     assert all(i is not None for i in cand_indices)
+
+
+def test_aligned_review_rows_old_index_tracks_compose_slot_past_gap_rows() -> None:
+    """After delete/insert gap rows, ``old_index`` must stay the compose slot (not the UI row)."""
+    rows = aligned_review_rows("A\n\nB\n\nC", "A\n\nX\n\nC")
+    assert rows[-1].kind == "equal"
+    assert rows[-1].old_index == 2
+    assert len(rows) == 4  # row index 3 would wrongly map to compose paragraph 3
+
+
+def test_aligned_review_rows_insert_carries_insert_after_old() -> None:
+    rows = aligned_review_rows("A\n\nB\n\nC", "A\n\nX\n\nC")
+    ins = next(r for r in rows if r.kind == "insert" and r.new_text == "X")
+    assert ins.old_index == -1
+    assert ins.insert_after_old == 0

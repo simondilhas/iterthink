@@ -74,23 +74,75 @@ Upload your project documents as context. Then check any paragraph — does this
 
 ## Get started
 
+### Linux
+
+
+
 **You'll need:** [Python 3.11+](https://www.python.org/downloads/) and an AI backend — either a local Ollama install or an API key.
+
+**Linux x86_64 — AppImage:** Download `iterthink-0.0.0+24-linux-x86_64.AppImage` from [Releases](https://github.com/simondilhas/iterthink/releases) (adjust the filename if your build number differs), then:
+
+1. **Put it in a folder** — e.g. keep AppImages under `~/Applications`:
+
+   ```bash
+   mkdir -p ~/Applications
+   mv ~/Downloads/iterthink-0.0.0+24-linux-x86_64.AppImage ~/Applications/
+   ```
+
+2. **Run it** — make it executable and launch once (from a terminal is fine):
+
+   ```bash
+   chmod +x ~/Applications/iterthink-0.0.0+24-linux-x86_64.AppImage
+   ~/Applications/iterthink-0.0.0+24-linux-x86_64.AppImage
+   ```
+
+3. **Add a launcher to your app menu** — open a terminal, ensure the folder exists, then edit the desktop file with **nano**:
+
+   ```bash
+   mkdir -p ~/.local/share/applications
+   nano ~/.local/share/applications/iterthink.desktop
+   ```
+
+   In nano, paste the block below (adjust `Exec=` if your AppImage path or filename differs from step 2). Save with **Ctrl+O**, **Enter**, then exit with **Ctrl+X**.
+
+   ```ini
+   [Desktop Entry]
+   Type=Application
+   Name=iterthink
+   Comment=Review layer for documents
+   Exec=$HOME/Applications/iterthink-{replace with your version}+24-linux-x86_64.AppImage
+   Icon=application-x-executable
+   Categories=Office;
+   Terminal=false
+   ```
+
+   Then run `update-desktop-database ~/.local/share/applications` if your desktop does not pick it up immediately (log out and back in if needed).
+
+You still need an AI backend (Ollama or an API key); see **First launch** and **AI backend options** below.
+
+### Install from Github
+
+Install from [GitHub](https://github.com/simondilhas/iterthink) (latest default branch, usually `main`).
+
+**Linux and macOS** (bash/zsh — Terminal, iTerm, etc.):
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -U pip
-pip install iterthink
+pip install "git+https://github.com/simondilhas/iterthink.git"
 iterthink
 ```
 
-On Windows (Command Prompt or PowerShell):
+**Windows** (Command Prompt or PowerShell):
 
 ```bat
 py -3.11 -m venv .venv
 .\.venv\Scripts\activate
-pip install -U pip iterthink
+pip install -U pip "git+https://github.com/simondilhas/iterthink.git"
 iterthink
 ```
+
+To pin a release or commit, append `@v0.1.0` or `@<commit-sha>` inside the quotes (same URL).
 
 **First launch:**
 1. Go to **File → Settings → Paths** — point it to your documents folder (default store is `Documents/.iterthink`)
@@ -107,7 +159,7 @@ iterthink
 
 **Where data lives:** settings under your OS config path (`~/.config/iterthink` on Linux, `~/Library/Application Support/iterthink` on macOS, `%APPDATA%\iterthink` on Windows); documents and the local database under `Documents/.iterthink`.
 
-**From a clone (developers):** `pip install -e .`, then `iterthink` or `python -m iterthink`.
+**From a clone (editable):** `git clone https://github.com/simondilhas/iterthink.git`, then `pip install -e .`, then `iterthink` or `python -m iterthink`.
 
 ---
 

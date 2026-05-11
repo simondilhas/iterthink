@@ -21,8 +21,11 @@ from iterthink.persistence.version_storage import SnapshotInfo
 from iterthink.compare.margin import (
     distribute_heights,
     estimate_total_editor_height,
+    insert_paragraph_after_old_index,
+    join_paragraphs,
     paragraph_compose_slot_weights,
     paragraph_index_at_offset,
+    remove_paragraph_at_index,
     replace_paragraph_at_index,
     split_paragraphs,
 )
@@ -1093,7 +1096,8 @@ class MarkdownStudioCompareText:
         insertions with an empty left cell. ``_compare_right_fields`` keeps one entry per
         UI row (a hidden empty TextField for delete rows) so accept/decline indices align
         with the visible row order. ``_future_row_kinds`` / ``_future_row_cand_idx`` /
-        ``_future_row_stable_texts`` track per-row metadata for buffer sync and decline.
+        ``_future_row_stable_texts`` / ``_future_row_old_index`` /
+        ``_future_row_insert_after_old`` track per-row metadata for buffer sync, decline, and accept.
         """
         if self._compare_candidate_source == "pdf_original":
             self._compare_pill_gen += 1
@@ -1105,6 +1109,8 @@ class MarkdownStudioCompareText:
             self._future_row_kinds = []
             self._future_row_cand_idx = []
             self._future_row_stable_texts = []
+            self._future_row_old_index = []
+            self._future_row_insert_after_old = []
             self._hide_all_result_card_overlays()
             self._rebuild_future_pdf_import_panes()
             self._sync_future_pdf_layers_visibility()
@@ -1130,6 +1136,8 @@ class MarkdownStudioCompareText:
         self._future_row_kinds = []
         self._future_row_cand_idx = []
         self._future_row_stable_texts = []
+        self._future_row_old_index = []
+        self._future_row_insert_after_old = []
         self._hide_all_result_card_overlays()
 
         para_style = self._compare_para_text_style()
@@ -1152,6 +1160,8 @@ class MarkdownStudioCompareText:
             self._future_row_kinds.append(row_spec.kind)
             self._future_row_cand_idx.append(row_spec.cand_idx)
             self._future_row_stable_texts.append(row_spec.old_text)
+            self._future_row_old_index.append(row_spec.old_index)
+            self._future_row_insert_after_old.append(row_spec.insert_after_old)
 
             if row_spec.kind == "delete":
                 pill_kind: paragraph_compare.SlotKind = "removed"
@@ -1423,7 +1433,44 @@ class MarkdownStudioCompareText:
             return
         cand_para = self._compare_right_fields[index].value or ""
         pre_buf = self.editor.value or ""
-        new_buf = replace_paragraph_at_index(pre_buf, index, cand_para)
+        on_future = self._main_tab_index == TAB_FUTURE
+        para_index_for_persist = index
+        snack_msg = f"Paragraph {index + 1} applied to the document."
+        if on_future and index < len(self._future_row_kinds):
+            kind = self._future_row_kinds[index]
+            oi = (
+                self._future_row_old_index[index]
+                if index < len(self._future_row_old_index)
+                else index
+            )
+            ia = (
+                self._future_row_insert_after_old[index]
+                if index < len(self._future_row_insert_after_old)
+                else -1
+            )
+            n_paras = len(split_paragraphs(pre_buf))
+            if kind == "delete":
+                if oi < 0 or oi >= n_paras:
+                    self._snack("Could not map this row to the document.")
+                    return
+                new_buf = remove_paragraph_at_index(pre_buf, oi)
+                para_index_for_persist = oi
+                snack_msg = f"Paragraph {oi + 1} removed from the document."
+            elif kind == "insert":
+                new_buf = insert_paragraph_after_old_index(pre_buf, ia, cand_para)
+                para_index_for_persist = index
+                snack_msg = "Inserted into the document."
+            elif kind in ("replace", "equal"):
+                if oi < 0 or oi >= n_paras:
+                    self._snack("Could not map this row to the document.")
+                    return
+                new_buf = replace_paragraph_at_index(pre_buf, oi, cand_para)
+                para_index_for_persist = oi
+                snack_msg = f"Paragraph {oi + 1} applied to the document."
+            else:
+                new_buf = replace_paragraph_at_index(pre_buf, index, cand_para)
+        else:
+            new_buf = replace_paragraph_at_index(pre_buf, index, cand_para)
         ai_flow = (
             self._compare_candidate_source == "ai_preview"
             and self._pending_ai_accept_action_id
@@ -1432,7 +1479,7 @@ class MarkdownStudioCompareText:
             self._persist_ai_accept_snapshots(
                 pre_buf,
                 new_buf,
-                para_index=index,
+                para_index=para_index_for_persist,
                 action_id=self._pending_ai_accept_action_id,
             )
             try:
@@ -1450,7 +1497,7 @@ class MarkdownStudioCompareText:
         await self._debounced_compose_rebuild(self._margin_gen)
         self._refresh_compare_diff_immediate()
         self._refresh_title_bar()
-        self._snack(f"Paragraph {index + 1} applied to the document.")
+        self._snack(snack_msg)
 
     async def _compare_decline_paragraph_async(self, index: int) -> None:
         if index < 0 or index >= len(self._compare_right_fields):
@@ -1477,9 +1524,23 @@ class MarkdownStudioCompareText:
             return
         if not self._compare_right_fields:
             return
-        parts = [tf.value or "" for tf in self._compare_right_fields]
-        new_buf = "\n\n".join(parts)
         pre_buf = self.editor.value or ""
+        on_future = self._main_tab_index == TAB_FUTURE
+        if on_future:
+            rows = aligned_review_rows(pre_buf, self._compare_editor.value or "")
+            cand_indices = [r.cand_idx for r in rows if r.cand_idx is not None]
+            max_ci = max(cand_indices) if cand_indices else -1
+            if max_ci < 0:
+                new_buf = ""
+            else:
+                cand_parts = [""] * (max_ci + 1)
+                for i, r in enumerate(rows):
+                    if r.cand_idx is not None and i < len(self._compare_right_fields):
+                        cand_parts[r.cand_idx] = self._compare_right_fields[i].value or ""
+                new_buf = join_paragraphs(cand_parts)
+        else:
+            parts = [tf.value or "" for tf in self._compare_right_fields]
+            new_buf = "\n\n".join(parts)
         ai_flow = (
             self._compare_candidate_source == "ai_preview"
             and self._pending_ai_accept_action_id

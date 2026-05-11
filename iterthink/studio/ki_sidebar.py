@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import flet as ft
 import httpx
 
@@ -17,9 +15,6 @@ from iterthink.ai.ollama_util import chat_response_text, chat_stream_delta, olla
 from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS
 from .constants import (
     KI_PILL_TEXT_SIZE,
-    KI_TAB_BAR_TO_PILLS_GAP_PX,
-    KI_TAB_BODY_MIN_HEIGHT_PX,
-    KI_TAB_PAGE_PAD_V_PX,
     SIDEBAR_EXPANDED_WIDTH_PX,
     COLLAPSED_RAIL_WIDTH_PX,
     TAB_HISTORY,
@@ -30,17 +25,6 @@ from .util import KI_TIERS, ctrl_on_page as _ctrl_on_page, normalize_ki_tier
 
 
 class MarkdownStudioKiSidebar:
-    def _on_ki_tabs_change(self, e: ft.ControlEvent) -> None:
-        try:
-            self._ki_topic_index = int(e.data)
-        except (TypeError, ValueError):
-            self._ki_topic_index = int(self._ki_topic_tabs.selected_index)
-        self._sync_ki_topic_mode_buttons()
-        self._apply_ki_tab_bar_view_height()
-        # Impact sidebar (Ask vs Run dock) depends on KI topic as well as Review subtab.
-        if hasattr(self, "_sync_impact_ki_context_visibility"):
-            self._sync_impact_ki_context_visibility()
-
     def _sync_ki_topic_mode_buttons(self) -> None:
         ix = self._ki_topic_index
         u_w = 1.5
@@ -63,48 +47,19 @@ class MarkdownStudioKiSidebar:
                 c.update()
 
     def _set_ki_topic(self, index: int) -> None:
-        max_index = max(0, len(getattr(self, "_ki_topic_mode_buttons", [])) - 1)
+        pages = getattr(self, "_ki_tab_pages", None) or []
+        max_index = max(0, len(pages) - 1)
         ix = max(0, min(max_index, int(index)))
         self._ki_topic_index = ix
-        if self._ki_topic_tabs.selected_index != ix:
-            self._ki_topic_tabs.selected_index = ix
-        if _ctrl_on_page(self._ki_topic_tabs):
-            self._ki_topic_tabs.update()
+        if pages:
+            new_content = pages[ix]
+            if self._ki_tab_bar_view.content is not new_content:
+                self._ki_tab_bar_view.content = new_content
+                if _ctrl_on_page(self._ki_tab_bar_view):
+                    self._ki_tab_bar_view.update()
         self._sync_ki_topic_mode_buttons()
-        self._apply_ki_tab_bar_view_height()
         if hasattr(self, "_sync_impact_ki_context_visibility"):
             self._sync_impact_ki_context_visibility()
-
-    def _on_ki_pill_row_size_discuss(self, e: ft.LayoutSizeChangeEvent) -> None:
-        self._ki_tab_body_heights[0] = max(float(e.height), 28.0)
-        self._apply_ki_tab_bar_view_height()
-
-    def _on_ki_pill_row_size_change(self, e: ft.LayoutSizeChangeEvent) -> None:
-        self._ki_tab_body_heights[1] = max(float(e.height), 28.0)
-        self._apply_ki_tab_bar_view_height()
-
-    def _on_ki_pill_row_size_analyse(self, e: ft.LayoutSizeChangeEvent) -> None:
-        self._ki_tab_body_heights[2] = max(float(e.height), 28.0)
-        self._apply_ki_tab_bar_view_height()
-
-    def _on_ki_pill_row_size_act(self, e: ft.LayoutSizeChangeEvent) -> None:
-        self._ki_tab_body_heights[3] = max(float(e.height), 28.0)
-        self._apply_ki_tab_bar_view_height()
-
-    def _apply_ki_tab_bar_view_height(self) -> None:
-        ix = max(0, min(len(self._ki_tab_body_heights) - 1, int(self._ki_topic_index)))
-        inner = max(self._ki_tab_body_heights[ix], float(KI_TAB_BODY_MIN_HEIGHT_PX))
-        h = inner + 2 * float(KI_TAB_PAGE_PAD_V_PX)
-        cur = float(self._ki_tab_bar_view.height or 0)
-        if abs(cur - h) < 0.75:
-            return
-        self._ki_tab_bar_view.height = h
-        if _ctrl_on_page(self._ki_tab_bar_view):
-            self._ki_tab_bar_view.update()
-
-    async def _defer_sync_ki_tab_height(self) -> None:
-        await asyncio.sleep(0.06)
-        self._apply_ki_tab_bar_view_height()
 
     def _rebuild_topic_pills(self) -> None:
         def fill_row(row: ft.Row, topic: str) -> None:
@@ -141,8 +96,6 @@ class MarkdownStudioKiSidebar:
 
         if hasattr(self, "_refresh_editor_ctx_menu_items"):
             self._refresh_editor_ctx_menu_items()
-
-        self.page.run_task(self._defer_sync_ki_tab_height)
 
     def _on_page_keyboard(self, e: ft.KeyboardEvent) -> None:
         key = (e.key or "").lower()

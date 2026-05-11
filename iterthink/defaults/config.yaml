@@ -47,3 +47,7 @@ chat_system: "You are a prose editor focusing on intent and clarity."
 startup_daily_log: true
 # Used for "New file" and first-run create when startup_daily_log is false; must contain {n} once.
 new_note_name_template: "unnamed-{n}.md"
+
+# Review tab: when false (default), hide Difference|Impact subtabs — only diff/compare under Review.
+# Set to true for the Impact (RAG) subtab and pills. User ~/.config/iterthink/config.yaml overrides this file.
+rag_system: false

@@ -400,9 +400,6 @@ class MarkdownStudioImpactMixin:
                 if _ctrl_on_page(summary_r):
                     summary_r.update()
 
-        if hasattr(self, "page") and hasattr(self, "_defer_sync_ki_tab_height"):
-            self.page.run_task(self._defer_sync_ki_tab_height)
-
     def _resolve_impact_version_id(self, session: Any) -> int | None:
         if getattr(self, "_compare_snapshot_version_id", None) is not None:
             return int(self._compare_snapshot_version_id)
