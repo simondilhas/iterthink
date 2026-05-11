@@ -286,6 +286,7 @@ jobs:
         run: |
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool
           chmod +x /tmp/appimagetool
+          /tmp/appimagetool --appimage-extract
           
           mkdir -p AppDir/usr/bin
           cp -r build/linux/* AppDir/usr/bin/
@@ -310,7 +311,7 @@ jobs:
           APPRUN
           chmod +x AppDir/AppRun
           
-          ARCH=x86_64 /tmp/appimagetool AppDir "iterthink-${BUILD_VERSION}-linux-x86_64.AppImage"
+          ARCH=x86_64 ./squashfs-root/AppRun AppDir "iterthink-${BUILD_VERSION}-linux-x86_64.AppImage"
 
       - name: Package macOS DMG
         if: matrix.name == 'macos'
@@ -323,10 +324,10 @@ jobs:
         with:
           name: ${{ matrix.name }}-package
           path: |
-            ${{ env.ITER_REPO }}/iterthink-*-windows-installer.exe
-            iterthink-*-linux-x86_64.AppImage
-            iterthink-*-macos.dmg
-          if-no-files-found: ignore
+            ${{ matrix.name == 'windows' && format('{0}/iterthink-*-windows-installer.exe', env.ITER_REPO) || '' }}
+            ${{ matrix.name == 'linux' && 'iterthink-*-linux-x86_64.AppImage' || '' }}
+            ${{ matrix.name == 'macos' && 'iterthink-*-macos.dmg' || '' }}
+          if-no-files-found: error
 
   release:
     name: Publish GitHub Release
