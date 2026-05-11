@@ -215,11 +215,12 @@ async def _open_settings_dialog(studio: Any) -> None:
         expand=True,
         dense=True,
     )
-    _am = studio.cloud_anthropic_model or "claude-3-5-sonnet-20241022"
+    _am = (studio.cloud_anthropic_model or "").strip()
     cloud_anthropic_model_dd = ft.Dropdown(
         label="Claude model",
         value=_am,
-        options=_model_dd_options([_am], current=_am),
+        options=_model_dd_options([_am], current=_am) if _am else [],
+        hint_text="Use «List Claude models» (needs API key) to load ids from Anthropic.",
         editable=True,
         enable_search=True,
         dense=True,
@@ -232,11 +233,12 @@ async def _open_settings_dialog(studio: Any) -> None:
         expand=True,
         dense=True,
     )
-    _com = studio.cloud_openai_model or "gpt-4o-mini"
+    _com = (studio.cloud_openai_model or "").strip()
     cloud_openai_model_dd = ft.Dropdown(
         label="OpenAI model (cloud)",
         value=_com,
-        options=_model_dd_options([_com], current=_com),
+        options=_model_dd_options([_com], current=_com) if _com else [],
+        hint_text="Use «List OpenAI models» (needs API key) to load ids from OpenAI.",
         editable=True,
         enable_search=True,
         dense=True,
@@ -393,8 +395,8 @@ async def _open_settings_dialog(studio: Any) -> None:
         store_db.settings_set(studio._db, store_db.SETTINGS_CLOUD_ANTHROPIC_MODEL, (cloud_anthropic_model_dd.value or "").strip())
         store_db.settings_set(studio._db, store_db.SETTINGS_CLOUD_OPENAI_MODEL, (cloud_openai_model_dd.value or "").strip())
         store_db.settings_set(studio._db, store_db.SETTINGS_CLOUD_GOOGLE_MODEL, (cloud_google_model_dd.value or "").strip())
-        studio.cloud_anthropic_model = (cloud_anthropic_model_dd.value or "").strip() or "claude-3-5-sonnet-20241022"
-        studio.cloud_openai_model = (cloud_openai_model_dd.value or "").strip() or "gpt-4o-mini"
+        studio.cloud_anthropic_model = (cloud_anthropic_model_dd.value or "").strip()
+        studio.cloud_openai_model = (cloud_openai_model_dd.value or "").strip()
         studio.cloud_google_model = (cloud_google_model_dd.value or "").strip()
         updates = {
             SECRET_CLOUD_ANTHROPIC: (cloud_anthropic_key_tf.value or "").strip(),

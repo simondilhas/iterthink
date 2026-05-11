@@ -15,6 +15,7 @@ from iterthink import config
 from iterthink.compare.layout import aligned_compare_pairs
 from iterthink.ai.ollama_util import ollama_error_message
 from iterthink.compare.paragraph_align import compute_hash
+from iterthink.persistence.version_storage import path_key_for
 from .constants import (
     COMPARE_EVAL_COL_W,
     KI_PILL_TEXT_SIZE,
@@ -26,6 +27,30 @@ from .util import ctrl_on_page as _ctrl_on_page
 
 
 class MarkdownStudioChecksUi:
+    def _analysis_document_path_key(self) -> str:
+        """SHA-256 hex of the open note path; empty when no file (matches ``documents.path_key``)."""
+        p = getattr(self, "current_path", None)
+        if not p:
+            return ""
+        try:
+            return path_key_for(p.resolve())
+        except OSError:
+            return ""
+
+    def _reset_check_analysis_session(self) -> None:
+        """Clear in-memory check UI and cancel in-flight runs (History/Review version or candidate change)."""
+        for cid in list(self._check_run_gen.keys()):
+            self._check_run_gen[cid] = self._check_run_gen.get(cid, 0) + 1
+        for cid in list(self._check_running.keys()):
+            self._check_running[cid] = False
+        self._check_results.clear()
+        self._check_para_hashes.clear()
+        self._active_check_id = None
+        self._hide_all_result_card_overlays()
+        self._refresh_analyse_button_state()
+        if getattr(self, "_compare_eval_hosts", None):
+            self._refresh_all_eval_cells()
+
     def _rebuild_analyse_pills(self) -> None:
         """Build a button per check; click runs/loads results, hover shows nothing (use card)."""
         self._pill_row_analyse.controls.clear()
@@ -122,13 +147,12 @@ class MarkdownStudioChecksUi:
         if check is None:
             self._snack(f"Check '{check_id}' is not configured.")
             return
-        # Stay put if user is already on a tab with eval cells (History or Review);
-        # otherwise jump to History so the symbols are visible.
-        if self._main_tab_index not in (TAB_HISTORY, TAB_FUTURE):
-            await self._request_tab_switch_async(TAB_HISTORY)
+        # Analysis symbols and result cards only render on Review (Future).
+        if self._main_tab_index != TAB_FUTURE:
+            await self._request_tab_switch_async(TAB_FUTURE)
         # Need a candidate to analyse against the baseline.
         if not self._compare_right_fields:
-            self._rebuild_compare_paragraph_ui()
+            self._rebuild_future_paragraph_ui()
         buffers = self._active_compare_buffers()
         if not buffers.candidate.strip():
             self._snack(
@@ -143,8 +167,10 @@ class MarkdownStudioChecksUi:
             return
         pairs = aligned_compare_pairs(buffers.baseline, buffers.candidate)
         n = len(pairs)
-        # Refresh hashes; reset results sized to the current document.
-        self._check_para_hashes = [compute_hash(new) for _, new in pairs]
+        # Per-row fingerprints: baseline + candidate so older-version changes invalidate.
+        self._check_para_hashes = [
+            compute_hash(f"{old}\x1e{new}") for old, new in pairs
+        ]
         if (cid_results := self._check_results.get(check_id)) is None or len(cid_results) != n:
             self._check_results[check_id] = [None] * n
         self._active_check_id = check_id
@@ -166,7 +192,7 @@ class MarkdownStudioChecksUi:
                 return
             if 0 <= idx < len(self._check_results.get(check_id, [])):
                 self._check_results[check_id][idx] = payload
-            if self._main_tab_index not in (TAB_HISTORY, TAB_FUTURE):
+            if self._main_tab_index != TAB_FUTURE:
                 return
             self._refresh_eval_cell(idx)
             self._refresh_analyse_button_state()
@@ -180,6 +206,7 @@ class MarkdownStudioChecksUi:
                 pairs=pairs,
                 on_progress=on_progress,
                 use_cache=True,
+                document_path_key=self._analysis_document_path_key(),
             )
             run_ok = True
         except BaseException as exc:  # noqa: BLE001
@@ -188,7 +215,7 @@ class MarkdownStudioChecksUi:
             if my_gen == self._check_run_gen.get(check_id):
                 self._check_running[check_id] = False
                 self._refresh_analyse_button_state()
-                if self._main_tab_index in (TAB_HISTORY, TAB_FUTURE):
+                if self._main_tab_index == TAB_FUTURE:
                     self._refresh_all_eval_cells()
                 if run_ok:
                     results = self._check_results.get(check_id) or []
@@ -218,16 +245,19 @@ class MarkdownStudioChecksUi:
         """
         if self._main_tab_index != TAB_FUTURE:
             return ui_idx
+        ev_cands = getattr(self, "_future_eval_cand_indices", None)
+        if ev_cands and 0 <= ui_idx < len(ev_cands):
+            return ev_cands[ui_idx]
         arr = getattr(self, "_future_row_cand_idx", None)
         if not arr or not (0 <= ui_idx < len(arr)):
             return ui_idx
         return arr[ui_idx]
 
     def _build_eval_cell_inner(self, idx: int, check_id: str | None) -> ft.Control:
-        on_history = self._main_tab_index == TAB_HISTORY
+        if self._main_tab_index != TAB_FUTURE:
+            return ft.Container(width=0, height=0)
         if check_id is None:
-            # History: show nothing when no check is active.
-            return ft.Container(width=0, height=0) if on_history else ft.Container(width=18, height=18)
+            return ft.Container(width=18, height=18)
         cand_idx = self._eval_cand_idx(idx)
         if cand_idx is None:
             return ft.Container(width=18, height=18)
@@ -239,14 +269,13 @@ class MarkdownStudioChecksUi:
             if running:
                 return ft.Container(
                     content=ft.ProgressRing(
-                        width=14, height=14, stroke_width=2,
+                        width=14,
+                        height=14,
+                        stroke_width=2,
                         color=(check.accent if check else config.PRIMARY_COLOR),
                     ),
                     alignment=ft.Alignment.TOP_CENTER,
                 )
-            # History: no placeholder dot — show nothing until results arrive.
-            if on_history:
-                return ft.Container(width=0, height=0)
             return ft.Container(
                 content=ft.Text("·", size=14, color=config.OUTLINE),
                 alignment=ft.Alignment.TOP_CENTER,
@@ -257,22 +286,7 @@ class MarkdownStudioChecksUi:
         tip: str | None = None
         if summary_raw:
             tip = summary_raw if len(summary_raw) <= 220 else summary_raw[:217] + "…"
-        # History + Review (Future): bare symbol only — no pill chrome, no summary subtext.
-        if self._main_tab_index in (TAB_FUTURE, TAB_HISTORY):
-            return ft.Container(
-                content=ft.Text(
-                    symbol,
-                    size=18,
-                    weight=ft.FontWeight.W_700,
-                    color=color,
-                    no_wrap=True,
-                ),
-                alignment=ft.Alignment.TOP_CENTER,
-                padding=ft.padding.only(top=2),
-                on_hover=lambda e, i=idx: self._on_eval_symbol_hover(e, i),
-                tooltip=tip,
-            )
-        symbol_box = ft.Container(
+        return ft.Container(
             content=ft.Text(
                 symbol,
                 size=18,
@@ -281,28 +295,9 @@ class MarkdownStudioChecksUi:
                 no_wrap=True,
             ),
             alignment=ft.Alignment.TOP_CENTER,
-            padding=ft.padding.symmetric(horizontal=4, vertical=2),
-            border_radius=6,
-            bgcolor=ft.Colors.with_opacity(0.10, color),
+            padding=ft.padding.only(top=2),
             on_hover=lambda e, i=idx: self._on_eval_symbol_hover(e, i),
             tooltip=tip,
-        )
-        if not summary_raw:
-            return symbol_box
-        summary_txt = ft.Text(
-            summary_raw,
-            size=10,
-            color=config.ON_SURFACE_VARIANT,
-            max_lines=3,
-            overflow=ft.TextOverflow.ELLIPSIS,
-            selectable=True,
-            text_align=ft.TextAlign.CENTER,
-        )
-        return ft.Column(
-            [symbol_box, summary_txt],
-            tight=True,
-            spacing=4,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
     def _refresh_eval_cell(self, idx: int) -> None:
@@ -347,6 +342,8 @@ class MarkdownStudioChecksUi:
             self._schedule_hide_result_card()
 
     def _show_result_card(self, idx: int) -> None:
+        if self._main_tab_index != TAB_FUTURE:
+            return
         cid = self._active_check_id
         if cid is None:
             return
@@ -612,17 +609,16 @@ class MarkdownStudioChecksUi:
     # ------------------------------------------------------------------
 
     def _invalidate_check_results_for_changes(self) -> None:
-        """Detect changed candidate paragraphs and drop their cached results from memory.
+        """Detect changed aligned pairs (baseline and/or candidate) and drop stale memory rows.
 
-        Called after candidate edits. Disk cache (paragraph_analysis) is keyed by
-        content hashes so re-runs reuse it.
+        Disk cache is keyed by document path + paragraph content hashes.
         """
-        if not self._check_results:
-            self._check_para_hashes = []
-            return
         buffers = self._active_compare_buffers()
         pairs = aligned_compare_pairs(buffers.baseline, buffers.candidate)
-        new_hashes = [compute_hash(new) for _, new in pairs]
+        new_hashes = [compute_hash(f"{old}\x1e{new}") for old, new in pairs]
+        if not self._check_results:
+            self._check_para_hashes = new_hashes
+            return
         prev_hashes = self._check_para_hashes
         n = len(new_hashes)
         # If row count changed, blow away results (rebuild will repopulate).

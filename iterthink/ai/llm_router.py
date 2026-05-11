@@ -414,10 +414,10 @@ class LlmChatBackend:
             return self._company_openai_model or "gpt-4o-mini"
         if self._tier == "cloud":
             if self._cloud_vendor == "anthropic":
-                return self._cloud_anthropic_model or "claude-3-5-sonnet-20241022"
+                return (self._cloud_anthropic_model or "").strip()
             if self._cloud_vendor == "google":
                 return (self._cloud_google_model or "").strip()
-            return self._cloud_openai_model or "gpt-4o-mini"
+            return (self._cloud_openai_model or "").strip()
         return self._local_model
 
     def _require_secret(self, key: str) -> str:
@@ -472,6 +472,11 @@ class LlmChatBackend:
 
         if self._tier == "cloud":
             if self._cloud_vendor == "anthropic":
+                if not (m or "").strip():
+                    raise ValueError(
+                        "No Claude model id. Settings → Models: enter your Anthropic key, click "
+                        "«List Claude models», choose a model, then Save."
+                    )
                 key = self._require_secret(SECRET_CLOUD_ANTHROPIC)
                 if stream:
                     return _anthropic_stream_full(
@@ -496,6 +501,11 @@ class LlmChatBackend:
                     return await _gemini_nonstream(
                         client, api_key=key, model=m, messages=messages, json_mode=json_mode
                     )
+            if not (m or "").strip():
+                raise ValueError(
+                    "No OpenAI cloud model id. Settings → Models: enter your OpenAI key, click "
+                    "«List OpenAI models», choose a model, then Save."
+                )
             key = self._require_secret(SECRET_CLOUD_OPENAI)
             url = _openai_chat_url(DEFAULT_COMPANY_OPENAI_BASE)
             strict_rf = False  # same rationale as company tier (OpenAI-compatible HTTP)

@@ -402,6 +402,11 @@ class HistoryRow(NamedTuple):
         True when this paragraph broke relative order with at least one other paragraph
         (LIS-based). False for paragraphs that merely shifted because a true mover
         crossed them ("passive shifts"). Ghost rows always have is_true_mover=True.
+    old_paragraph_index:
+        Baseline paragraph index for this row; -1 when not applicable (e.g. pure add).
+    new_paragraph_index:
+        Candidate paragraph index for comparison rows; ghost_moved uses the paragraph's
+        destination index; -1 for removed / N/A.
     """
 
     row_type: str
@@ -411,6 +416,8 @@ class HistoryRow(NamedTuple):
     displacement: int | None
     is_moved: bool
     is_true_mover: bool
+    old_paragraph_index: int = -1
+    new_paragraph_index: int = -1
 
 
 def _lis_passive_old_indices(matched: list[tuple[int, int]]) -> set[int]:
@@ -439,6 +446,15 @@ def _lis_passive_old_indices(matched: list[tuple[int, int]]) -> set[int]:
         passive.add(old_seq[k])
         k = parent[k]
     return passive
+
+
+def insert_after_old_index_for_added(diffs: list[DiffParagraph], new_index: int) -> int:
+    """Max ``old_index`` among matched diffs strictly before ``new_index`` in the candidate."""
+    insert_after = -1
+    for d2 in diffs:
+        if d2.old_index >= 0 and d2.new_index >= 0 and d2.new_index < new_index:
+            insert_after = max(insert_after, d2.old_index)
+    return insert_after
 
 
 def build_history_display_rows(baseline: str, candidate: str) -> list[HistoryRow]:
@@ -486,14 +502,34 @@ def build_history_display_rows(baseline: str, candidate: str) -> list[HistoryRow
             # Deleted paragraph — always a ghost.
             keyed.append((
                 (old_idx, 0),
-                HistoryRow("removed", old_text, "", "removed", None, False, True),
+                HistoryRow(
+                    "removed",
+                    old_text,
+                    "",
+                    "removed",
+                    None,
+                    False,
+                    True,
+                    old_paragraph_index=old_idx,
+                    new_paragraph_index=-1,
+                ),
             ))
         elif d.new_index != old_idx and old_idx not in passive_olds:
             # True mover — ghost at old position.
             disp = old_idx - d.new_index
             keyed.append((
                 (old_idx, 0),
-                HistoryRow("ghost_moved", old_text, "", "stable", disp, True, True),
+                HistoryRow(
+                    "ghost_moved",
+                    old_text,
+                    "",
+                    "stable",
+                    disp,
+                    True,
+                    True,
+                    old_paragraph_index=old_idx,
+                    new_paragraph_index=d.new_index,
+                ),
             ))
         # Passive shifts and in-place matches: no ghost row.
 
@@ -504,7 +540,17 @@ def build_history_display_rows(baseline: str, candidate: str) -> list[HistoryRow
         if d is None:
             keyed.append((
                 (new_idx, 1),
-                HistoryRow("comparison", "", new_text, "added", None, False, False),
+                HistoryRow(
+                    "comparison",
+                    "",
+                    new_text,
+                    "added",
+                    None,
+                    False,
+                    False,
+                    old_paragraph_index=-1,
+                    new_paragraph_index=new_idx,
+                ),
             ))
         else:
             old_text = d.old_text or (old_paras[d.old_index] if 0 <= d.old_index < n_old else "")
@@ -514,7 +560,17 @@ def build_history_display_rows(baseline: str, candidate: str) -> list[HistoryRow
             kind = _base_kind_from_diff(d)
             keyed.append((
                 (new_idx, 1),
-                HistoryRow("comparison", old_text, new_text, kind, disp, is_moved, is_true_mover),
+                HistoryRow(
+                    "comparison",
+                    old_text,
+                    new_text,
+                    kind,
+                    disp,
+                    is_moved,
+                    is_true_mover,
+                    old_paragraph_index=d.old_index,
+                    new_paragraph_index=d.new_index,
+                ),
             ))
 
     keyed.sort(key=lambda t: t[0])

@@ -114,10 +114,10 @@ class MarkdownStudio(
             store_db.settings_get(self._db, store_db.SETTINGS_COMPANY_OPENAI_BASE_URL) or "https://api.openai.com/v1"
         )
         self.cloud_anthropic_model: str = (
-            store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_ANTHROPIC_MODEL) or "claude-3-5-sonnet-20241022"
+            (store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_ANTHROPIC_MODEL) or "").strip()
         )
         self.cloud_openai_model: str = (
-            store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_OPENAI_MODEL) or "gpt-4o-mini"
+            (store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_OPENAI_MODEL) or "").strip()
         )
         self.cloud_google_model: str = (
             (store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_GOOGLE_MODEL) or "").strip()
@@ -171,6 +171,8 @@ class MarkdownStudio(
         self._future_row_stable_texts: list[str] = []
         self._future_row_old_index: list[int] = []
         self._future_row_insert_after_old: list[int] = []
+        # Eval column index → candidate paragraph index (Review rows can interleave deletes/ghosts).
+        self._future_eval_cand_indices: list[int] = []
         self._compare_pill_gen: int = 0
         self._compare_refine_gen: int = 0
         # Future tab: left column = current draft (read-only diff with deletions),
@@ -805,16 +807,22 @@ class MarkdownStudio(
             visible=False,
             on_click=lambda _e: self._toggle_focus_preview_mode(),
         )
-        self._compose_tab_filename_row = ft.Row(
-            [
-                self._compose_tab_filename_hit,
-                self._compose_tab_filename_field,
-                self._compose_tab_filename_suffix_text,
-                self._focus_preview_toggle_btn,
-            ],
-            tight=True,
-            spacing=4,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        # Stable height: preview IconButton is taller than the filename text; toggling
+        # it must not resize this row or the label shifts when changing main tabs.
+        self._compose_tab_filename_row = ft.Container(
+            height=48,
+            alignment=ft.Alignment(0, 0),
+            content=ft.Row(
+                [
+                    self._compose_tab_filename_hit,
+                    self._compose_tab_filename_field,
+                    self._compose_tab_filename_suffix_text,
+                    self._focus_preview_toggle_btn,
+                ],
+                tight=True,
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
         )
         # Under main History | Focus | Review tabs on every mode (rename targets this row).
         self._workspace_filename_band = ft.Container(
@@ -1199,7 +1207,7 @@ class MarkdownStudio(
         self._check_running: dict[str, bool] = {}
         # Monotonic generation per check; cancels stale background runs.
         self._check_run_gen: dict[str, int] = {}
-        # Current candidate-paragraph hashes (used to invalidate results on edit).
+        # Aligned-pair fingerprints (baseline+candidate per row) for in-memory invalidation.
         self._check_para_hashes: list[str] = []
         # Eval-cell host containers, parallel to _compare_right_fields, for O(1) refresh.
         self._compare_eval_hosts: list[ft.Container] = []

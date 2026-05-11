@@ -107,7 +107,7 @@ class ImpactAnnotation(Base):
 
 
 class ParagraphAnalysis(Base):
-    """Cache of LLM check results keyed by content hashes (shared across documents)."""
+    """Cache of LLM check results keyed by document path + paragraph content hashes."""
 
     __tablename__ = "paragraph_analysis"
 
@@ -116,13 +116,18 @@ class ParagraphAnalysis(Base):
     old_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     new_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     model: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    document_path_key: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     result_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
 
     __table_args__ = (
         UniqueConstraint(
-            "check_id", "old_sha256", "new_sha256", "model",
-            name="uq_paragraph_analysis_key",
+            "check_id",
+            "old_sha256",
+            "new_sha256",
+            "model",
+            "document_path_key",
+            name="uq_paragraph_analysis_path_key",
         ),
     )
 

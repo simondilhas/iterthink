@@ -922,6 +922,13 @@ class MarkdownStudioExplorer:
             return
         stem = src.stem
         name_tf = ft.TextField(label="Save as (name without .md)", value=stem, dense=True, autofocus=True)
+        warn_color = ft.Colors.AMBER_700 if config.IS_LIGHT else ft.Colors.AMBER_400
+        warning_txt = ft.Text(
+            "A file with that name already exists in that folder.",
+            size=12,
+            color=warn_color,
+            visible=False,
+        )
 
         async def apply(_e: ft.ControlEvent | None = None) -> None:
             name = (name_tf.value or "").strip()
@@ -939,15 +946,40 @@ class MarkdownStudioExplorer:
             self.page.pop_dialog()
             await self._write_import_result(src, dest)
 
+        import_btn = ft.TextButton("Import", on_click=lambda _e: self.page.run_task(apply))
+
+        def sync_name_warning(_e: ft.ControlEvent | None = None) -> None:
+            name = (name_tf.value or "").strip()
+            if not name:
+                warning_txt.visible = False
+                import_btn.disabled = False
+            else:
+                safe = "".join(c for c in name if c.isalnum() or c in " ._-")[:200].strip()
+                if not safe:
+                    warning_txt.visible = False
+                    import_btn.disabled = False
+                else:
+                    dest = base / f"{safe}.md"
+                    conflict = dest.exists()
+                    warning_txt.visible = conflict
+                    import_btn.disabled = conflict
+            if _ctrl_on_page(warning_txt):
+                warning_txt.update()
+            if _ctrl_on_page(import_btn):
+                import_btn.update()
+
+        name_tf.on_change = sync_name_warning
         name_tf.on_submit = lambda _e: self.page.run_task(apply)
+        sync_name_warning()
+        dialog_col = ft.Column([name_tf, warning_txt], tight=True, spacing=4)
         self.page.show_dialog(
             ft.AlertDialog(
                 modal=True,
                 title=ft.Text("Save imported markdown"),
-                content=name_tf,
+                content=dialog_col,
                 actions=[
                     ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
-                    ft.TextButton("Import", on_click=lambda _e: self.page.run_task(apply)),
+                    import_btn,
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )

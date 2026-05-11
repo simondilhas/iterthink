@@ -908,13 +908,8 @@ class MarkdownStudioCompose:
                 pass
 
         if act.topic == TOPIC_CHANGE:
-            apply_snippet = (
-                (self.editor.value or "")[replace_span[0] : replace_span[1]]
-                if replace_span is not None
-                else ""
-            )
-            apply_btn: ft.IconButton | None = None
             if replace_span is not None:
+                apply_snippet = (self.editor.value or "")[replace_span[0] : replace_span[1]]
                 apply_btn = ft.IconButton(
                     ft.Icons.CHECK_ROUNDED,
                     icon_size=ACTION_RAIL_ICON_SIZE,
@@ -925,35 +920,37 @@ class MarkdownStudioCompose:
                         self._apply_margin_reply_to_selection_async, r, f, aid, sp, sn
                     ),
                 )
-            hide_review_dismiss = self._main_tab_index == TAB_FUTURE and int(
-                getattr(self, "_ki_topic_index", 0)
-            ) == int(_ki_topic_index_for_prompt_topic(TOPIC_CHANGE))
-            if hide_review_dismiss:
-                footer.controls = [apply_btn] if apply_btn is not None else []
-                footer.visible = apply_btn is not None
             else:
-                review_btn = ft.IconButton(
-                    ft.Icons.VISIBILITY_OUTLINED,
+                apply_btn = ft.IconButton(
+                    ft.Icons.CHECK_ROUNDED,
                     icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=config.ON_SURFACE_VARIANT,
-                    tooltip="Review: open Compare with this text as candidate",
+                    icon_color=config.PRIMARY_COLOR,
+                    tooltip="Apply: replace this paragraph with the reply",
                     style=action_rail_icon_button_style(),
                     on_click=lambda _e, i=idx, r=reply, f=footer, aid=action_id: self.page.run_task(
-                        self._stage_ai_candidate_async, i, r, f, aid
+                        self._apply_margin_reply_to_paragraph_async, i, r, f, aid
                     ),
                 )
-                dismiss_btn = ft.IconButton(
-                    ft.Icons.CLOSE_ROUNDED,
-                    icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=config.ON_SURFACE_VARIANT,
-                    tooltip="Dismiss",
-                    style=action_rail_icon_button_style(),
-                    on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
-                )
-                footer.controls = (
-                    [apply_btn, review_btn, dismiss_btn] if apply_btn is not None else [review_btn, dismiss_btn]
-                )
-                footer.visible = True
+            review_btn = ft.IconButton(
+                ft.Icons.VISIBILITY_OUTLINED,
+                icon_size=ACTION_RAIL_ICON_SIZE,
+                icon_color=config.ON_SURFACE_VARIANT,
+                tooltip="Review: open Compare with this text as candidate",
+                style=action_rail_icon_button_style(),
+                on_click=lambda _e, i=idx, r=reply, f=footer, aid=action_id: self.page.run_task(
+                    self._stage_ai_candidate_async, i, r, f, aid
+                ),
+            )
+            dismiss_btn = ft.IconButton(
+                ft.Icons.CLOSE_ROUNDED,
+                icon_size=ACTION_RAIL_ICON_SIZE,
+                icon_color=config.ON_SURFACE_VARIANT,
+                tooltip="Dismiss",
+                style=action_rail_icon_button_style(),
+                on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
+            )
+            footer.controls = [apply_btn, review_btn, dismiss_btn]
+            footer.visible = True
         else:
             footer.controls = [
                 ft.IconButton(

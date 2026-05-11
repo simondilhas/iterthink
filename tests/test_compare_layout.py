@@ -7,6 +7,7 @@ from iterthink.compare.layout import (
     aligned_review_rows,
     pair_paragraphs_for_compare,
 )
+from iterthink.compare.paragraph_compare import build_history_display_rows
 
 
 def test_pair_paragraphs_for_compare_index_stable_extra_candidate_slots_empty_left() -> None:
@@ -61,3 +62,10 @@ def test_aligned_review_rows_insert_carries_insert_after_old() -> None:
     ins = next(r for r in rows if r.kind == "insert" and r.new_text == "X")
     assert ins.old_index == -1
     assert ins.insert_after_old == 0
+
+
+def test_build_history_display_rows_reorder_includes_ghosts_and_three_comparisons() -> None:
+    """Review tab uses the same row model as History for move ghosts + comparison rows."""
+    rows = build_history_display_rows("A\n\nB\n\nC", "C\n\nA\n\nB")
+    assert sum(1 for r in rows if r.row_type == "ghost_moved") >= 1
+    assert sum(1 for r in rows if r.row_type == "comparison") == 3

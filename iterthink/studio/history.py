@@ -13,8 +13,7 @@ from iterthink import config
 from iterthink import prompts
 from iterthink.compare import paragraph_compare
 from iterthink.compare.diff_card import build_new_side_spans, build_old_side_spans, build_unified_spans
-from iterthink.compare.layout import aligned_review_rows, pair_paragraphs_for_compare
-from iterthink.compare.paragraph_align import compute_hash
+from iterthink.compare.paragraph_align import compute_alignment, compute_hash
 from iterthink.db.session import session_scope
 from iterthink.persistence import version_storage
 from iterthink.persistence.version_storage import SnapshotInfo
@@ -49,6 +48,7 @@ from .constants import (
     COMPARE_ACTION_GRID_CELL,
     COMPARE_COL_FONT_SIZE,
     COMPARE_COL_LINE_HEIGHT,
+    COMPARE_EVAL_COL_W,
     COMPARE_EVAL_COL_W_WIDE,
     COMPARE_KEY_CURRENT as _COMPARE_KEY_CURRENT,
     COMPARE_PILL_COL_W,
@@ -483,6 +483,7 @@ class MarkdownStudioCompareText:
                 self._snack("Could not load that version.")
                 self._refresh_compare_tab_candidate_ui()
                 return
+        self._reset_check_analysis_session()
         self._refresh_compare_tab_candidate_ui()
         self._capture_compare_baseline_snapshot()
         self._sync_compare_pdf_layers_visibility()
@@ -499,6 +500,7 @@ class MarkdownStudioCompareText:
                 return
             if v == REVIEW_KEY_DRAFT_MIRROR:
                 self._flush_review_edits_if_changed()
+                self._reset_check_analysis_session()
                 seeded = self.editor.value or ""
                 self._compare_candidate_source = "ai_preview"
                 self._compare_editor.value = seeded
@@ -570,6 +572,7 @@ class MarkdownStudioCompareText:
         used by Accept comes from the in-memory map (recorded on persist) or the snapshot's
         display_label as a fallback after restart; ``ai_proposal`` is the last-resort sentinel.
         """
+        prev_vid = self._compare_snapshot_version_id
         try:
             with session_scope() as s:
                 body = version_storage.load_version_body(s, vid)
@@ -579,6 +582,8 @@ class MarkdownStudioCompareText:
         except BaseException:
             self._snack("Could not load that proposal.")
             return
+        if prev_vid != vid:
+            self._reset_check_analysis_session()
         self._compare_snapshot_version_id = vid
         self._compare_pdf_peer_snapshot_id = None
         self._compare_editor.value = body
@@ -642,6 +647,7 @@ class MarkdownStudioCompareText:
         is attached to the snapshot row, then delegates rendering to
         ``_rebuild_compare_view()``.
         """
+        prev_vid = self._compare_snapshot_version_id
         try:
             with session_scope() as s:
                 body = version_storage.load_version_body(s, vid)
@@ -650,6 +656,8 @@ class MarkdownStudioCompareText:
         except BaseException:
             self._snack("Could not load that version.")
             return
+        if prev_vid != vid:
+            self._reset_check_analysis_session()
         self._compare_snapshot_version_id = vid
         self._pending_ai_accept_action_id = None
         self._compare_editor.value = body
@@ -797,10 +805,18 @@ class MarkdownStudioCompareText:
     def _sync_compare_buffer_from_fields(self) -> None:
         parts = [tf.value or "" for tf in self._compare_right_fields]
         if self._main_tab_index == TAB_FUTURE:
-            # Drop empty entries: a delete row that's accepted (field stays "") removes
-            # the paragraph from the buffer; an insert row that's declined ("" set on
-            # decline) does the same — naturally yielding the post-accept document.
-            merged = "\n\n".join(p for p in parts if p)
+            kinds = getattr(self, "_future_row_kinds", None) or []
+            cand_idxs = getattr(self, "_future_row_cand_idx", None) or []
+            by_new: dict[int, str] = {}
+            for i, tf in enumerate(self._compare_right_fields):
+                if i < len(kinds) and kinds[i] == "delete":
+                    continue
+                if i < len(cand_idxs) and cand_idxs[i] is not None and cand_idxs[i] >= 0:
+                    by_new[int(cand_idxs[i])] = tf.value or ""
+            if not by_new:
+                merged = ""
+            else:
+                merged = join_paragraphs([by_new.get(j, "") for j in range(max(by_new) + 1)])
         else:
             merged = "\n\n".join(parts) if parts else ""
         if self._main_tab_index == TAB_HISTORY:
@@ -823,8 +839,8 @@ class MarkdownStudioCompareText:
         n_fields = len(self._compare_right_fields)
         if not kinds or len(kinds) != n_fields:
             return n_candidate_paras != n_fields
-        expected = sum(1 for k in kinds if k != "delete")
-        return n_candidate_paras != expected
+        n_comparison_slots = sum(1 for k in kinds if k != "delete")
+        return n_candidate_paras != n_comparison_slots
 
     def _capture_compare_baseline_snapshot(self) -> None:
         """Store Compose buffer as the Compare left baseline (draft mode only uses this via _compare_latest_baseline_text)."""
@@ -933,7 +949,7 @@ class MarkdownStudioCompareText:
         """Update Review left column diff spans for the gap-aligned row list."""
         if self._main_tab_index != TAB_FUTURE:
             return
-        if len(self._future_left_diff_texts) != len(self._compare_right_fields):
+        if not self._future_left_diff_texts:
             return
         current = self.editor.value or ""
         candidate = self._compare_editor.value or ""
@@ -941,19 +957,37 @@ class MarkdownStudioCompareText:
             half = _DIFF_SPAN_CHAR_CAP // 2
             current = current[:half] + "\n…"
             candidate = candidate[:half] + "\n…"
-        rows = aligned_review_rows(current, candidate)
-        for i, row in enumerate(rows):
-            if i >= len(self._future_left_diff_texts):
+        display_rows = paragraph_compare.build_history_display_rows(current, candidate)
+        _ghost_fg = ui_theme.editor_text_color()
+        ghost_text_style = ft.TextStyle(
+            font_family="monospace",
+            size=COMPARE_COL_FONT_SIZE,
+            height=COMPARE_COL_LINE_HEIGHT,
+            color=_ghost_fg,
+            decoration=ft.TextDecoration.LINE_THROUGH,
+            decoration_color=_ghost_fg,
+        )
+        para_style = self._compare_para_text_style()
+        di = 0
+        for row in display_rows:
+            if di >= len(self._future_left_diff_texts):
                 break
-            t = self._future_left_diff_texts[i]
-            if row.kind == "insert":
+            t = self._future_left_diff_texts[di]
+            if row.row_type in ("ghost_moved", "removed"):
+                t.value = row.old_text
+                t.style = ghost_text_style
                 t.spans = []
+            elif row.row_type == "comparison" and not row.old_text:
                 t.value = ""
+                t.style = para_style
+                t.spans = []
             else:
                 t.value = None
+                t.style = para_style
                 t.spans = self._future_old_side_spans(row.old_text, row.new_text)
             if _ctrl_on_page(t):
                 t.update()
+            di += 1
 
     def _refresh_compare_left_diff_spans(self) -> None:
         """Update History inline diff for both columns (snapshot vs draft; same paragraph count)."""
@@ -967,10 +1001,12 @@ class MarkdownStudioCompareText:
             half = _DIFF_SPAN_CHAR_CAP // 2
             older = older[:half] + "\n…"
             newer = newer[:half] + "\n…"
-        pairs = pair_paragraphs_for_compare(older, newer)
-        for i, (left_txt, right_txt) in enumerate(pairs):
+        display_rows = paragraph_compare.build_history_display_rows(older, newer)
+        comparison_rows = [r for r in display_rows if r.row_type == "comparison"]
+        for i, r in enumerate(comparison_rows):
             if i >= len(self._compare_left_diff_texts):
                 break
+            left_txt, right_txt = r.old_text, r.new_text
             left_t = self._compare_left_diff_texts[i]
             left_t.spans = self._compare_old_side_spans(left_txt, right_txt)
             if _ctrl_on_page(left_t):
@@ -1034,7 +1070,9 @@ class MarkdownStudioCompareText:
         self._hide_all_result_card_overlays()
 
         self._compare_row_stable_texts = [r.new_text for r in comparison_rows]
-        self._check_para_hashes = [compute_hash(r.new_text) for r in comparison_rows]
+        self._check_para_hashes = [
+            compute_hash(f"{r.old_text}\x1e{r.new_text}") for r in comparison_rows
+        ]
         for cid in list(self._check_results.keys()):
             results = self._check_results.get(cid) or []
             if len(results) != n_comp:
@@ -1174,6 +1212,7 @@ class MarkdownStudioCompareText:
         self._future_row_stable_texts = []
         self._future_row_old_index = []
         self._future_row_insert_after_old = []
+        self._future_eval_cand_indices = []
         msg = (
             "Review could not build the comparison for this file. "
             "Try adding blank lines between sections, or reopen the note."
@@ -1201,14 +1240,14 @@ class MarkdownStudioCompareText:
             self._snack("Review failed to load.")
 
     def _rebuild_future_paragraph_ui(self) -> None:
-        """Future tab: eval | current(read-only diff with deletions) | pill | AI proposal(editable) | actions.
+        """Future tab: eval | current | pill | AI proposal | actions.
 
-        Rows are gap-aligned: pure deletions render with an empty right cell, pure
-        insertions with an empty left cell. ``_compare_right_fields`` keeps one entry per
-        UI row (a hidden empty TextField for delete rows) so accept/decline indices align
-        with the visible row order. ``_future_row_kinds`` / ``_future_row_cand_idx`` /
-        ``_future_row_stable_texts`` / ``_future_row_old_index`` /
-        ``_future_row_insert_after_old`` track per-row metadata for buffer sync, decline, and accept.
+        Uses ``build_history_display_rows`` (same as History): move ghosts at vacated old
+        positions, removed baseline paragraphs with an empty right cell, and comparison
+        rows at candidate positions. ``_compare_right_fields`` and parallel ``_future_*``
+        lists cover only rows that carry a hidden/editable right TextField (removed +
+        comparison), not ``ghost_moved`` rows. ``_future_eval_cand_indices`` maps eval cell
+        order to candidate paragraph indices when delete rows precede comparisons.
         """
         if self._compare_candidate_source == "pdf_original":
             self._compare_pill_gen += 1
@@ -1222,6 +1261,7 @@ class MarkdownStudioCompareText:
             self._future_row_stable_texts = []
             self._future_row_old_index = []
             self._future_row_insert_after_old = []
+            self._future_eval_cand_indices = []
             self._hide_all_result_card_overlays()
             self._rebuild_future_pdf_import_panes()
             self._sync_future_pdf_layers_visibility()
@@ -1253,8 +1293,11 @@ class MarkdownStudioCompareText:
             half = _DIFF_SPAN_CHAR_CAP // 2
             current_text = current_text[:half] + "\n…"
             ai_text = ai_text[:half] + "\n…"
-        rows = aligned_review_rows(current_text, ai_text)
-        kinds_h, disps_h = paragraph_compare.compare_slots_heuristic(current_text, ai_text)
+
+        diffs = compute_alignment(current_text, ai_text)
+        display_rows = paragraph_compare.build_history_display_rows(current_text, ai_text)
+        comparison_rows = [r for r in display_rows if r.row_type == "comparison"]
+        n_comp = len(comparison_rows)
 
         self._future_rows_listview.controls.clear()
         self._future_left_diff_texts.clear()
@@ -1266,9 +1309,28 @@ class MarkdownStudioCompareText:
         self._future_row_stable_texts = []
         self._future_row_old_index = []
         self._future_row_insert_after_old = []
+        self._future_eval_cand_indices = []
         self._hide_all_result_card_overlays()
 
+        self._check_para_hashes = [
+            compute_hash(f"{r.old_text}\x1e{r.new_text}") for r in comparison_rows
+        ]
+        for cid in list(self._check_results.keys()):
+            results = self._check_results.get(cid) or []
+            if len(results) != n_comp:
+                self._check_results[cid] = (results + [None] * n_comp)[:n_comp]
+
+        _MOVED_OPACITY = 0.55
         para_style = self._compare_para_text_style()
+        _ghost_fg = ui_theme.editor_text_color()
+        ghost_text_style = ft.TextStyle(
+            font_family="monospace",
+            size=COMPARE_COL_FONT_SIZE,
+            height=COMPARE_COL_LINE_HEIGHT,
+            color=_ghost_fg,
+            decoration=ft.TextDecoration.LINE_THROUGH,
+            decoration_color=_ghost_fg,
+        )
         right_tf_kwargs: dict[str, Any] = {
             "multiline": True,
             "max_lines": None,
@@ -1283,63 +1345,71 @@ class MarkdownStudioCompareText:
             "content_padding": ft.padding.all(0),
         }
         show_actions = bool(self.current_path)
+        eval_spacer_w = COMPARE_EVAL_COL_W
+        comp_idx = 0
+        field_idx = 0
 
-        for i, row_spec in enumerate(rows):
-            self._future_row_kinds.append(row_spec.kind)
-            self._future_row_cand_idx.append(row_spec.cand_idx)
-            self._future_row_stable_texts.append(row_spec.old_text)
-            self._future_row_old_index.append(row_spec.old_index)
-            self._future_row_insert_after_old.append(row_spec.insert_after_old)
-
-            if row_spec.kind == "delete":
-                pill_kind: paragraph_compare.SlotKind = "removed"
-                disp: int | None = None
-            elif row_spec.cand_idx is not None and row_spec.cand_idx < len(kinds_h):
-                pill_kind = kinds_h[row_spec.cand_idx]
-                disp = (
-                    disps_h[row_spec.cand_idx]
-                    if row_spec.cand_idx < len(disps_h)
-                    else None
-                )
+        for row in display_rows:
+            is_ghost = row.row_type in ("ghost_moved", "removed")
+            if is_ghost:
+                pill_disp = row.displacement
+                pill_badge = True
+            elif row.is_true_mover:
+                pill_disp = None
+                pill_badge = False
             else:
-                pill_kind = "added" if row_spec.kind == "insert" else "stable"
-                disp = None
+                pill_disp = row.displacement
+                pill_badge = False
+
             pill_host = ft.Container(
-                content=self._make_compare_pill_row(pill_kind, disp),
+                content=self._make_compare_pill_row(
+                    row.slot_kind, pill_disp, show_moved_badge=pill_badge
+                ),
                 width=COMPARE_PILL_COL_W,
                 alignment=ft.Alignment.TOP_LEFT,
                 padding=ft.padding.only(top=4),
             )
 
-            # Left cell: empty placeholder for inserts; struck-through old paragraph
-            # (full strikethrough on delete since new_text="") otherwise.
-            if row_spec.kind == "insert":
-                left_diff = ft.Text(
-                    "",
-                    style=para_style,
+            if row.row_type == "ghost_moved":
+                ghost_left = ft.Text(
+                    row.old_text,
+                    style=ghost_text_style,
                     selectable=True,
                     expand=True,
                     no_wrap=False,
                 )
-            else:
-                left_diff = ft.Text(
-                    spans=self._future_old_side_spans(row_spec.old_text, row_spec.new_text),
-                    style=para_style,
-                    selectable=True,
-                    expand=True,
-                    no_wrap=False,
+                self._future_left_diff_texts.append(ghost_left)
+                left_cell = ft.Container(
+                    content=ghost_left,
+                    expand=1,
+                    padding=_COMPARE_HISTORY_CELL_PAD,
+                    opacity=_MOVED_OPACITY,
                 )
-            self._future_left_diff_texts.append(left_diff)
-            left_cell = ft.Container(
-                content=left_diff,
-                expand=1,
-                padding=_COMPARE_HISTORY_CELL_PAD,
-                opacity=0.55 if (disp is not None and disp != 0) else 1.0,
-            )
+                eval_ctrl = ft.Container(width=eval_spacer_w)
+                right_cell = ft.Container(expand=1, padding=_COMPARE_HISTORY_CELL_PAD)
+                row_inner = ft.Row(
+                    [eval_ctrl, left_cell, pill_host, right_cell],
+                    spacing=4,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                )
+                self._future_rows_listview.controls.append(row_inner)
+                continue
 
-            # Right cell: editable AI proposal for replace/insert/equal; empty placeholder
-            # for delete rows. The hidden TextField keeps accept/decline index parity.
-            if row_spec.kind == "delete":
+            if row.row_type == "removed":
+                ghost_left = ft.Text(
+                    row.old_text,
+                    style=ghost_text_style,
+                    selectable=True,
+                    expand=True,
+                    no_wrap=False,
+                )
+                self._future_left_diff_texts.append(ghost_left)
+                left_cell = ft.Container(
+                    content=ghost_left,
+                    expand=1,
+                    padding=_COMPARE_HISTORY_CELL_PAD,
+                    opacity=_MOVED_OPACITY,
+                )
                 right_tf = ft.TextField(
                     **right_tf_kwargs,
                     value="",
@@ -1350,53 +1420,134 @@ class MarkdownStudioCompareText:
                     expand=1,
                     padding=_COMPARE_HISTORY_CELL_PAD,
                 )
-            else:
-                right_tf = ft.TextField(
-                    **right_tf_kwargs,
-                    value=row_spec.new_text,
-                    read_only=False,
-                    enable_interactive_selection=True,
-                    hint_text="…",
-                    expand=True,
-                    on_change=lambda _e, ix=i: self._on_compare_para_field_change(ix),
+                self._future_row_kinds.append("delete")
+                self._future_row_cand_idx.append(None)
+                self._future_row_stable_texts.append(row.old_text)
+                self._future_row_old_index.append(row.old_paragraph_index)
+                self._future_row_insert_after_old.append(-1)
+                self._compare_right_fields.append(right_tf)
+                eval_ctrl = ft.Container(width=eval_spacer_w)
+                row_cells: list[ft.Control] = [
+                    eval_ctrl,
+                    left_cell,
+                    pill_host,
+                    right_cell,
+                ]
+                if show_actions:
+                    actions_ctrl, hover_wrap_future = self._build_actions_square(
+                        field_idx, persistent=False
+                    )
+                    row_cells.append(actions_ctrl)
+                    row_inner = ft.Row(
+                        row_cells,
+                        spacing=4,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    )
+                    row_wrap = ft.Container(
+                        content=row_inner,
+                        on_hover=lambda e, w=hover_wrap_future: self._on_compare_row_hover(e, w),
+                    )
+                    self._future_rows_listview.controls.append(row_wrap)
+                else:
+                    self._future_rows_listview.controls.append(
+                        ft.Row(
+                            row_cells,
+                            spacing=4,
+                            vertical_alignment=ft.CrossAxisAlignment.START,
+                        )
+                    )
+                field_idx += 1
+                continue
+
+            # comparison row (new-side slot)
+            old_txt = row.old_text
+            cur_txt = row.new_text
+            if row.slot_kind == "added" or (old_txt == "" and cur_txt):
+                review_kind = "insert"
+                oi = -1
+                ia = paragraph_compare.insert_after_old_index_for_added(
+                    diffs, row.new_paragraph_index
                 )
-                right_cell = ft.Container(
-                    content=right_tf,
-                    expand=1,
-                    padding=_COMPARE_HISTORY_CELL_PAD,
-                )
-
-            if show_actions:
-                actions_ctrl, hover_wrap_future = self._build_actions_square(i, persistent=False)
+            elif old_txt == cur_txt:
+                review_kind = "equal"
+                oi = row.old_paragraph_index
+                ia = -1
             else:
-                actions_ctrl, hover_wrap_future = None, None
+                review_kind = "replace"
+                oi = row.old_paragraph_index
+                ia = -1
 
-            eval_host = self._build_eval_cell(i)
+            self._future_row_kinds.append(review_kind)
+            self._future_row_cand_idx.append(row.new_paragraph_index)
+            self._future_row_stable_texts.append(old_txt)
+            self._future_row_old_index.append(oi)
+            self._future_row_insert_after_old.append(ia)
 
-            row_cells: list[ft.Control] = [
+            left_diff = ft.Text(
+                spans=self._future_old_side_spans(old_txt, cur_txt),
+                style=para_style,
+                selectable=True,
+                expand=True,
+                no_wrap=False,
+            )
+            self._future_left_diff_texts.append(left_diff)
+            left_cell = ft.Container(
+                content=left_diff,
+                expand=1,
+                padding=_COMPARE_HISTORY_CELL_PAD,
+                opacity=_MOVED_OPACITY if row.is_moved else 1.0,
+            )
+            right_tf = ft.TextField(
+                **right_tf_kwargs,
+                value=cur_txt,
+                read_only=False,
+                enable_interactive_selection=True,
+                hint_text="…",
+                expand=True,
+                on_change=lambda _e, ix=field_idx: self._on_compare_para_field_change(ix),
+            )
+            right_cell = ft.Container(
+                content=right_tf,
+                expand=1,
+                padding=_COMPARE_HISTORY_CELL_PAD,
+            )
+            self._compare_right_fields.append(right_tf)
+            eval_host = self._build_eval_cell(comp_idx)
+            self._compare_eval_hosts.append(eval_host)
+            self._future_row_pill_hosts.append(pill_host)
+            self._future_eval_cand_indices.append(row.new_paragraph_index)
+            comp_idx += 1
+
+            row_cells = [
                 eval_host,
                 left_cell,
                 pill_host,
                 right_cell,
             ]
-            if actions_ctrl is not None:
+            if show_actions:
+                actions_ctrl, hover_wrap_future = self._build_actions_square(
+                    field_idx, persistent=False
+                )
                 row_cells.append(actions_ctrl)
-            row_inner = ft.Row(
-                row_cells,
-                spacing=4,
-                vertical_alignment=ft.CrossAxisAlignment.START,
-            )
-            if hover_wrap_future is not None:
-                row = ft.Container(
+                row_inner = ft.Row(
+                    row_cells,
+                    spacing=4,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                )
+                row_wrap = ft.Container(
                     content=row_inner,
                     on_hover=lambda e, w=hover_wrap_future: self._on_compare_row_hover(e, w),
                 )
+                self._future_rows_listview.controls.append(row_wrap)
             else:
-                row = row_inner
-            self._future_rows_listview.controls.append(row)
-            self._future_row_pill_hosts.append(pill_host)
-            self._compare_eval_hosts.append(eval_host)
-            self._compare_right_fields.append(right_tf)
+                self._future_rows_listview.controls.append(
+                    ft.Row(
+                        row_cells,
+                        spacing=4,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    )
+                )
+            field_idx += 1
 
         if _ctrl_on_page(self._future_rows_listview):
             self._future_rows_listview.update()
@@ -1420,7 +1571,7 @@ class MarkdownStudioCompareText:
 
         _log.debug(
             "review_future_rebuild row_specs=%s list_controls=%s change_panel_visible=%s",
-            len(rows),
+            len(display_rows),
             len(self._future_rows_listview.controls),
             self._review_change_panel.visible,
         )
@@ -1487,11 +1638,12 @@ class MarkdownStudioCompareText:
             return
         buffers = self._active_compare_buffers()
         kinds, disps = paragraph_compare.compare_slots_heuristic(buffers.baseline, buffers.candidate)
-        on_history = self._main_tab_index == TAB_HISTORY
+        # History + Review: no stacked "Moved" chip on comparison rows (ghost rows + arrow only);
+        # a second pill column was taller than single-pill rows and broke column alignment on Review.
         for i, host in enumerate(self._active_pill_hosts()):
             k = kinds[i] if i < len(kinds) else "stable"
             d = disps[i] if i < len(disps) else None
-            host.content = self._make_compare_pill_row(k, d, show_moved_badge=not on_history)
+            host.content = self._make_compare_pill_row(k, d, show_moved_badge=False)
             if _ctrl_on_page(host):
                 host.update()
 
@@ -1517,11 +1669,10 @@ class MarkdownStudioCompareText:
             return
         if gen != self._compare_refine_gen:
             return
-        on_history = self._main_tab_index == TAB_HISTORY
         for i, host in enumerate(self._active_pill_hosts()):
             k = refined[i] if i < len(refined) else "stable"
             d = disps_ref[i] if i < len(disps_ref) else None
-            host.content = self._make_compare_pill_row(k, d, show_moved_badge=not on_history)
+            host.content = self._make_compare_pill_row(k, d, show_moved_badge=False)
             if _ctrl_on_page(host):
                 host.update()
         # Update diff spans in both History columns after AI refinement.
@@ -1671,17 +1822,19 @@ class MarkdownStudioCompareText:
         pre_buf = self.editor.value or ""
         on_future = self._main_tab_index == TAB_FUTURE
         if on_future:
-            rows = aligned_review_rows(pre_buf, self._compare_editor.value or "")
-            cand_indices = [r.cand_idx for r in rows if r.cand_idx is not None]
-            max_ci = max(cand_indices) if cand_indices else -1
-            if max_ci < 0:
-                new_buf = ""
-            else:
-                cand_parts = [""] * (max_ci + 1)
-                for i, r in enumerate(rows):
-                    if r.cand_idx is not None and i < len(self._compare_right_fields):
-                        cand_parts[r.cand_idx] = self._compare_right_fields[i].value or ""
-                new_buf = join_paragraphs(cand_parts)
+            kinds = getattr(self, "_future_row_kinds", None) or []
+            cidxs = getattr(self, "_future_row_cand_idx", None) or []
+            by_new: dict[int, str] = {}
+            for i, tf in enumerate(self._compare_right_fields):
+                if i < len(kinds) and kinds[i] == "delete":
+                    continue
+                if i < len(cidxs) and cidxs[i] is not None and cidxs[i] >= 0:
+                    by_new[int(cidxs[i])] = tf.value or ""
+            new_buf = (
+                join_paragraphs([by_new.get(j, "") for j in range(max(by_new) + 1)])
+                if by_new
+                else ""
+            )
         else:
             parts = [tf.value or "" for tf in self._compare_right_fields]
             new_buf = "\n\n".join(parts)
@@ -1785,6 +1938,46 @@ class MarkdownStudioCompareText:
         await self._debounced_compose_rebuild(self._margin_gen)
         self._refresh_title_bar()
         self._snack("Selection replaced.")
+
+    async def _apply_margin_reply_to_paragraph_async(
+        self,
+        idx: int,
+        reply: ft.Text,
+        footer: ft.Row,
+        action_id: str,
+    ) -> None:
+        text = _strip_change_topic_preamble(reply.value or "")
+        if not text:
+            self._snack("Reply is empty.")
+            return
+        buf = self.editor.value or ""
+        paras = split_paragraphs(buf)
+        if idx < 0 or idx >= len(paras):
+            self._snack("Paragraph is no longer valid.")
+            self._hide_prompt_footer(footer)
+            return
+        act = prompts.get_margin_action(action_id)
+        if self.current_path:
+            try:
+                with session_scope() as s:
+                    version_storage.persist_version_snapshot(
+                        s,
+                        self.current_path.resolve(),
+                        buf,
+                        "ai_apply",
+                        display_label=f"{act.label} · apply" if act else "AI · apply",
+                    )
+            except BaseException:
+                pass
+        self.editor.value = replace_paragraph_at_index(buf, idx, text)
+        self._compose_sel_span = None
+        self._hide_prompt_footer(footer)
+        if _ctrl_on_page(self.editor):
+            self.editor.update()
+        self._margin_gen += 1
+        await self._debounced_compose_rebuild(self._margin_gen)
+        self._refresh_title_bar()
+        self._snack(f"Paragraph {idx + 1} replaced.")
 
     def _compare_paragraph_for_index(self, idx: int) -> str:
         if 0 <= idx < len(self._compare_right_fields):
