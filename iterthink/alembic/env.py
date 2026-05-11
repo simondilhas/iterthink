@@ -6,8 +6,8 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 
-# Ensure repo root is importable when running `alembic` from any cwd
-_ROOT = Path(__file__).resolve().parents[1]
+# Ensure repo root is importable when running `alembic` from any cwd (dev tree: repo/iterthink/alembic/env.py).
+_ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 

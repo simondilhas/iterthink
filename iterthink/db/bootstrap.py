@@ -11,22 +11,19 @@ from iterthink import config
 from iterthink.persistence import store_db
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-
-def _alembic_ini_path() -> Path:
-    return _repo_root() / "alembic.ini"
+def _alembic_script_dir() -> Path:
+    """Migrations live under the iterthink package so pip installs run upgrades."""
+    return Path(__file__).resolve().parents[1] / "alembic"
 
 
 def run_alembic_upgrade() -> None:
     """Apply Alembic migrations to the store database."""
-    ini_path = _alembic_ini_path()
-    if not ini_path.is_file():
+    script_dir = _alembic_script_dir()
+    if not (script_dir / "env.py").is_file():
         return
-    cfg = Config(str(ini_path))
+    cfg = Config()
+    cfg.set_main_option("script_location", str(script_dir.resolve()))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{config.STORE_DB_PATH.resolve()}")
-    cfg.set_main_option("script_location", str(_repo_root() / "alembic"))
     command.upgrade(cfg, "head")
 
 
