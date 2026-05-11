@@ -52,7 +52,7 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/iterthink/iterthink"
+Homepage = "https://github.com/simondilhas/iterthink"
 Issues = "https://github.com/iterthink/iterthink/issues"
 
 [project.scripts]

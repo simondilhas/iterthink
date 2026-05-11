@@ -1,5 +1,6 @@
 """Flet page bootstrap."""
 
+import asyncio
 import sys
 
 import flet as ft
@@ -9,6 +10,7 @@ from iterthink import config
 from iterthink.studio import ui_theme
 from iterthink.db import bootstrap
 from iterthink.db.session import reset_engine_cache
+from iterthink.ai.local_embedding import prepare_runtime_embedding_model_sync
 from iterthink.ai.ollama_util import ollama_error_message
 from iterthink.studio import MarkdownStudio
 
@@ -79,6 +81,20 @@ async def main(page: ft.Page) -> None:
             )
 
     await _ollama_startup_check()
+
+    async def _embedding_model_warmup() -> None:
+        if page.web:
+            return
+        try:
+            await asyncio.to_thread(prepare_runtime_embedding_model_sync)
+        except BaseException:
+            studio._snack(
+                "Could not download the paragraph-compare embedding model from Hugging Face. "
+                "Check your network once; for restricted networks set HF_TOKEN. "
+                "Compare-tab embeddings need this download the first time."
+            )
+
+    page.run_task(_embedding_model_warmup)
     page.run_task(studio._refresh_ki_chat_model_dropdown)
     if not page.web:
         page.run_task(studio._periodic_file_drift_loop)

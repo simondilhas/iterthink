@@ -535,11 +535,24 @@ class LlmChatBackend:
         return await self._ollama.chat(**kwargs)
 
 
+def _http_status_error_detail_safe(exc: httpx.HTTPStatusError) -> str:
+    """Body snippet for UI; never use str(exc) — httpx embeds the full request URL (e.g. Gemini ``key=``)."""
+    try:
+        body = exc.response.text[:400]
+    except Exception:
+        body = ""
+    if body.strip():
+        return body
+    reason = (exc.response.reason_phrase or "").strip() or "HTTP error"
+    try:
+        safe_url = str(exc.request.url.copy_with(query=None, fragment=None))
+    except Exception:
+        safe_url = ""
+    return f"{reason} ({safe_url})" if safe_url else reason
+
+
 def remote_http_error_message(exc: BaseException) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
-        try:
-            detail = exc.response.text[:400]
-        except Exception:
-            detail = ""
-        return f"HTTP {exc.response.status_code}: {detail or str(exc)}".strip()
+        detail = _http_status_error_detail_safe(exc)
+        return f"HTTP {exc.response.status_code}: {detail}".strip()
     return f"{type(exc).__name__}: {exc}"

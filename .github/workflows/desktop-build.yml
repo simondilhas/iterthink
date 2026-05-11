@@ -5,9 +5,10 @@ on:
     inputs:
       ref:
         description: >
-          Optional SHA, branch, or tag (workflow_dispatch only). Must exist on origin
-          before you run this — create and push tags first, e.g. git push origin v0.0.2.
-          Leave empty to build the commit at the tip of the branch chosen under "Use workflow from".
+          Optional SHA, branch, or tag (workflow_dispatch only). Must already exist on origin
+          (SemVer names like v0.0.2 are treated as tags: refs/tags/v0.0.2). Push tags first, e.g.
+          git tag v0.0.2 && git push origin v0.0.2. Leave empty to build github.sha from the branch
+          selected under "Use workflow from".
         required: false
         default: ""
         type: string
@@ -79,57 +80,10 @@ jobs:
               f.write(f"matrix_json={json.dumps(rows)}\n")
           PY
 
-  # Hugging Face from macOS runners often flakes (DNS: nodename nor servname not known).
-  # Download once on Linux; matrix jobs only unpack the artifact.
-  prefetch_embed:
-    name: Prefetch embedding model
-    needs: prepare
-    runs-on: ubuntu-latest
-    steps:
-      # Same ref resolution as build so the ONNX bundle matches the commit being packaged.
-      - name: Resolve checkout ref
-        id: checkout_ref
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_REF: ${{ inputs.ref }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          if [ "$EVENT_NAME" != "workflow_dispatch" ] || [ -z "${INPUT_REF:-}" ]; then
-            echo "ref=$SHA" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          r="$INPUT_REF"
-          if [[ "$r" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$ ]]; then
-            echo "ref=refs/tags/$r" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=$r" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.checkout_ref.outputs.ref }}
-
-      - uses: astral-sh/setup-uv@v6
-
-      - name: Sync dependencies
-        run: uv sync
-
-      - name: Prefetch embedding model
-        run: uv run python scripts/prefetch_embed_model.py
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: embedded-models
-          path: iterthink/embedded_models
-          if-no-files-found: error
-
   build:
     name: Build (${{ matrix.name }})
     needs:
       - prepare
-      - prefetch_embed
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -158,6 +112,20 @@ jobs:
             echo "ref=refs/tags/$r" >> "$GITHUB_OUTPUT"
           else
             echo "ref=$r" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify workflow_dispatch ref exists on origin
+        if: github.event_name == 'workflow_dispatch' && inputs.ref != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${{ inputs.ref }}"
+          enc=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$raw")
+          if ! gh api --silent "repos/${GITHUB_REPOSITORY}/commits/${enc}"; then
+            echo "::error::No commit on origin matches ref '${raw}'. SemVer-style inputs resolve to refs/tags/<name>; push the tag first. To build the branch tip from 'Use workflow from', leave ref empty."
+            exit 1
           fi
 
       - uses: actions/checkout@v4
@@ -259,18 +227,6 @@ jobs:
       - name: Sync dependencies
         working-directory: ${{ env.ITER_REPO }}
         run: uv sync
-
-      - name: Download prefetched embedding model
-        if: matrix.name != 'windows'
-        uses: actions/download-artifact@v4
-        with:
-          name: embedded-models
-          path: ${{ github.workspace }}/iterthink/embedded_models
-
-      - name: Verify sqlite-vec embedding cache
-        if: matrix.name != 'windows'
-        working-directory: ${{ env.ITER_REPO }}
-        run: uv run python scripts/verify_embedding_cache.py
 
       - name: Strip .venv (Windows)
         if: matrix.name == 'windows'
