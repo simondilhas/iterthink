@@ -425,14 +425,14 @@ jobs:
           hdiutil create -volname "Iterthink" -srcfolder "$APP" -ov -format UDZO "dist/iterthink-${BUILD_VERSION}-macos.dmg"
 
       - name: List artifacts (debug)
-        shell: bash
+        shell: pwsh
         run: |
-          if [ -d dist ]; then
-            echo "--- dist/ contents ---"
-            ls -la dist/ || true
-          else
-            echo "No dist/ directory found in $(pwd)"
-          fi
+          if (Test-Path -LiteralPath 'dist') {
+            Write-Host '--- dist/ contents ---'
+            Get-ChildItem -LiteralPath 'dist' -Force
+          } else {
+            Write-Host "No dist/ directory found in $(Get-Location)"
+          }
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
