@@ -188,13 +188,20 @@ This is early software. Defaults and behavior may change between releases.
 
 ---
 
+## Pricing
+
+For **commercial work** — team deployment, commercial licensing, and related options — see **[iterthink.com — Pricing](https://www.iterthink.com/#pricing)**.
+
+---
+
 ## License
 
 Source available under [BUSL-1.1](https://mariadb.com/bsl11/).
 
 - **Free for individual, non-commercial use** — see [LICENSE](LICENSE)
-- **Commercial use** → contact [Abstract AG](https://www.iterthink.com/#pricing) at [info@abstract.build](mailto:info@abstract.build)
+- **Commercial use** → [Pricing & commercial licensing](https://www.iterthink.com/#pricing); contact [Abstract AG](mailto:info@abstract.build)
 - Converts to **Apache 2.0** on 2030-05-05
+- **Third-party open-source** — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) (regenerate with `python scripts/generate_third_party_notices.py` before release)
 
 ---
 
