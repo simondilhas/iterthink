@@ -4,7 +4,7 @@
 # Theme: appearance selects theme.dark vs theme.light. Legacy top-level keys
 # (higlight_color, surface, …) still override the dark palette when present.
 
-documents_root: ~/Documents
+documents_root: ~/Documents/iterthink
 store_dir: ~/Documents/.iterthink
 
 default_ollama_model: llama3:8B

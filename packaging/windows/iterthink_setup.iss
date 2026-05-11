@@ -13,7 +13,7 @@
 ; https://ollama.com/install.ps1 is the official PowerShell installer used below.
 
 #define MyAppName "Iterthink"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.1.1"
 #define MyAppPublisher "Iterthink"
 ; Path from this .iss file (packaging\windows\) to Flet output at repo root:
 #define MyFletBuildDir "..\..\build\windows"

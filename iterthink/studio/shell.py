@@ -407,6 +407,17 @@ class MarkdownStudioShell:
             ],
         )
 
+    def _rebuild_header_menu_bar(self) -> None:
+        """Replace File/View/Help so text and dropdown surfaces match ``config`` (e.g. after appearance change)."""
+        if self.page.web or self._header_shell is None:
+            return
+        row = self._header_shell.content
+        if not isinstance(row, ft.Row) or not row.controls:
+            return
+        new_bar = self._build_menu_bar()
+        self._menu_bar = new_bar
+        row.controls[0] = new_bar
+
     def _pane_split_handle(
         self,
         *,

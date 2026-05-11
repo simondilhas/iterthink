@@ -273,6 +273,15 @@ class MarkdownStudioCompose:
             return
         await ctx.open(global_position=ft.Offset(gx, gy))
 
+    def _kick_debounced_compare_diff_if_main_editor_backs_buffers(self) -> None:
+        """Review baseline and History newer=current draft both read from ``editor``; keep analyse in sync."""
+        if self._main_tab_index == TAB_FUTURE or (
+            self._main_tab_index == TAB_HISTORY and self._compare_newer_version_id is None
+        ):
+            self._compare_diff_gen += 1
+            dgen = self._compare_diff_gen
+            self.page.run_task(self._debounced_compare_diff, dgen)
+
     def _after_editor_programmatic_change(self) -> None:
         """Mirror the bookkeeping _on_editor_change does after a programmatic mutation (cut/paste)."""
         self._refresh_title_bar()
@@ -280,6 +289,7 @@ class MarkdownStudioCompose:
             self._margin_gen += 1
             gen = self._margin_gen
             self.page.run_task(self._debounced_compose_rebuild, gen)
+        self._kick_debounced_compare_diff_if_main_editor_backs_buffers()
         if not self.current_path:
             return
         self._kick_debounced_autosave()
@@ -614,6 +624,7 @@ class MarkdownStudioCompose:
             and self._compare_newer_version_id is None
         ):
             self._refresh_compare_diff_immediate()
+        self._kick_debounced_compare_diff_if_main_editor_backs_buffers()
         if not self.current_path:
             return
         self._kick_debounced_autosave()

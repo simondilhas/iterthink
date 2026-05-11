@@ -234,6 +234,18 @@ jobs:
           $utf8 = New-Object System.Text.UTF8Encoding $false
           [System.IO.File]::AppendAllText($env:GITHUB_ENV, "BUILD_VERSION=$bv`n", $utf8)
 
+      # Flet resolves launcher icons from <tool.flet.app path>/assets/icon.* (PNG for flutter_launcher_icons).
+      - name: Stage Flet launcher icon
+        working-directory: ${{ env.ITER_REPO }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:ITER_REPO 'iterthink/assets/fav.png'
+          if (-not (Test-Path -LiteralPath $src)) { throw "Missing launcher icon source: $src" }
+          $destDir = Join-Path $env:ITER_REPO 'assets'
+          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+          Copy-Item -LiteralPath $src -Destination (Join-Path $destDir 'icon.png') -Force
+
       - name: Flet build (Windows)
         if: matrix.name == 'windows'
         working-directory: ${{ env.ITER_REPO }}
@@ -275,6 +287,17 @@ jobs:
           $outDir = Join-Path $env:GITHUB_WORKSPACE 'dist'
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
+          $icoPath = Join-Path $outDir 'setup-icon.ico'
+          $env:ITERSETUP_ICO_OUT = $icoPath
+          Push-Location $env:ITER_REPO
+          try {
+            uv run python -c "import os; from pathlib import Path; from PIL import Image; d=Path(os.environ['ITERSETUP_ICO_OUT']); im=Image.open(Path(os.environ['ITER_REPO'])/'iterthink'/'assets'/'fav.png').convert('RGBA').resize((256,256)); im.save(d, format='ICO')"
+          } finally {
+            Pop-Location
+            Remove-Item Env:ITERSETUP_ICO_OUT -ErrorAction SilentlyContinue
+          }
+          if (-not (Test-Path -LiteralPath $icoPath)) { throw "Failed to write installer icon: $icoPath" }
+
           $iss = @"
           [Setup]
           AppName=Iterthink
@@ -283,6 +306,7 @@ jobs:
           DefaultGroupName=Iterthink
           OutputDir=$outDir
           OutputBaseFilename=iterthink-$env:BUILD_VERSION-windows-installer
+          SetupIconFile=$icoPath
           Compression=lzma2
           SolidCompression=yes
           DisableProgramGroupPage=yes
@@ -337,11 +361,16 @@ jobs:
           Categories=Utility;
           DESKTOP
 
+          ICON_SRC="${ITER_REPO}/iterthink/assets/fav.png"
+          if [ ! -f "$ICON_SRC" ]; then
+            echo "Missing icon source: $ICON_SRC" >&2
+            exit 1
+          fi
           # ImageMagick 7 uses `magick`; ImageMagick 6 uses `convert`
           if command -v magick >/dev/null 2>&1; then
-            magick -size 256x256 xc:blue AppDir/iterthink.png
+            magick "$ICON_SRC" -resize 256x256 AppDir/iterthink.png
           elif command -v convert >/dev/null 2>&1; then
-            convert -size 256x256 xc:blue AppDir/iterthink.png
+            convert "$ICON_SRC" -resize 256x256 AppDir/iterthink.png
           else
             echo "No ImageMagick available" >&2
             exit 1
@@ -389,13 +418,13 @@ jobs:
           Categories=Utility;
           DESKTOP
 
-          # Icon: reuse the AppImage one if it exists, else generate
+          # Icon: reuse the AppImage one if it exists, else resize from package asset
           if [ -f AppDir/iterthink.png ]; then
             cp AppDir/iterthink.png "$STAGE/usr/share/icons/hicolor/256x256/apps/iterthink.png"
           elif command -v magick >/dev/null 2>&1; then
-            magick -size 256x256 xc:blue "$STAGE/usr/share/icons/hicolor/256x256/apps/iterthink.png"
+            magick "${ITER_REPO}/iterthink/assets/fav.png" -resize 256x256 "$STAGE/usr/share/icons/hicolor/256x256/apps/iterthink.png"
           else
-            convert -size 256x256 xc:blue "$STAGE/usr/share/icons/hicolor/256x256/apps/iterthink.png"
+            convert "${ITER_REPO}/iterthink/assets/fav.png" -resize 256x256 "$STAGE/usr/share/icons/hicolor/256x256/apps/iterthink.png"
           fi
 
           # RPM versions can't contain '+', sanitize
@@ -425,14 +454,14 @@ jobs:
           hdiutil create -volname "Iterthink" -srcfolder "$APP" -ov -format UDZO "dist/iterthink-${BUILD_VERSION}-macos.dmg"
 
       - name: List artifacts (debug)
-        shell: bash
+        shell: pwsh
         run: |
-          if [ -d dist ]; then
-            echo "--- dist/ contents ---"
-            ls -la dist/ || true
-          else
-            echo "No dist/ directory found in $(pwd)"
-          fi
+          if (Test-Path -LiteralPath 'dist') {
+            Write-Host '--- dist/ contents ---'
+            Get-ChildItem -LiteralPath 'dist' -Force
+          } else {
+            Write-Host "No dist/ directory found in $(Get-Location)"
+          }
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

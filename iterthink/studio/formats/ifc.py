@@ -5,20 +5,20 @@ Status: placeholder — not yet implemented.
 -------------------------------------------------------------------------------
 How to add a new format renderer (IFC or any future format)
 -------------------------------------------------------------------------------
-1. Add its source literal to ``CompareCandidateSource`` in ``studio/__init__.py``:
-       "ifc_original"
+1. Add its member to ``CompareCandidateSource`` in ``iterthink/studio/history/candidate_state.py``:
+       ``IFC_ORIGINAL`` (value ``"ifc_original"``).
 
 2. Implement the methods in this mixin (see stubs below).
 
-3. The compare routing in ``studio/history.py`` ``_rebuild_compare_view()``
+3. The compare routing in ``iterthink/studio/history/dispatch.py`` (``_rebuild_compare_view()``)
    already dispatches to ``_rebuild_compare_ifc_panes()`` when
-   ``_compare_candidate_source == "ifc_original"``.
+   ``_compare_candidate_source == CompareCandidateSource.IFC_ORIGINAL``.
 
-4. Register the mixin in ``studio/__init__.py`` (it is already in the MRO):
-       class MarkdownStudio(... MarkdownStudioIfcFormat ...)
+4. Register the mixin in ``markdown_studio.py`` (it is already in the MRO):
+       ``class MarkdownStudio(... MarkdownStudioIfcFormat ...)``
 
 5. Wire import detection into ``_select_snapshot_as_candidate`` in
-   ``studio/history.py`` — add an ``elif ifc_rel:`` branch analogous to the
+   ``iterthink/studio/history/dropdowns.py`` — add an ``elif ifc_rel:`` branch analogous to the
    existing ``pdf_rel`` and ``docx_rel`` branches.
 -------------------------------------------------------------------------------
 
@@ -38,7 +38,7 @@ class MarkdownStudioIfcFormat:
 
     Intended as a drop-in sibling of ``MarkdownStudioAssetCompare`` (which
     handles PDF/DOCX). All IFC-specific rendering belongs here; the compare
-    orchestrator in ``studio/history.py`` stays format-agnostic.
+    orchestrator in ``iterthink.studio.history`` stays format-agnostic.
     """
 
     def _rebuild_compare_ifc_panes(self) -> None:

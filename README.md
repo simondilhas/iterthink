@@ -86,7 +86,7 @@ pip install -U pip "git+https://github.com/simondilhas/iterthink.git"
 iterthink
 ```
 
-To pin a release or commit, append `@v0.1.0` or `@<commit-sha>` inside the quotes (same URL).
+To pin a release or commit, use the `@…` form shown above (same URL pattern inside the quotes).
 
 **First launch:**
 1. Go to **File → Settings → Paths** — point it to your documents folder (default store is `Documents/.iterthink`)
