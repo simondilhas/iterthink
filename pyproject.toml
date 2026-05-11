@@ -68,6 +68,9 @@ iterthink = [
     "LICENSE",
     "embedded_models/**/*",
     "templates/*.docx",
+    "alembic/env.py",
+    "alembic/script.py.mako",
+    "alembic/versions/*.py",
 ]
 
 [tool.pytest.ini_options]
@@ -91,5 +94,4 @@ exclude = [
     "packaging",
     "docs",
     ".pytest_cache",
-    "alembic",
 ]
