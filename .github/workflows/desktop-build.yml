@@ -4,7 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Optional commit SHA, branch, or tag to checkout"
+        description: >
+          Optional SHA, branch, or tag (workflow_dispatch only). Must exist on origin
+          before you run this — create and push tags first, e.g. git push origin v0.0.2.
+          Leave empty to build the commit at the tip of the branch chosen under "Use workflow from".
         required: false
         default: ""
         type: string
@@ -76,9 +79,57 @@ jobs:
               f.write(f"matrix_json={json.dumps(rows)}\n")
           PY
 
+  # Hugging Face from macOS runners often flakes (DNS: nodename nor servname not known).
+  # Download once on Linux; matrix jobs only unpack the artifact.
+  prefetch_embed:
+    name: Prefetch embedding model
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      # Same ref resolution as build so the ONNX bundle matches the commit being packaged.
+      - name: Resolve checkout ref
+        id: checkout_ref
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] || [ -z "${INPUT_REF:-}" ]; then
+            echo "ref=$SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          r="$INPUT_REF"
+          if [[ "$r" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$ ]]; then
+            echo "ref=refs/tags/$r" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$r" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.checkout_ref.outputs.ref }}
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Prefetch embedding model
+        run: uv run python scripts/prefetch_embed_model.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: embedded-models
+          path: iterthink/embedded_models
+          if-no-files-found: error
+
   build:
     name: Build (${{ matrix.name }})
-    needs: prepare
+    needs:
+      - prepare
+      - prefetch_embed
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -86,9 +137,32 @@ jobs:
         include: ${{ fromJSON(needs.prepare.outputs.matrix_json) }}
 
     steps:
+      # Map release-style tags (v0.0.2) to refs/tags/... so checkout uses one refspec.
+      # Unqualified refs make actions/checkout fetch refs/heads/<ref>* and refs/tags/<ref>*;
+      # if nothing matches (tag never pushed), git fetch exits 1 with no helpful message.
+      - name: Resolve checkout ref
+        id: checkout_ref
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] || [ -z "${INPUT_REF:-}" ]; then
+            echo "ref=$SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          r="$INPUT_REF"
+          if [[ "$r" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$ ]]; then
+            echo "ref=refs/tags/$r" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$r" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref != '' && inputs.ref || github.sha }}
+          ref: ${{ steps.checkout_ref.outputs.ref }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -186,10 +260,12 @@ jobs:
         working-directory: ${{ env.ITER_REPO }}
         run: uv sync
 
-      - name: Prefetch embedding model
+      - name: Download prefetched embedding model
         if: matrix.name != 'windows'
-        working-directory: ${{ env.ITER_REPO }}
-        run: uv run python scripts/prefetch_embed_model.py
+        uses: actions/download-artifact@v4
+        with:
+          name: embedded-models
+          path: ${{ github.workspace }}/iterthink/embedded_models
 
       - name: Verify sqlite-vec embedding cache
         if: matrix.name != 'windows'
