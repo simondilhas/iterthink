@@ -120,7 +120,7 @@ class MarkdownStudio(
             store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_OPENAI_MODEL) or "gpt-4o-mini"
         )
         self.cloud_google_model: str = (
-            store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_GOOGLE_MODEL) or "gemini-1.5-flash"
+            (store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_GOOGLE_MODEL) or "").strip()
         )
         self.current_path: Path | None = None
         self.last_saved_text: str = ""
@@ -210,7 +210,8 @@ class MarkdownStudio(
         self.editor = ft.TextField(
             multiline=True,
             max_lines=None,
-            min_lines=1,
+            min_lines=3,
+            text_vertical_align=ft.VerticalAlignment.START,
             border=ft.InputBorder.NONE,
             filled=False,
             hint_text="Write…",
@@ -289,6 +290,7 @@ class MarkdownStudio(
             value="",
             selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_FLAVORED,
+            soft_line_break=True,
         )
         self._compose_preview_host = ft.Container(
             expand=True,
@@ -452,7 +454,7 @@ class MarkdownStudio(
             options=[],
             disabled=True,
             visible=False,
-            tooltip="Pick an AI proposal or import to review against the current draft.",
+            tooltip="Pick draft vs draft, an AI proposal, or an import to review against the current draft.",
             on_select=lambda e: self.page.run_task(self._on_compare_candidate_change_async, e),
         )
         _compare_bulk_icon_style = ft.ButtonStyle(
@@ -1907,12 +1909,15 @@ class MarkdownStudio(
                 self._snack("Choose a template.")
                 return
             self.page.pop_dialog()
+            # Let the modal dismiss before opening the native save dialog (Linux/GTK).
+            await asyncio.sleep(0)
             stem = md_path.stem
             try:
                 dest = await self._fp_export_docx.save_file(
                     dialog_title="Export Word document",
                     file_name=f"{stem}.docx",
                     initial_directory=str(config.DOCUMENTS) if config.DOCUMENTS.is_dir() else None,
+                    file_type=ft.FilePickerFileType.CUSTOM,
                     allowed_extensions=["docx"],
                 )
             except BaseException as ex:
@@ -1958,38 +1963,41 @@ class MarkdownStudio(
                 return
             self._snack(f"Exported to {out.name}")
 
-        self.page.show_dialog(
-            ft.AlertDialog(
-                modal=True,
-                title=ft.Text("Export", weight=ft.FontWeight.W_600),
-                content=ft.Container(
-                    width=560,
-                    content=ft.Tabs(
-                        selected_index=0,
-                        tabs=[
-                            ft.Tab(
-                                text="Export to Word",
-                                content=ft.Container(
-                                    content=ft.Column(
-                                        [
-                                            ft.Text(md_path.name, size=12, font_family="monospace"),
-                                            tpl_dd,
-                                        ],
-                                        tight=True,
-                                    ),
-                                    padding=ft.padding.only(top=8),
+        # Yield so the File menu / Material menu overlay can finish closing before we
+        # stack a modal dialog; opening both in the same frame often shows nothing (Flet desktop).
+        await asyncio.sleep(0)
+        try:
+            self.page.show_dialog(
+                ft.AlertDialog(
+                    modal=True,
+                    title=ft.Text("Export", weight=ft.FontWeight.W_600),
+                    content=ft.Container(
+                        width=560,
+                        padding=ft.padding.only(top=8),
+                        content=ft.Column(
+                            [
+                                ft.Text(
+                                    "Export to Word",
+                                    size=13,
+                                    weight=ft.FontWeight.W_500,
+                                    color=config.ON_SURFACE,
                                 ),
-                            ),
-                        ],
+                                ft.Text(md_path.name, size=12, font_family="monospace"),
+                                tpl_dd,
+                            ],
+                            tight=True,
+                            spacing=8,
+                        ),
                     ),
-                ),
-                actions=[
-                    ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
-                    ft.TextButton("Continue…", on_click=lambda _e: self.page.run_task(on_export)),
-                ],
-                actions_alignment=ft.MainAxisAlignment.END,
+                    actions=[
+                        ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
+                        ft.TextButton("Continue…", on_click=lambda _e: self.page.run_task(on_export)),
+                    ],
+                    actions_alignment=ft.MainAxisAlignment.END,
+                )
             )
-        )
+        except BaseException as ex:
+            self._snack(f"Export dialog failed: {ex}")
 
     async def _periodic_file_drift_loop(self) -> None:
         while True:

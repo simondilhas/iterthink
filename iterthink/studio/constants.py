@@ -73,6 +73,11 @@ TAB_HISTORY = 0
 TAB_PRESENT = 1
 TAB_FUTURE = 2
 
+# Review tab: no DB proposal loaded; candidate mirrors compose so Accept still persists.
+REVIEW_MANUAL_CANDIDATE_ACTION_ID = "manual_review"
+# Review candidate dropdown: compare editor draft against an editable copy (no AI snapshot).
+REVIEW_KEY_DRAFT_MIRROR = "__review_draft_mirror__"
+
 # History toolbar: horizontal gap between Older vs Newer version dropdown columns.
 # At ~96 dpi, 76 px ≈ 2 cm total; with equal flex children each dropdown column is ~1 cm narrower.
 HISTORY_COMPARE_DROPDOWN_COLUMNS_GAP_PX = 76

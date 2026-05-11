@@ -103,8 +103,12 @@ jobs:
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
             gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x gstreamer1.0-alsa gstreamer1.0-gl gstreamer1.0-gtk3 \
             gstreamer1.0-qt5 gstreamer1.0-pulseaudio pkg-config libsecret-1-0 libsecret-1-dev \
-            file imagemagick
+            file imagemagick rpm ruby ruby-dev build-essential
           sudo apt-get clean
+
+      - name: Install fpm (Linux)
+        if: matrix.name == 'linux'
+        run: sudo gem install --no-document fpm
 
       - name: Install Rosetta (macOS, Apple Silicon)
         if: matrix.name == 'macos' && runner.arch == 'ARM64'
@@ -247,50 +251,83 @@ jobs:
             --build-version "${BUILD_VERSION}" --build-number "${GITHUB_RUN_NUMBER}"
 
       # ===== PACKAGING =====
+      # All final installers/packages go into ./dist (relative to GITHUB_WORKSPACE)
+      # so upload-artifact@v4 can find them under a single common ancestor.
+
+      - name: Install Inno Setup (Windows)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
 
       - name: Package Windows installer
         if: matrix.name == 'windows'
         shell: pwsh
         run: |
-          Invoke-WebRequest 'https://jrsoftware.org/download.php/is.exe' -OutFile 'C:\b\t\inno.exe'
-          Start-Process 'C:\b\t\inno.exe' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -Wait
-          
-          $iss = @'
+          $ErrorActionPreference = 'Stop'
+
+          $buildDir = Join-Path $env:ITER_REPO 'build\windows'
+          if (-not (Test-Path $buildDir)) {
+            throw "Build output not found at $buildDir"
+          }
+          Write-Host "Packaging from: $buildDir"
+
+          # Output the installer into the GitHub workspace so upload-artifact can find it.
+          $outDir = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+          $iss = @"
           [Setup]
           AppName=Iterthink
-          AppVersion={0}
-          DefaultDirName={{autopf}}\Iterthink
+          AppVersion=$env:BUILD_VERSION
+          DefaultDirName={autopf}\Iterthink
           DefaultGroupName=Iterthink
-          OutputDir={1}
-          OutputBaseFilename=iterthink-{0}-windows-installer
+          OutputDir=$outDir
+          OutputBaseFilename=iterthink-$env:BUILD_VERSION-windows-installer
           Compression=lzma2
           SolidCompression=yes
           DisableProgramGroupPage=yes
           PrivilegesRequired=lowest
-          
+          ArchitecturesInstallIn64BitMode=x64compatible
+
           [Files]
-          Source: "{1}\build\windows\*"; DestDir: "{{app}}"; Flags: ignoreversion recursesubdirs
-          
+          Source: "$buildDir\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
           [Icons]
-          Name: "{{group}}\Iterthink"; Filename: "{{app}}\iterthink.exe"
-          Name: "{{autodesktop}}\Iterthink"; Filename: "{{app}}\iterthink.exe"
-          '@
-          
-          $issContent = $iss -f $env:BUILD_VERSION, $env:ITER_REPO
-          Set-Content "$env:ITER_REPO\installer.iss" $issContent
-          
-          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' "$env:ITER_REPO\installer.iss"
+          Name: "{group}\Iterthink"; Filename: "{app}\iterthink.exe"
+          Name: "{autodesktop}\Iterthink"; Filename: "{app}\iterthink.exe"
+          "@
+
+          $issPath = Join-Path $env:ITER_REPO 'installer.iss'
+          Set-Content -LiteralPath $issPath -Value $iss -Encoding UTF8
+          Write-Host "Wrote installer script: $issPath"
+
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+
+          & $iscc $issPath
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+          $installer = Get-ChildItem -Path $outDir -Filter 'iterthink-*-windows-installer.exe' | Select-Object -First 1
+          if (-not $installer) { throw "Installer was not produced" }
+          Write-Host "Built installer: $($installer.FullName)"
 
       - name: Package Linux AppImage
         if: matrix.name == 'linux'
         run: |
-          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool
-          chmod +x /tmp/appimagetool
-          /tmp/appimagetool --appimage-extract
-          
+          set -euo pipefail
+
+          mkdir -p dist
+
+          # Ubuntu 24.04 runners don't ship libfuse2, so the appimagetool AppImage
+          # can't self-mount. Extract it and run the inner binary instead.
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool.AppImage
+          chmod +x /tmp/appimagetool.AppImage
+          (cd /tmp && ./appimagetool.AppImage --appimage-extract >/dev/null)
+          APPIMAGETOOL=/tmp/squashfs-root/AppRun
+
           mkdir -p AppDir/usr/bin
           cp -r build/linux/* AppDir/usr/bin/
-          
+
           cat > AppDir/iterthink.desktop <<'DESKTOP'
           [Desktop Entry]
           Type=Application
@@ -299,9 +336,17 @@ jobs:
           Icon=iterthink
           Categories=Utility;
           DESKTOP
-          
-          convert -size 256x256 xc:blue AppDir/iterthink.png 2>/dev/null || touch AppDir/iterthink.png
-          
+
+          # ImageMagick 7 uses `magick`; ImageMagick 6 uses `convert`
+          if command -v magick >/dev/null 2>&1; then
+            magick -size 256x256 xc:blue AppDir/iterthink.png
+          elif command -v convert >/dev/null 2>&1; then
+            convert -size 256x256 xc:blue AppDir/iterthink.png
+          else
+            echo "No ImageMagick available" >&2
+            exit 1
+          fi
+
           cat > AppDir/AppRun <<'APPRUN'
           #!/bin/bash
           SELF=$(readlink -f "$0")
@@ -310,23 +355,90 @@ jobs:
           exec "${HERE}/usr/bin/iterthink" "$@"
           APPRUN
           chmod +x AppDir/AppRun
-          
-          ARCH=x86_64 ./squashfs-root/AppRun AppDir "iterthink-${BUILD_VERSION}-linux-x86_64.AppImage"
+
+          # Run the extracted binary — no FUSE needed
+          ARCH=x86_64 "$APPIMAGETOOL" AppDir "dist/iterthink-${BUILD_VERSION}-linux-x86_64.AppImage"
+
+      - name: Package Fedora RPM
+        if: matrix.name == 'linux'
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+
+          STAGE="$(mktemp -d)"
+          mkdir -p \
+            "$STAGE/usr/lib/iterthink" \
+            "$STAGE/usr/bin" \
+            "$STAGE/usr/share/applications" \
+            "$STAGE/usr/share/icons/hicolor/256x256/apps"
+
+          # App payload
+          cp -r build/linux/* "$STAGE/usr/lib/iterthink/"
+
+          # Launcher symlink (so `iterthink` is on PATH)
+          ln -s /usr/lib/iterthink/iterthink "$STAGE/usr/bin/iterthink"
+
+          # Desktop entry
+          cat > "$STAGE/usr/share/applications/iterthink.desktop" <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Iterthink
+          Exec=iterthink
+          Icon=iterthink
+          Categories=Utility;
+          DESKTOP
+
+          # Icon: reuse the AppImage one if it exists, else generate
+          if [ -f AppDir/iterthink.png ]; then
+            cp AppDir/iterthink.png "$STAGE/usr/share/icons/hicolor/256x256/apps/iterthink.png"
+          elif command -v magick >/dev/null 2>&1; then
+            magick -size 256x256 xc:blue "$STAGE/usr/share/icons/hicolor/256x256/apps/iterthink.png"
+          else
+            convert -size 256x256 xc:blue "$STAGE/usr/share/icons/hicolor/256x256/apps/iterthink.png"
+          fi
+
+          # RPM versions can't contain '+', sanitize
+          RPM_VERSION="${BUILD_VERSION//+/.}"
+
+          fpm -s dir -t rpm \
+            -n iterthink \
+            -v "$RPM_VERSION" \
+            --license "Proprietary" \
+            --description "Iterthink desktop app" \
+            --rpm-summary "Iterthink" \
+            --depends gtk3 \
+            --depends libsecret \
+            --depends mpv-libs \
+            -p "dist/iterthink-${BUILD_VERSION}-fedora-x86_64.rpm" \
+            -C "$STAGE" \
+            usr
+
+          ls -la dist/
 
       - name: Package macOS DMG
         if: matrix.name == 'macos'
         run: |
+          set -euo pipefail
+          mkdir -p dist
           APP=$(find build/macos -name "*.app" | head -n1)
-          hdiutil create -volname "Iterthink" -srcfolder "$APP" -ov -format UDZO "iterthink-${BUILD_VERSION}-macos.dmg"
+          hdiutil create -volname "Iterthink" -srcfolder "$APP" -ov -format UDZO "dist/iterthink-${BUILD_VERSION}-macos.dmg"
+
+      - name: List artifacts (debug)
+        shell: bash
+        run: |
+          if [ -d dist ]; then
+            echo "--- dist/ contents ---"
+            ls -la dist/ || true
+          else
+            echo "No dist/ directory found in $(pwd)"
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}-package
-          path: |
-            ${{ matrix.name == 'windows' && format('{0}/iterthink-*-windows-installer.exe', env.ITER_REPO) || '' }}
-            ${{ matrix.name == 'linux' && 'iterthink-*-linux-x86_64.AppImage' || '' }}
-            ${{ matrix.name == 'macos' && 'iterthink-*-macos.dmg' || '' }}
+          path: dist/*
           if-no-files-found: error
 
   release:

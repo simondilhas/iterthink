@@ -21,6 +21,37 @@ _PDF_COMPARE_SCROLL_SOURCES = ("pdf_original", "docx_original")
 
 
 class MarkdownStudioAssetCompare:
+    def _release_pdf_compare_disk_refs(self) -> None:
+        """Drop rendered PDF page controls (``Image`` src may reference store/cache paths)."""
+        for name in (
+            "_compare_pdf_left_lv",
+            "_compare_pdf_right_lv",
+            "_future_pdf_left_lv",
+            "_future_pdf_right_lv",
+        ):
+            lv = getattr(self, name, None)
+            if lv is not None and isinstance(lv, ft.ListView):
+                lv.controls.clear()
+                if _ctrl_on_page(lv):
+                    lv.update()
+        pc = getattr(self, "_plan_compare", None)
+        if pc is not None:
+            ov = getattr(pc, "overlay_list", None)
+            if ov is not None and isinstance(ov, ft.ListView):
+                ov.controls.clear()
+                if _ctrl_on_page(ov):
+                    ov.update()
+
+    def _detach_pdf_import_ui_for_store_delete(self) -> None:
+        """Release viewers before ``purge_document_store_dirs`` removes PDF assets under STORE."""
+        self._compare_pdf_peer_snapshot_id = None
+        if hasattr(self, "_pending_post_import_history_vid"):
+            self._pending_post_import_history_vid = None
+        self._compare_candidate_source = "draft"
+        self._release_pdf_compare_disk_refs()
+        self._sync_compare_pdf_layers_visibility()
+        self._sync_future_pdf_layers_visibility()
+
     def _on_future_pdf_import_md_change(self, _e: ft.ControlEvent) -> None:
         v = self._future_pdf_import_md_tf.value or ""
         if (self.editor.value or "") == v and (self._compare_editor.value or "") == v:

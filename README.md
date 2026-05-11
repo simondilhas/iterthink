@@ -2,13 +2,13 @@
 
 **See every change. Understand the impact. Act on what matters.**
 
-AI edits are silent by default. You see the result, never the delta. iterthink makes the delta visible — word by word — and tells you whether the meaning survived and how it impacts the project.
+AI edits are silent by default. You see the result, never the delta. iterthink makes the delta visible — word by word — and tells you whether the meaning survived and how it impacts the text.
 
 ---
 
 ## What iterthink does
 
-iterthink is a local review layer for documents. It covers four distinct workflows — each one building on the last.
+iterthink is the desktop first review layer for documents. It covers three distinct workflows — each one building on the last.
 
 ---
 
@@ -17,9 +17,10 @@ iterthink is a local review layer for documents. It covers four distinct workflo
 Every edit is captured. Every version is stored. Compare any two states of a document side by side — word-level highlights, not just line diffs. Paragraphs that moved are tracked as moved, not deleted and reinserted. Nothing gets lost silently.
 
 - Word-level inline diff — additions and deletions highlighted inline
-- Paragraph-level change classification: `unchanged` · `minor` · `major` · `rewritten` · `new` · `deleted`
-- Full version timeline — every save, every AI action, manually labeled snapshots
 - Compare any two versions at any time
+- Paragraph-level change classification (per new paragraph slot) in the compare column with: — · Refined · Modified · Rephrased · Added · Removed
+- Full version timeline — every save, every AI action
+
 
 ---
 
@@ -41,25 +42,11 @@ Run predefined prompts on any paragraph. Discuss, rewrite, shorten, translate �
 
 Not all changes are equal. iterthink uses local embeddings and an LLM tiebreak to classify whether a paragraph change was cosmetic or substantive — without sending your documents to a cloud service.
 
-- **`STABLE`** — core meaning and intent held
-- **`NEW`** — main message, recommendation, or stance materially changed
-
 Cosine similarity on local embeddings handles the clear cases fast. The LLM is only called in the uncertain band — minimizing cost and latency while maximizing accuracy.
 
 This is the judgment layer. It tells you not just *what* changed, but *whether it matters*.
 
 When a change matters, trigger a follow-up workflow directly through [{yourcompany}os](https://yourcompanyos.io).
-
----
-
-### 4. Check a document against your project
-
-Upload your project documents as context. Then check any paragraph — does this spec still align with the brief? Does this clause contradict something agreed last week? Does the new version introduce a conflict with another document?
-
-- RAG over your project folder — one document checked against all others
-- Surfaces contradictions, gaps, and alignment issues
-- Runs locally — your project documents never leave your machine
-- Especially useful in AEC, legal, and research workflows where documents reference each other
 
 ---
 
@@ -74,55 +61,12 @@ Upload your project documents as context. Then check any paragraph — does this
 
 ## Get started
 
-### Linux
-
-
-
-**You'll need:** [Python 3.11+](https://www.python.org/downloads/) and an AI backend — either a local Ollama install or an API key.
-
-**Linux x86_64 — AppImage:** Download `iterthink-0.0.0+24-linux-x86_64.AppImage` from [Releases](https://github.com/simondilhas/iterthink/releases) (adjust the filename if your build number differs), then:
-
-1. **Put it in a folder** — e.g. keep AppImages under `~/Applications`:
-
-   ```bash
-   mkdir -p ~/Applications
-   mv ~/Downloads/iterthink-0.0.0+24-linux-x86_64.AppImage ~/Applications/
-   ```
-
-2. **Run it** — make it executable and launch once (from a terminal is fine):
-
-   ```bash
-   chmod +x ~/Applications/iterthink-0.0.0+24-linux-x86_64.AppImage
-   ~/Applications/iterthink-0.0.0+24-linux-x86_64.AppImage
-   ```
-
-3. **Add a launcher to your app menu** — open a terminal, ensure the folder exists, then edit the desktop file with **nano**:
-
-   ```bash
-   mkdir -p ~/.local/share/applications
-   nano ~/.local/share/applications/iterthink.desktop
-   ```
-
-   In nano, paste the block below (adjust `Exec=` if your AppImage path or filename differs from step 2). Save with **Ctrl+O**, **Enter**, then exit with **Ctrl+X**.
-
-   ```ini
-   [Desktop Entry]
-   Type=Application
-   Name=iterthink
-   Comment=Review layer for documents
-   Exec=$HOME/Applications/iterthink-{replace with your version}+24-linux-x86_64.AppImage
-   Icon=application-x-executable
-   Categories=Office;
-   Terminal=false
-   ```
-
-   Then run `update-desktop-database ~/.local/share/applications` if your desktop does not pick it up immediately (log out and back in if needed).
-
-You still need an AI backend (Ollama or an API key); see **First launch** and **AI backend options** below.
 
 ### Install from Github
 
-Install from [GitHub](https://github.com/simondilhas/iterthink) (latest default branch, usually `main`).
+Prerequisites: Python 3.11+ · an AI backend (local Ollama or a cloud API key)
+
+Install from [GitHub](https://github.com/simondilhas/iterthink) (latest default branch: `main`).
 
 **Linux and macOS** (bash/zsh — Terminal, iTerm, etc.):
 
@@ -184,13 +128,17 @@ Using a cloud API key (OpenAI, Anthropic, Gemini) sends your text to that provid
 
 ---
 
-## Roadmap
+## Roadmap (not in order)
 
-- IFC model comparison — see what changed between two BIM models
-- Windows and macOS installers
+- Evaluate not only change, but consistency against other files (RAG functionality)
+- Compare Excel sheets
+- Compare PDF Plans (Floorplans, Sections)
+- IFC model comparison — see what changed between two BIM model versions
+- Linux, Windows and macOS installers
 - Sync and version history across devices
 - Team review features for collaborative workflows
 - Deeper [{yourcompany}os](https://yourcompanyos.io) integration — from change detection to closed decisions
+- Redesign with Dart (instead of python and flet) for better performance.
 
 ---
 

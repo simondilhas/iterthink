@@ -131,7 +131,7 @@ margin_actions:
     user_template: "Turn into a LinkedIn post:\n\n{text}"
 
   - id: grammar
-    label: Correct grammar
+    label: Correct grammar & spelling
     topic: change
     system_prompt: >-
       Keep the input language—never translate. Your entire reply must be in the same language as the user's text.

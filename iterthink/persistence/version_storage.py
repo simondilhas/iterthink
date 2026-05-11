@@ -25,6 +25,7 @@ SnapshotReason = Literal[
     "ai_apply",
     "ai_staged",
     "ai_proposal",
+    "review_edit",
     "before_apply",
     "import",
 ]

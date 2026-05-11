@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import re
 import statistics
+from collections import defaultdict
 from pathlib import Path
 from typing import Literal
 
@@ -105,6 +107,121 @@ _INLINE_BULLET = re.compile(r"^[•·▪▸►◦]\s*(.+)$")
 _MARKDOWNISH_BULLET = re.compile(r"^[\-\*\+]\s+(.+)$")
 _NUMBERED_LINE = re.compile(r"^(\d{1,3})[\.\)]\s+(.*)$")
 
+# Repetition-based strip: same (y_bucket, strip fingerprint) on enough distinct pages.
+# Fingerprint folds digit runs to one placeholder so "Footer 5" / "Footer 6" merge; the
+# whole PDF line is skipped when its fingerprint matches. Very short non-numeric lines
+# are ignored for matching (reduces stripping punctuation-only repeats).
+_PDF_STRIP_MIN_PAGE_FRACTION = 0.45
+_PDF_STRIP_MIN_TEXT_LEN = 4
+_PDF_Y_BUCKET_SCALE = 100
+_WS_COLLAPSE = re.compile(r"\s+")
+_DIGIT_RUNS = re.compile(r"\d+")
+_PAGE_NUMERIC_ONLY = re.compile(r"^\d{1,6}$")
+
+
+def _normalize_pdf_line_text(s: str) -> str:
+    return _WS_COLLAPSE.sub(" ", s.strip())
+
+
+def _pdf_strip_fingerprint(norm: str) -> str | None:
+    """
+    Text used in (y, text) strip keys: whitespace-normalized, digit runs → '#'.
+    Returns None if the line should not participate in repetition detection.
+    """
+    folded = _DIGIT_RUNS.sub("#", norm)
+    if len(folded) >= _PDF_STRIP_MIN_TEXT_LEN:
+        return folded
+    if _PAGE_NUMERIC_ONLY.match(norm):
+        return "__page_digits__"
+    return None
+
+
+def _pdf_strip_page_threshold(n_pages: int) -> int:
+    """Minimum distinct page count for a (y_bucket, text) key to be stripped."""
+    if n_pages < 2:
+        return 10**9
+    return max(2, int(math.ceil(_PDF_STRIP_MIN_PAGE_FRACTION * n_pages)))
+
+
+def _pdf_line_strip_key(line: dict, page_height: float) -> tuple[int, str] | None:
+    """Key for repetition matching: vertical bucket and strip fingerprint (digits folded)."""
+    spans = line.get("spans") or []
+    if not spans:
+        return None
+    raw = "".join(sp.get("text", "") for sp in spans)
+    norm = _normalize_pdf_line_text(raw)
+    fp = _pdf_strip_fingerprint(norm)
+    if fp is None:
+        return None
+    bbox = line.get("bbox") or [0.0, 0.0, 0.0, 0.0]
+    cy = (float(bbox[1]) + float(bbox[3])) / 2.0
+    ph = max(float(page_height), 1e-6)
+    y_frac = max(0.0, min(1.0, cy / ph))
+    bk = int(round(y_frac * _PDF_Y_BUCKET_SCALE))
+    bk = max(0, min(_PDF_Y_BUCKET_SCALE, bk))
+    return (bk, fp)
+
+
+def _pdf_repeated_strip_keys_dict(doc) -> frozenset[tuple[int, str]]:
+    """
+    Lines whose (relative-Y bucket, strip fingerprint) appear on enough distinct pages
+    (running heads / footers). Counts use unique page indices per key.
+    """
+    n = len(doc)
+    need = _pdf_strip_page_threshold(n)
+    key_pages: dict[tuple[int, str], set[int]] = defaultdict(set)
+    for pi in range(n):
+        page = doc[pi]
+        ph = float(page.rect.height)
+        td = page.get_text("dict") or {}
+        for b in td.get("blocks", []):
+            if b.get("type") != 0:
+                continue
+            for line in b.get("lines", []):
+                key = _pdf_line_strip_key(line, ph)
+                if key is None:
+                    continue
+                key_pages[key].add(pi)
+    return frozenset(k for k, pages in key_pages.items() if len(pages) >= need)
+
+
+def _pdf_repeated_strip_keys_blocks(doc) -> frozenset[tuple[int, str]]:
+    """Same repetition rule using ``get_text(\"blocks\")`` lines (one key per block string)."""
+    n = len(doc)
+    need = _pdf_strip_page_threshold(n)
+    key_pages: dict[tuple[int, str], set[int]] = defaultdict(set)
+    for pi in range(n):
+        page = doc[pi]
+        ph = float(page.rect.height)
+        for b in page.get_text("blocks") or []:
+            key = _pdf_block_strip_key(b, ph)
+            if key is None:
+                continue
+            key_pages[key].add(pi)
+    return frozenset(k for k, pages in key_pages.items() if len(pages) >= need)
+
+
+def _pdf_block_strip_key(block: list | tuple, page_height: float) -> tuple[int, str] | None:
+    if not isinstance(block, (list, tuple)) or len(block) < 5:
+        return None
+    t = block[4]
+    if not isinstance(t, str):
+        return None
+    norm = _normalize_pdf_line_text(t)
+    fp = _pdf_strip_fingerprint(norm)
+    if fp is None:
+        return None
+    try:
+        y0, y1 = float(block[1]), float(block[3])
+    except (TypeError, ValueError):
+        return None
+    cy = (y0 + y1) / 2.0
+    ph = max(float(page_height), 1e-6)
+    y_frac = max(0.0, min(1.0, cy / ph))
+    bk = int(round(y_frac * _PDF_Y_BUCKET_SCALE))
+    bk = max(0, min(_PDF_Y_BUCKET_SCALE, bk))
+    return (bk, fp)
+
 
 def _strip_inline_bullet(text: str) -> str | None:
     m = _INLINE_BULLET.match(text)
@@ -120,19 +237,31 @@ def _pdf_dict_to_markdown(src: Path) -> str:
     """
     Extract PDF using ``Page.get_text(\"dict\")``: reading order, font-size headings,
     bullets / numbered lists, and paragraph merging from vertical gaps.
+
+    Repeated running heads/footers: lines whose strip fingerprint (digits folded to ``#``)
+    and relative vertical bucket match on enough distinct pages are omitted entirely.
+    Single-page
+    PDFs never strip. ``get_text(\"text\")`` fallback in legacy cannot apply this rule.
     """
     import fitz
 
     doc = fitz.open(str(src))
     page_chunks: list[str] = []
     try:
+        strip_keys = _pdf_repeated_strip_keys_dict(doc)
+
         all_sizes: list[float] = []
         for pi in range(len(doc)):
-            td = doc[pi].get_text("dict") or {}
+            page = doc[pi]
+            ph = float(page.rect.height)
+            td = page.get_text("dict") or {}
             for b in td.get("blocks", []):
                 if b.get("type") != 0:
                     continue
                 for line in b.get("lines", []):
+                    sk = _pdf_line_strip_key(line, ph)
+                    if sk is not None and sk in strip_keys:
+                        continue
                     for sp in line.get("spans", []):
                         z = sp.get("size") or 0
                         if z and float(z) > 0:
@@ -147,11 +276,15 @@ def _pdf_dict_to_markdown(src: Path) -> str:
         for pi in range(len(doc)):
             page_num = pi + 1
             page = doc[pi]
+            ph = float(page.rect.height)
             td = page.get_text("dict") or {}
             blocks = [b for b in td.get("blocks", []) if b.get("type") == 0]
             flat: list[tuple[float, float, float, float, dict]] = []
             for b in blocks:
                 for line in b.get("lines", []):
+                    sk = _pdf_line_strip_key(line, ph)
+                    if sk is not None and sk in strip_keys:
+                        continue
                     bbox = line.get("bbox") or [0.0, 0.0, 0.0, 0.0]
                     x0, y0, _x1, y1 = bbox[0], bbox[1], bbox[2], bbox[3]
                     flat.append((y0, x0, y1, line))
@@ -291,29 +424,37 @@ def _pdf_to_markdown_legacy(src: Path) -> str:
     Plain PyMuPDF ``get_text`` extraction (fallback).
 
     Inserts ``<!-- page:N -->`` (1-based) before each page's content for scroll mapping.
+    Omits block lines that match repetition-based strip keys (same rule as dict path,
+    keyed from blocks). Plain ``get_text(\"text\")`` fallback has no positions so
+    repetition stripping cannot apply there.
     """
     import fitz
 
     doc = fitz.open(str(src))
     chunks: list[str] = []
     try:
+        strip_keys = _pdf_repeated_strip_keys_blocks(doc)
         for page_index in range(len(doc)):
             page_num = page_index + 1
             page = doc[page_index]
-            raw = page.get_text("text") or ""
-            paras = [p.strip() for p in raw.split("\n\n") if p.strip()]
+            ph = float(page.rect.height)
+            blocks = page.get_text("blocks") or []
+            lines_filtered: list[str] = []
+            for b in blocks:
+                if isinstance(b, (list, tuple)) and len(b) >= 5:
+                    bk = _pdf_block_strip_key(b, ph)
+                    if bk is not None and bk in strip_keys:
+                        continue
+                    t = b[4]
+                    if isinstance(t, str) and t.strip():
+                        lines_filtered.append(t.strip())
+            raw2 = "\n".join(lines_filtered)
+            paras = [p.strip() for p in raw2.split("\n\n") if p.strip()]
+            if not paras and lines_filtered:
+                paras = [" ".join(lines_filtered)]
             if not paras:
-                blocks = page.get_text("blocks") or []
-                lines: list[str] = []
-                for b in blocks:
-                    if isinstance(b, (list, tuple)) and len(b) >= 5:
-                        t = b[4]
-                        if isinstance(t, str) and t.strip():
-                            lines.append(t.strip())
-                raw2 = "\n".join(lines)
-                paras = [p.strip() for p in raw2.split("\n\n") if p.strip()]
-                if not paras and lines:
-                    paras = [" ".join(lines)]
+                raw = page.get_text("text") or ""
+                paras = [p.strip() for p in raw.split("\n\n") if p.strip()]
             body = "\n\n".join(paras) if paras else ""
             marker = f"<!-- page:{page_num} -->"
             if body.strip():
@@ -331,7 +472,10 @@ def pdf_to_markdown(src: Path) -> str:
     PDF → Markdown with ``<!-- page:N -->`` markers.
 
     Primary path: structured PyMuPDF ``dict`` extraction (reading order, font-size headings,
-    bullets / numbered lists, paragraph gaps). Optional: PyMuPDF4LLM. Last resort: plain text.
+    bullets / numbered lists, paragraph gaps). Repeated running heads/footers are dropped when
+    the same strip fingerprint and relative vertical position recur on enough distinct pages.
+    Optional: PyMuPDF4LLM (no repetition-based strip). Last resort: plain ``get_text``;
+    the unstructured text fallback cannot strip by repetition.
     """
 
     def _has_body(md: str) -> bool:

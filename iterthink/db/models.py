@@ -47,6 +47,7 @@ class Document(Base):
     versions: Mapped[list["DocumentVersion"]] = relationship(
         "DocumentVersion",
         back_populates="document",
+        passive_deletes=True,
     )
 
 

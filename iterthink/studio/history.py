@@ -54,6 +54,8 @@ from .constants import (
     COMPARE_PILL_COL_W,
     DIFF_SPAN_CHAR_CAP as _DIFF_SPAN_CHAR_CAP,
     PROJECT_PAGE_URL as _PROJECT_PAGE_URL,
+    REVIEW_KEY_DRAFT_MIRROR,
+    REVIEW_MANUAL_CANDIDATE_ACTION_ID,
     TAB_HISTORY,
     TAB_PRESENT,
     TAB_FUTURE,
@@ -61,6 +63,19 @@ from .constants import (
 from .util import ctrl_on_page as _ctrl_on_page
 
 _log = logging.getLogger(__name__)
+
+
+def _review_action_apply_label(action_id: str) -> str:
+    """Display label for accept/flush snapshots when prompts have no margin action for this id."""
+    if not action_id:
+        return "AI proposal"
+    act = prompts.get_margin_action(action_id)
+    if act:
+        return act.label
+    if action_id == REVIEW_MANUAL_CANDIDATE_ACTION_ID:
+        return "Manual candidate"
+    return action_id
+
 
 # Outer padding only on both History columns so Text and TextField share the same inner width.
 _COMPARE_HISTORY_CELL_PAD = ft.padding.all(8)
@@ -325,22 +340,30 @@ class MarkdownStudioCompareText:
 
         if self._main_tab_index == TAB_FUTURE:
             # ── Review dropdown: ai_proposal / legacy ai_staged + manual imports ─
-            review_opts: list[ft.dropdown.Option] = []
+            snapshot_review_opts: list[ft.dropdown.Option] = []
             if self.current_path:
                 with session_scope() as s:
                     snaps = version_storage.list_snapshots(s, self.current_path.resolve())
                 for sn in snaps:
                     row_text = version_storage.snapshot_dropdown_text(sn)
                     if sn.reason == "ai_proposal":
-                        review_opts.append(
+                        snapshot_review_opts.append(
                             ft.dropdown.Option(
                                 key=str(sn.version_id),
                                 text=f"AI - {row_text}",
                                 style=_st,
                             )
                         )
+                    elif sn.reason == "review_edit":
+                        snapshot_review_opts.append(
+                            ft.dropdown.Option(
+                                key=str(sn.version_id),
+                                text=f"Edited - {row_text}",
+                                style=_st,
+                            )
+                        )
                     elif sn.reason == "ai_staged":
-                        review_opts.append(
+                        snapshot_review_opts.append(
                             ft.dropdown.Option(
                                 key=str(sn.version_id),
                                 text=f"AI - {row_text} (legacy)",
@@ -348,31 +371,45 @@ class MarkdownStudioCompareText:
                             )
                         )
                     elif version_storage.snapshot_bucket(sn) == "import":
-                        review_opts.append(
+                        snapshot_review_opts.append(
                             ft.dropdown.Option(
                                 key=str(sn.version_id),
                                 text=f"Import - {row_text}",
                                 style=_st,
                             )
                         )
+            review_opts: list[ft.dropdown.Option] = [
+                ft.dropdown.Option(
+                    key=REVIEW_KEY_DRAFT_MIRROR,
+                    text="Draft vs draft (editable copy)",
+                    style=_st,
+                ),
+                *snapshot_review_opts,
+            ]
             self._review_candidate_dropdown.options = review_opts
             r_keys = {o.key for o in review_opts}
-            # Default selection: currently-loaded ai_preview vid, else most recent ai_proposal, else first option.
+            # Default selection: loaded proposal vid, else draft-mirror mode, else latest AI snapshot.
             preferred: str | None = None
             if (
                 self._compare_candidate_source == "ai_preview"
                 and self._compare_snapshot_version_id is not None
             ):
                 preferred = str(self._compare_snapshot_version_id)
+            elif (
+                self._compare_candidate_source == "ai_preview"
+                and self._compare_snapshot_version_id is None
+                and self._pending_ai_accept_action_id == REVIEW_MANUAL_CANDIDATE_ACTION_ID
+            ):
+                preferred = REVIEW_KEY_DRAFT_MIRROR
             elif self._latest_ai_proposal_vid is not None:
                 preferred = str(self._latest_ai_proposal_vid)
             if preferred and preferred in r_keys:
                 self._review_candidate_dropdown.value = preferred
-            elif review_opts:
-                self._review_candidate_dropdown.value = review_opts[0].key
+            elif snapshot_review_opts:
+                self._review_candidate_dropdown.value = snapshot_review_opts[0].key
             else:
-                self._review_candidate_dropdown.value = None
-            self._review_candidate_dropdown.disabled = not bool(review_opts)
+                self._review_candidate_dropdown.value = REVIEW_KEY_DRAFT_MIRROR
+            self._review_candidate_dropdown.disabled = False
             if _ctrl_on_page(self._review_candidate_dropdown):
                 self._review_candidate_dropdown.update()
 
@@ -403,6 +440,10 @@ class MarkdownStudioCompareText:
     def _compare_has_pending_bulk_apply(self) -> bool:
         if not self.current_path or not self._compare_right_fields:
             return False
+        # Manual seeded candidate: always allow bulk apply so Approve All stays visible
+        # even before the user has made any edits to the right column.
+        if self._pending_ai_accept_action_id == REVIEW_MANUAL_CANDIDATE_ACTION_ID:
+            return True
         merged = "\n\n".join(tf.value or "" for tf in self._compare_right_fields)
         return merged != (self.editor.value or "")
 
@@ -456,6 +497,21 @@ class MarkdownStudioCompareText:
             v = e.control.value
             if v is None:
                 return
+            if v == REVIEW_KEY_DRAFT_MIRROR:
+                self._flush_review_edits_if_changed()
+                seeded = self.editor.value or ""
+                self._compare_candidate_source = "ai_preview"
+                self._compare_editor.value = seeded
+                self._pending_ai_accept_action_id = REVIEW_MANUAL_CANDIDATE_ACTION_ID
+                self._compare_snapshot_version_id = None
+                self._loaded_proposal_sha = version_storage.content_sha256(seeded)
+                if _ctrl_on_page(self._compare_editor):
+                    self._compare_editor.update()
+                self._refresh_compare_tab_candidate_ui()
+                self._refresh_compare_diff_immediate()
+                self._refresh_compare_bulk_buttons()
+                self._refresh_title_bar()
+                return
             try:
                 vid = int(v)
             except (TypeError, ValueError):
@@ -464,7 +520,7 @@ class MarkdownStudioCompareText:
             self._flush_review_edits_if_changed()
             with session_scope() as s:
                 row = version_storage.get_version_row(s, vid)
-            if row is not None and row.reason in ("ai_proposal", "ai_staged"):
+            if row is not None and row.reason in ("ai_proposal", "ai_staged", "review_edit"):
                 self._select_proposal_as_review_candidate(vid)
             else:
                 # Imports: text-only snapshots use ai_preview for accept flow; PDF/Word keep asset sources.
@@ -552,7 +608,7 @@ class MarkdownStudioCompareText:
             return
         aid = self._pending_ai_accept_action_id or ""
         act = prompts.get_margin_action(aid) if aid else None
-        base_label = act.label if act else (aid or "AI proposal")
+        base_label = act.label if act else _review_action_apply_label(aid)
         label = f"{base_label} - edited"
         try:
             with session_scope() as s:
@@ -560,7 +616,7 @@ class MarkdownStudioCompareText:
                     s,
                     self.current_path.resolve(),
                     body,
-                    "ai_proposal",
+                    "review_edit",
                     display_label=label,
                 )
         except BaseException:
@@ -774,8 +830,7 @@ class MarkdownStudioCompareText:
         """Two DB snapshots for AI Compare accept: document before merge, then after (parent chain)."""
         if not self.current_path:
             return
-        act = prompts.get_margin_action(action_id)
-        apply_label = act.label if act else action_id
+        apply_label = _review_action_apply_label(action_id)
         before_label = "Before accept · all paragraphs" if bulk else f"Before accept · paragraph {para_index + 1}"
         try:
             with session_scope() as s:
@@ -1117,6 +1172,16 @@ class MarkdownStudioCompareText:
             self._refresh_compare_bulk_buttons()
             return
 
+        # Guarantee the change panel is visible before rows reach the client.
+        # _apply_active_tab_ui_state() sets visible=True later, but the listview
+        # update below runs first; if the panel is still False from a prior
+        # non-Review tab visit the rows would be invisible until the state call fires.
+        if self._main_tab_index == TAB_FUTURE and not self._review_change_panel.visible:
+            self._review_change_panel.visible = True
+            self._review_change_panel.expand = True
+            if _ctrl_on_page(self._review_change_panel):
+                self._review_change_panel.update()
+
         self._sync_future_pdf_layers_visibility()
         self._compare_pill_gen += 1
         current_text = self.editor.value or ""
@@ -1311,8 +1376,7 @@ class MarkdownStudioCompareText:
             n_rows = len(split_paragraphs(cand))
         else:
             cand = self._compare_editor.value or ""
-            current = self.editor.value or ""
-            n_rows = len(aligned_review_rows(current, cand))
+            n_rows = len(split_paragraphs(cand))
         if n_rows != len(self._compare_right_fields):
             if self._main_tab_index == TAB_FUTURE:
                 self._rebuild_future_paragraph_ui()
@@ -1405,10 +1469,7 @@ class MarkdownStudioCompareText:
         # Future:  right fields are the AI proposal candidate → in-memory only, no autosave.
         on_future = self._main_tab_index == TAB_FUTURE
         cand = (self.editor.value if not on_future else self._compare_editor.value) or ""
-        if on_future:
-            n_rows = len(aligned_review_rows(self.editor.value or "", cand))
-        else:
-            n_rows = len(split_paragraphs(cand))
+        n_rows = len(split_paragraphs(cand))
         if n_rows != len(self._compare_right_fields):
             if on_future:
                 self._rebuild_future_paragraph_ui()
@@ -1799,6 +1860,11 @@ class MarkdownStudioCompareText:
             reply.update()
 
         if act.topic == TOPIC_CHANGE:
+            # Future/review + KI "Change" tab: candidate is already in context — stage immediately, no eye/dismiss row.
+            if self._main_tab_index == TAB_FUTURE and int(getattr(self, "_ki_topic_index", 0)) == 1:
+                await self._stage_compare_margin_review_async(idx, reply, footer, action_id)
+                return
+
             footer.controls = [
                 ft.IconButton(
                     ft.Icons.VISIBILITY_OUTLINED,

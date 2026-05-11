@@ -325,6 +325,12 @@ def impact_version_chunk_delete_for_version(
     conn.commit()
 
 
+def impact_version_chunk_delete_for_document(conn: sqlite3.Connection, doc_id: int) -> None:
+    """Remove all Impact RAG chunk rows for an ORM ``documents.id`` (no FK to that table)."""
+    conn.execute("DELETE FROM impact_version_chunk WHERE doc_id = ?", (int(doc_id),))
+    conn.commit()
+
+
 def impact_version_chunk_insert_row(
     conn: sqlite3.Connection,
     *,

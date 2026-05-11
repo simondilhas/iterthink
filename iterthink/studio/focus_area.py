@@ -925,27 +925,35 @@ class MarkdownStudioCompose:
                         self._apply_margin_reply_to_selection_async, r, f, aid, sp, sn
                     ),
                 )
-            review_btn = ft.IconButton(
-                ft.Icons.VISIBILITY_OUTLINED,
-                icon_size=ACTION_RAIL_ICON_SIZE,
-                icon_color=config.ON_SURFACE_VARIANT,
-                tooltip="Review: open Compare with this text as candidate",
-                style=action_rail_icon_button_style(),
-                on_click=lambda _e, i=idx, r=reply, f=footer, aid=action_id: self.page.run_task(
-                    self._stage_ai_candidate_async, i, r, f, aid
-                ),
-            )
-            dismiss_btn = ft.IconButton(
-                ft.Icons.CLOSE_ROUNDED,
-                icon_size=ACTION_RAIL_ICON_SIZE,
-                icon_color=config.ON_SURFACE_VARIANT,
-                tooltip="Dismiss",
-                style=action_rail_icon_button_style(),
-                on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
-            )
-            footer.controls = (
-                [apply_btn, review_btn, dismiss_btn] if apply_btn is not None else [review_btn, dismiss_btn]
-            )
+            hide_review_dismiss = self._main_tab_index == TAB_FUTURE and int(
+                getattr(self, "_ki_topic_index", 0)
+            ) == int(_ki_topic_index_for_prompt_topic(TOPIC_CHANGE))
+            if hide_review_dismiss:
+                footer.controls = [apply_btn] if apply_btn is not None else []
+                footer.visible = apply_btn is not None
+            else:
+                review_btn = ft.IconButton(
+                    ft.Icons.VISIBILITY_OUTLINED,
+                    icon_size=ACTION_RAIL_ICON_SIZE,
+                    icon_color=config.ON_SURFACE_VARIANT,
+                    tooltip="Review: open Compare with this text as candidate",
+                    style=action_rail_icon_button_style(),
+                    on_click=lambda _e, i=idx, r=reply, f=footer, aid=action_id: self.page.run_task(
+                        self._stage_ai_candidate_async, i, r, f, aid
+                    ),
+                )
+                dismiss_btn = ft.IconButton(
+                    ft.Icons.CLOSE_ROUNDED,
+                    icon_size=ACTION_RAIL_ICON_SIZE,
+                    icon_color=config.ON_SURFACE_VARIANT,
+                    tooltip="Dismiss",
+                    style=action_rail_icon_button_style(),
+                    on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
+                )
+                footer.controls = (
+                    [apply_btn, review_btn, dismiss_btn] if apply_btn is not None else [review_btn, dismiss_btn]
+                )
+                footer.visible = True
         else:
             footer.controls = [
                 ft.IconButton(
@@ -957,6 +965,6 @@ class MarkdownStudioCompose:
                     on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
                 ),
             ]
-        footer.visible = True
+            footer.visible = True
         if _ctrl_on_page(footer):
             footer.update()

@@ -24,7 +24,12 @@ from iterthink.db.session import session_scope
 from iterthink.persistence import version_storage
 
 from . import ui_theme
-from .constants import TAB_FUTURE, TAB_HISTORY, TAB_PRESENT
+from .constants import (
+    REVIEW_MANUAL_CANDIDATE_ACTION_ID,
+    TAB_FUTURE,
+    TAB_HISTORY,
+    TAB_PRESENT,
+)
 from .util import ctrl_on_page as _ctrl_on_page
 
 
@@ -169,8 +174,8 @@ class MainWorkspaceTabsMixin:
             sub_col.update()
         self._refresh_tab_toolbar()
         self._apply_focus_preview_mode()
-        if hasattr(self, "_sync_impact_ki_context_visibility"):
-            self._sync_impact_ki_context_visibility()
+        if hasattr(self, "_sync_ki_topic_strip_after_workspace_tab_change"):
+            self._sync_ki_topic_strip_after_workspace_tab_change()
 
     def _refresh_review_subtab_strip(self) -> None:
         """Restyle the active/inactive Difference|Impact buttons."""
@@ -366,18 +371,21 @@ class MainWorkspaceTabsMixin:
                     with session_scope() as s:
                         snaps = version_storage.list_snapshots(s, self.current_path.resolve())
                     for sn in snaps:  # newest first
-                        if sn.reason in ("ai_proposal", "ai_staged"):
+                        if sn.reason in ("ai_proposal", "ai_staged", "review_edit"):
                             target_vid = sn.version_id
                             break
                 if target_vid is not None:
                     self._select_proposal_as_review_candidate(target_vid)
                     self._latest_ai_proposal_vid = target_vid
                 else:
-                    # No proposals yet: leave right column empty so left shows current paragraphs
-                    # (all-delete rows) and right stays blank — communicates "no proposal yet".
+                    # No proposals: mirror compose into the candidate so rows are editable (equal/replace),
+                    # and set a synthetic action id so Accept / approve-all still write disk + snapshots.
+                    seeded = self.editor.value or ""
                     self._compare_candidate_source = "ai_preview"
-                    self._compare_editor.value = ""
-                    self._loaded_proposal_sha = version_storage.content_sha256("")
+                    self._compare_editor.value = seeded
+                    self._pending_ai_accept_action_id = REVIEW_MANUAL_CANDIDATE_ACTION_ID
+                    self._compare_snapshot_version_id = None
+                    self._loaded_proposal_sha = version_storage.content_sha256(seeded)
             # Show a loading spinner while the snapshot is loaded and rows are built.
             self._future_rows_listview.controls.clear()
             self._future_rows_listview.controls.append(

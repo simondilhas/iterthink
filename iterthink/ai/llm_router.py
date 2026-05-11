@@ -59,11 +59,19 @@ def _messages_split_system(messages: list[dict[str, str]]) -> tuple[str, list[di
     return "\n\n".join(sys_chunks).strip(), rest
 
 
+def _gemini_model_id_for_url(model: str) -> str:
+    """REST path is ``.../v1beta/models/{id}:generateContent`` — ``id`` is not ``models/...``."""
+    s = (model or "").strip()
+    if s.startswith("models/"):
+        s = s[len("models/") :]
+    return s.replace("/", "-")
+
+
 def _gemini_url_fixed(model: str, api_key: str, stream: bool) -> str:
     from urllib.parse import quote
 
     key_q = quote(api_key, safe="")
-    enc_model = model.replace("/", "-")
+    enc_model = _gemini_model_id_for_url(model)
     if stream:
         return (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -408,7 +416,7 @@ class LlmChatBackend:
             if self._cloud_vendor == "anthropic":
                 return self._cloud_anthropic_model or "claude-3-5-sonnet-20241022"
             if self._cloud_vendor == "google":
-                return self._cloud_google_model or "gemini-1.5-flash"
+                return (self._cloud_google_model or "").strip()
             return self._cloud_openai_model or "gpt-4o-mini"
         return self._local_model
 
@@ -474,6 +482,11 @@ class LlmChatBackend:
                         client, api_key=key, model=m, messages=messages, json_mode=json_mode
                     )
             if self._cloud_vendor == "google":
+                if not (m or "").strip():
+                    raise ValueError(
+                        "No Gemini model id. Settings → Models: enter your Google AI key, click "
+                        "«List Gemini models», choose a model, then Save."
+                    )
                 key = self._require_secret(SECRET_CLOUD_GOOGLE)
                 if stream:
                     return _gemini_stream_full(

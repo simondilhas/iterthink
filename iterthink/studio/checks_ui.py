@@ -133,7 +133,7 @@ class MarkdownStudioChecksUi:
         if not buffers.candidate.strip():
             self._snack(
                 "Analyse needs text on the candidate side (right column). "
-                "On Review → Difference, load or paste a proposal; an empty right column cannot be analysed."
+                "On Review → Difference, type or paste candidate text, or load a proposal from the dropdown."
             )
             print(
                 "[analyse] skipped: candidate (right) text is empty",

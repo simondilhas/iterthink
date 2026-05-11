@@ -19,18 +19,58 @@ from .constants import (
     COLLAPSED_RAIL_WIDTH_PX,
     TAB_HISTORY,
     TAB_FUTURE,
+    TAB_PRESENT,
 )
 from .llm_backend import sync_llm_tier_tab_icons
 from .util import KI_TIERS, ctrl_on_page as _ctrl_on_page, normalize_ki_tier
 
+# KI strip icon tooltips (must match markdown_studio.py topic mode row order).
+_KI_TOPIC_STRIP_LABELS = ("Discuss", "Change", "Analyse", "Act")
+
 
 class MarkdownStudioKiSidebar:
+    def _ki_topic_allowed_indices(self) -> frozenset[int]:
+        tab = int(getattr(self, "_main_tab_index", TAB_PRESENT))
+        if tab == TAB_HISTORY:
+            return frozenset({0})
+        if tab == TAB_PRESENT:
+            return frozenset({0, 1})
+        return frozenset({0, 1, 2, 3})
+
+    def _ki_topic_strip_disabled_tooltip(self, index: int) -> str:
+        if index == 1:
+            return "Switch to Focus Area to use Change."
+        if index == 2:
+            return "Switch to Review to use Analyse."
+        return "Switch to Review to use Act."
+
     def _sync_ki_topic_mode_buttons(self) -> None:
-        ix = self._ki_topic_index
+        ix = int(getattr(self, "_ki_topic_index", 0))
+        allowed = self._ki_topic_allowed_indices()
+        if ix not in allowed:
+            ix = min(allowed)
+            self._ki_topic_index = ix
         u_w = 1.5
+        grey = ft.Colors.with_opacity(0.42, config.ON_SURFACE_VARIANT)
         for i, b in enumerate(self._ki_topic_mode_buttons):
             want = i == ix
-            col = config.HIGHLIGHT if want else config.ON_SURFACE_VARIANT
+            dis = i not in allowed
+            base_tip = _KI_TOPIC_STRIP_LABELS[i] if i < len(_KI_TOPIC_STRIP_LABELS) else ""
+            tip = self._ki_topic_strip_disabled_tooltip(i) if dis else base_tip
+            if getattr(b, "tooltip", None) != tip:
+                b.tooltip = tip
+                if _ctrl_on_page(b):
+                    b.update()
+            if bool(getattr(b, "disabled", False)) != dis:
+                b.disabled = dis
+                if _ctrl_on_page(b):
+                    b.update()
+            if dis:
+                col = grey
+            elif want:
+                col = config.HIGHLIGHT
+            else:
+                col = config.ON_SURFACE_VARIANT
             if getattr(b, "icon_color", None) != col:
                 b.icon_color = col
                 if _ctrl_on_page(b):
@@ -50,6 +90,9 @@ class MarkdownStudioKiSidebar:
         pages = getattr(self, "_ki_tab_pages", None) or []
         max_index = max(0, len(pages) - 1)
         ix = max(0, min(max_index, int(index)))
+        allowed = self._ki_topic_allowed_indices()
+        if ix not in allowed:
+            ix = min(allowed)
         self._ki_topic_index = ix
         if pages:
             new_content = pages[ix]
@@ -60,6 +103,16 @@ class MarkdownStudioKiSidebar:
         self._sync_ki_topic_mode_buttons()
         if hasattr(self, "_sync_impact_ki_context_visibility"):
             self._sync_impact_ki_context_visibility()
+
+    def _sync_ki_topic_strip_after_workspace_tab_change(self) -> None:
+        """After ``_main_tab_index`` updates: reclamp topic, pill page, strip, impact dock.
+
+        Kept on the KI mixin so workspace tab code does not call ``_set_ki_topic`` / impact
+        helpers directly (avoids coupling tab switching to sidebar implementation details).
+        """
+        if not getattr(self, "_ki_topic_mode_buttons", None):
+            return
+        self._set_ki_topic(int(getattr(self, "_ki_topic_index", 0)))
 
     def _rebuild_topic_pills(self) -> None:
         def fill_row(row: ft.Row, topic: str) -> None:
