@@ -2,6 +2,8 @@
 
 **See every change. Understand the impact. Act on what matters.**
 
+![iterthink Focus Area start screen](iterthink/assets/startscreen.png)
+
 AI edits are silent by default. You see the result, never the delta. iterthink makes the delta visible — word by word — and tells you whether the meaning survived and how it impacts the text.
 
 ---
@@ -14,6 +16,10 @@ iterthink is the desktop first review layer for documents. It covers three disti
 
 ### 1. Write and see what changed
 
+![Write workflow: version compare and word-level diff](iterthink/assets/write.png)
+
+
+
 Every edit is captured. Every version is stored. Compare any two states of a document side by side — word-level highlights, not just line diffs. Paragraphs that moved are tracked as moved, not deleted and reinserted. Nothing gets lost silently.
 
 - Word-level inline diff — additions and deletions highlighted inline
@@ -25,6 +31,8 @@ Every edit is captured. Every version is stored. Compare any two states of a doc
 ---
 
 ### 2. Optimize with AI — and see exactly what changed
+
+![AI optimization with margin prompts and diff](iterthink/assets/review.png)
 
 Run predefined prompts on any paragraph. Discuss, rewrite, shorten, translate — then see precisely what the AI changed before you accept it. You stay in control of every word.
 
@@ -39,6 +47,8 @@ Run predefined prompts on any paragraph. Discuss, rewrite, shorten, translate �
 ---
 
 ### 3. Evaluate the impact of the change
+
+![Impact evaluation: semantic classification of changes](iterthink/assets/evaluation.png)
 
 Not all changes are equal. iterthink uses local embeddings and an LLM tiebreak to classify whether a paragraph change was cosmetic or substantive — without sending your documents to a cloud service.
 
@@ -61,8 +71,17 @@ When a change matters, trigger a follow-up workflow directly through [{yourcompa
 
 ## Get started
 
+### Prebuilt installers ([latest release](https://github.com/simondilhas/iterthink/releases/latest))
 
-### Install from Github
+Download the matching asset from the release page:
+
+- `iterthink-0.0.3-windows-installer.exe` (tested, unsigned)
+- `iterthink-0.0.3-fedora-x86_64.rpm` (tested)
+- `iterthink-0.0.3-linux-x86_64.AppImage` (tested)
+- `iterthink-0.0.3-macos.dmg` (untested, unsigned)
+
+
+### Install from GitHub (pip)
 
 Prerequisites: Python 3.11+ · an AI backend (local Ollama or a cloud API key)
 
@@ -85,8 +104,6 @@ py -3.11 -m venv .venv
 pip install -U pip "git+https://github.com/simondilhas/iterthink.git"
 iterthink
 ```
-
-To pin a release or commit, use the `@…` form shown above (same URL pattern inside the quotes).
 
 **First launch:**
 1. Go to **File → Settings → Paths** — point it to your documents folder (default store is `Documents/.iterthink`)
@@ -164,13 +181,13 @@ Using a cloud API key (OpenAI, Anthropic, Gemini) sends your text to that provid
 
 ---
 
-## Part of the Abstract AG platform
+## Part of the Abstract platform
 
 iterthink is the review layer. It sits between your documents and your decisions.
 
 | | |
 |---|---|
-| [Abstract BIM](https://abstractbim.com) | Normalize raw IFC data |
+| [Abstract BIM](https://abstractbim.com) | Normalize architectural BIMs for ML, quantity takeoff or simulations |
 | [Pragmatic BIM](https://pragmaticbim.com) | Define BIM requirements |
 | **iterthink** | Detect change, evaluate impact |
 | [{yourcompany}os](https://yourcompanyos.io) | Act on change |

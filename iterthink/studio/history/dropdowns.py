@@ -356,7 +356,7 @@ class _HistoryDropdownsMixin:
         if _ctrl_on_page(self._compare_editor):
             self._compare_editor.update()
 
-    def _flush_review_edits_if_changed(self) -> None:
+    def _flush_review_edits_if_changed(self, *, refresh_compare_ui: bool = True) -> None:
         """Persist edits to the loaded ai_proposal as a new snapshot when the user leaves it.
 
         SHA-dedup against the snapshot we loaded; no row is written for unchanged sessions.
@@ -397,7 +397,8 @@ class _HistoryDropdownsMixin:
         self._latest_ai_proposal_vid = new_vid
         self._compare_snapshot_version_id = new_vid
         self._loaded_proposal_sha = new_sha
-        self._refresh_compare_tab_candidate_ui()
+        if refresh_compare_ui:
+            self._refresh_compare_tab_candidate_ui()
 
     def _select_snapshot_as_candidate(self, vid: int) -> None:
         """Pick a snapshot row (History or Import). Auto-route to the correct format renderer.

@@ -164,7 +164,8 @@ def _pdf_line_strip_key(line: dict, page_height: float) -> tuple[int, str] | Non
 
 def _plumber_page_to_lines(page: object) -> list[dict]:
     """Build line dicts (``bbox`` + ``spans`` with ``size``) from pdfplumber ``.chars``."""
-    chars = [c for c in (page.chars or []) if (c.get("text") or "").strip()]
+    # Keep space glyphs: ``(c.get("text") or "").strip()`` drops literal spaces and breaks words.
+    chars = [c for c in (page.chars or []) if (c.get("text") or "") != ""]
     if not chars:
         return []
     heights: list[float] = []
@@ -191,25 +192,52 @@ def _plumber_page_to_lines(page: object) -> list[dict]:
 
         def flush_span() -> None:
             nonlocal cur_parts, cur_size, cur_font
-            s = "".join(cur_parts).strip()
-            if s:
-                spans.append({"text": s, "size": cur_size or 11.0})
+            s = "".join(cur_parts)
+            if not s.strip():
+                cur_parts = []
+                cur_size = 0.0
+                cur_font = ""
+                return
+            spans.append({"text": s, "size": cur_size or 11.0})
             cur_parts = []
             cur_size = 0.0
             cur_font = ""
+
+        widths = [
+            max(float(c["x1"]) - float(c["x0"]), 0.001)
+            for c in row
+            if (t := str(c.get("text") or "")) and not t.isspace()
+        ]
+        char_mw = statistics.median(widths) if widths else max(med * 0.45, 3.0)
+        gap_threshold = max(1.2, med * 0.10, char_mw * 0.48)
+        last_x1: float | None = None
 
         for c in row:
             ch = str(c.get("text") or "")
             sz = float(c.get("size") or 0.0)
             fn = str(c.get("fontname") or "")
+            x0, x1 = float(c["x0"]), float(c["x1"])
             if cur_parts and (
                 cur_font != fn or (cur_size > 0 and sz > 0 and abs(cur_size - sz) > 0.75)
             ):
                 flush_span()
+            if ch.isspace():
+                if not cur_parts or cur_parts[-1] != " ":
+                    cur_parts.append(" ")
+                if sz > 0.0:
+                    cur_size = sz
+                cur_font = fn
+                last_x1 = x1
+                continue
+            if last_x1 is not None:
+                gap = x0 - last_x1
+                if gap > gap_threshold and (not cur_parts or cur_parts[-1] != " "):
+                    cur_parts.append(" ")
             cur_parts.append(ch)
             if sz > 0.0:
                 cur_size = sz
             cur_font = fn
+            last_x1 = x1
         flush_span()
         if not spans:
             continue
