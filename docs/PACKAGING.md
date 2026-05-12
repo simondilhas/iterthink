@@ -45,8 +45,8 @@ Artifacts are written under **`build/<platform>/`** (the `build/` directory is r
 
 ### Project-specific settings
 
-- **Entry:** [`main.py`](../main.py) (`flet.run`) — default Flet module name `main`.
-- **App root:** `.` — entire tree is packaged except paths listed under `[tool.flet.app] exclude` in `pyproject.toml` (e.g. `old/`, `packaging/`, `docs/`).
+- **Entry:** [`main.py`](../main.py) (`ft.run`) — default Flet module name `main`.
+- **App root:** `.` — entire tree is packaged except paths listed under `[tool.flet.app] exclude` in `pyproject.toml` (e.g. `old/`, `docs/`, `build/`).
 - **Identity:** `[tool.flet]` `product`, `org`, `company` — adjust `org` before publishing.
 
 ## Ollama
@@ -54,8 +54,6 @@ Artifacts are written under **`build/<platform>/`** (the `build/` directory is r
 The app expects a running Ollama API (default `http://localhost:11434`). Environment variables such as `OLLAMA_HOST` and `OLLAMA_MODEL` are described in [`main.py`](../main.py).
 
 - **Install:** follow [Ollama’s docs](https://docs.ollama.com/) for your OS.
-- **Linux helper:** [`packaging/linux/install_ollama.sh`](../packaging/linux/install_ollama.sh) (optional interactive script; Fedora-first).
-- **Windows bundle installer:** after `flet build windows`, compile [`packaging/windows/iterthink_setup.iss`](../packaging/windows/iterthink_setup.iss) with [Inno Setup 6](https://jrsoftware.org/isinfo.php). The script can run the official `https://ollama.com/install.ps1` as a post-install task. Ollama’s Windows docs describe `OllamaSetup.exe /DIR=...` for a custom directory; **silent Inno flags are not documented** for the GUI installer — verify each Ollama release if you need unattended deployment.
 
 After Ollama is installed, pull at least one model, for example:
 
@@ -63,15 +61,14 @@ After Ollama is installed, pull at least one model, for example:
 ollama pull llama3.2
 ```
 
-## Windows installer workflow (summary)
+## Windows build workflow (summary)
 
 1. Install Visual Studio workload and Flutter prerequisites per Flet docs.
-2. From repo root: `flet build windows`.
-3. Confirm the `.exe` name under `build/windows/` matches `#define MyAppExeName` in `packaging/windows/iterthink_setup.iss` (derived from project name / Flet defaults).
-4. Open the `.iss` in Inno Setup and compile; the installer is emitted under `dist/installer/` relative to the script’s output settings.
+2. From repo root: `flet build windows --yes`.
+3. Distribute the output under `build/windows/` (layout depends on Flet version and template — inspect that directory after a successful build). Users install Ollama separately per Ollama’s documentation.
 
-## Linux installer workflow (summary)
+## Linux build workflow (summary)
 
-1. From repo root: `flet build linux`.
-2. Distribute the contents of `build/linux/` (or the single archive/AppImage Flet produces for your template — inspect `build/linux` after a successful build).
-3. Point users at Ollama installation (script above or official instructions).
+1. From repo root: `flet build linux --yes`.
+2. Distribute the contents of `build/linux/` (or the archive/AppImage Flet produces for your template — inspect `build/linux` after a successful build).
+3. Point users at Ollama installation (official instructions above).

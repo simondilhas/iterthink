@@ -14,7 +14,7 @@ margin_actions:
       No new information. Plain markdown only.
       No fenced code blocks, no emojis, no hashtags.
       Output only the requested content. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Create summary:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: clarify_intent
     label: Clarify intent
@@ -26,7 +26,7 @@ margin_actions:
       Plain markdown only (short paragraphs or bullets).
       No fenced code blocks, no emojis, no hashtags.
       Output only the requested content. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Clarify intent and gaps in:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: devil_advocate
     label: Devil's advocate
@@ -39,7 +39,7 @@ margin_actions:
       Be intellectual and thought-provoking.
       Plain markdown only. No fenced code blocks, no emojis, no hashtags.
       Output only the requested content. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Play devil's advocate on:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: other_angles
     label: Research other angles
@@ -52,7 +52,7 @@ margin_actions:
       beyond the obvious. Plain markdown only.
       No fenced code blocks, no emojis, no hashtags.
       Output only the requested content. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Explore other angles on:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: elevator_pitch
     label: Elevator pitch
@@ -65,7 +65,7 @@ margin_actions:
       of reading time. Keep it conversational.
       Plain markdown only. No fenced code blocks, no emojis, no hashtags.
       Output only the requested content. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Elevator pitch for:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: critical_review
     label: Critical review
@@ -78,7 +78,7 @@ margin_actions:
       Plain markdown only.
       No fenced code blocks, no emojis, no hashtags.
       Output only the requested content. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Critical review of:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: pros_cons
     label: Pros and cons
@@ -90,7 +90,7 @@ margin_actions:
       Thorough and balanced. Plain markdown only.
       No fenced code blocks, no emojis, no hashtags.
       Output only the requested content. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Pros and cons of:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: destroy_idea
     label: Destroy the idea
@@ -102,7 +102,7 @@ margin_actions:
       Question assumptions. Ruthless but constructive.
       Plain markdown only. No fenced code blocks, no emojis, no hashtags.
       Output only the requested content. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Argue against this idea:\n\n{text}"
+    user_template: "\n\n{text}"
 
   # --- change ---
   - id: optimize_style
@@ -116,7 +116,7 @@ margin_actions:
       Plain markdown only; vary sentence length for natural rhythm.
       No fenced code blocks, no inline code, no command-line syntax, no emojis, no hashtags.
       Output only the resulting text. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Optimize style:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: linkedin_post
     label: LinkedIn post
@@ -128,7 +128,7 @@ margin_actions:
       clear takeaway or call to action. Authentic, conversational, easy to scan.
       Plain markdown only; no emojis, no hashtags.
       Output only the resulting text. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Turn into a LinkedIn post:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: grammar
     label: Correct grammar & spelling
@@ -140,7 +140,7 @@ margin_actions:
       Preserve formatting and structure. Plain markdown only.
       No fenced code blocks, no emojis, no hashtags.
       Output only the resulting text. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Fix grammar:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: make_concise
     label: Make concise
@@ -164,7 +164,7 @@ margin_actions:
       Plain markdown only.
       No fenced code blocks, no emojis, no hashtags.
       Output only the resulting text. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Rephrase:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: expand_idea
     label: Expand idea
@@ -176,7 +176,7 @@ margin_actions:
       Plain markdown only.
       No fenced code blocks, no emojis, no hashtags.
       Output only the resulting text. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Expand this idea:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: add_structure
     label: Add structure
@@ -188,7 +188,7 @@ margin_actions:
       helpful; do not add new substantive ideas.
       Plain markdown only. No fenced code blocks, no emojis, no hashtags.
       Output only the resulting text. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Add structure:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: formal_tone
     label: Make formal
@@ -200,7 +200,7 @@ margin_actions:
       Plain markdown only.
       No fenced code blocks, no emojis, no hashtags.
       Output only the resulting text. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Make formal:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: casual_tone
     label: Make casual
@@ -212,7 +212,7 @@ margin_actions:
       Plain markdown only.
       No fenced code blocks, no emojis, no hashtags.
       Output only the resulting text. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Make casual:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: pirate_tone
     label: Pirate mode
@@ -223,7 +223,7 @@ margin_actions:
       Rewrite the text in that voice while keeping it readable and fun.
       Plain markdown only. No fenced code blocks, no hashtags.
       Output only the resulting text. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Pirate mode:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: improve_hook
     label: Improve hook
@@ -235,7 +235,7 @@ margin_actions:
       Aim for intrigue, curiosity, or emotional pull.
       Plain markdown only. No fenced code blocks, no emojis, no hashtags.
       Output only the resulting text. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Improve the hook:\n\n{text}"
+    user_template: "\n\n{text}"
 
   - id: improve_cta
     label: Improve CTA
@@ -247,4 +247,4 @@ margin_actions:
       Plain markdown only.
       No fenced code blocks, no emojis, no hashtags.
       Output only the resulting text. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
-    user_template: "Improve the call to action:\n\n{text}"
+    user_template: "\n\n{text}"
