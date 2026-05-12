@@ -58,13 +58,25 @@ async def main(page: ft.Page) -> None:
         if studio.current_path and studio._is_dirty():
             await studio.save_file(silent=True, snapshot_reason="pre_switch")
 
+    async def _save_on_window_close() -> None:
+        """Disk + DB only; skip Flet UI refresh so native teardown does not race channel updates."""
+        studio._flush_review_edits_if_changed(refresh_compare_ui=False)
+        if studio.current_path and studio._is_dirty():
+            await studio.save_file(
+                silent=True,
+                snapshot_reason="pre_switch",
+                for_shutdown=True,
+            )
+
     def on_window_event(e: ft.WindowEvent) -> None:
         if e.type == ft.WindowEventType.RESIZED:
             studio.reflow_columns()
         elif e.type == ft.WindowEventType.FOCUS:
             if not page.web:
                 page.run_task(studio._check_file_drift_async)
-        elif e.type in (ft.WindowEventType.BLUR, ft.WindowEventType.CLOSE):
+        elif e.type == ft.WindowEventType.CLOSE:
+            page.run_task(_save_on_window_close)
+        elif e.type == ft.WindowEventType.BLUR:
             page.run_task(_save_on_boundary)
 
     page.window.on_event = on_window_event

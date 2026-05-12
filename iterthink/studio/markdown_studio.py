@@ -1816,12 +1816,13 @@ class MarkdownStudio(
         snapshot_reason: version_storage.SnapshotReason | None = None,
         version_display_label: str | None = None,
         persist_snapshot: bool = True,
+        for_shutdown: bool = False,
     ) -> None:
         if not self.current_path:
             if not silent:
                 self._snack("Open or create a note first. Whatever you want to find")
             return
-        self._flush_review_edits_if_changed()
+        self._flush_review_edits_if_changed(refresh_compare_ui=not for_shutdown)
         buf = self._working_document_text()
         reason: version_storage.SnapshotReason = snapshot_reason or ("autosave" if silent else "manual")
         try:
@@ -1850,13 +1851,14 @@ class MarkdownStudio(
                         version_storage.persist_version_snapshot(s, self.current_path.resolve(), buf, reason)
             except BaseException:
                 pass
-        self._refresh_compare_tab_candidate_ui()
-        self._margin_gen += 1
-        if self._main_tab_index == TAB_PRESENT:
-            self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)
-        else:
-            self._refresh_compare_diff_immediate()
-        self._refresh_title_bar()
+        if not for_shutdown:
+            self._refresh_compare_tab_candidate_ui()
+            self._margin_gen += 1
+            if self._main_tab_index == TAB_PRESENT:
+                self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)
+            else:
+                self._refresh_compare_diff_immediate()
+            self._refresh_title_bar()
         if not silent:
             self._snack("Saved.")
 
