@@ -121,6 +121,9 @@ class MarkdownStudio(
         self._compose_margin_menu_snap: tuple[str, int] | None = None
         # Last non-collapsed compose selection (code-unit offsets); survives blur until caret leaves range or buffer edits.
         self._compose_sel_span: tuple[int, int] | None = None
+        # List continuation on Enter: previous buffer + re-entrancy guard while rewriting value.
+        self._editor_prev_for_list_continue: str = ""
+        self._editor_list_continue_applying: bool = False
         # Right-click context menu wrapping the editor; items rebuilt when prompts.yaml reloads.
         self._editor_ctx_menu: ft.ContextMenu | None = None
         self.left_open: bool = True
@@ -285,6 +288,7 @@ class MarkdownStudio(
             selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_FLAVORED,
             soft_line_break=True,
+            md_style_sheet=ui_theme.compose_preview_markdown_style_sheet(),
         )
         self._compose_preview_host = ft.Container(
             expand=True,
@@ -1086,12 +1090,25 @@ class MarkdownStudio(
             icon=ft.Icons.MORE_VERT,
             icon_size=KI_TAB_ICON_PX,
             icon_color=config.ON_SURFACE_VARIANT,
-            tooltip="Sort tree",
+            tooltip="Explorer menu",
             style=ft.ButtonStyle(padding=ft.padding.all(2)),
             height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
             width=float(SIDEBAR_TOOLBAR_ROW_H_PX),
             menu_position=ft.PopupMenuPosition.UNDER,
             items=[
+                ft.PopupMenuItem(
+                    content=ft.Text("Markdown file", size=13),
+                    on_click=lambda e: self.page.run_task(self.new_file, e),
+                ),
+                ft.PopupMenuItem(
+                    content=ft.Text("Create project…", size=13),
+                    on_click=lambda _e: self._show_create_project_dialog(),
+                ),
+                ft.PopupMenuItem(
+                    content=ft.Text("Import…", size=13),
+                    on_click=lambda _e: self.page.run_task(self._tree_import_new_clicked),
+                ),
+                ft.PopupMenuItem(),
                 ft.PopupMenuItem(
                     content=ft.Text("Date (newest first)", size=13),
                     on_click=lambda _e: self._on_tree_sort_selected("mtime_newest"),
@@ -1148,31 +1165,6 @@ class MarkdownStudio(
 
         self.tree_search_field.on_focus = lambda _e: _tree_search_rim(True)
         self.tree_search_field.on_blur = lambda _e: _tree_search_rim(False)
-
-        self._tree_add_menu = ft.PopupMenuButton(
-            icon=ft.Icons.ADD,
-            icon_size=KI_TAB_ICON_PX,
-            icon_color=config.PRIMARY_COLOR,
-            tooltip="New, import…",
-            style=ft.ButtonStyle(padding=ft.padding.all(2)),
-            height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-            width=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-            menu_position=ft.PopupMenuPosition.UNDER,
-            items=[
-                ft.PopupMenuItem(
-                    content=ft.Text("Markdown file", size=13),
-                    on_click=lambda e: self.page.run_task(self.new_file, e),
-                ),
-                ft.PopupMenuItem(
-                    content=ft.Text("Create project…", size=13),
-                    on_click=lambda _e: self._show_create_project_dialog(),
-                ),
-                ft.PopupMenuItem(
-                    content=ft.Text("Import…", size=13),
-                    on_click=lambda _e: self.page.run_task(self._tree_import_new_clicked),
-                ),
-            ],
-        )
 
         self.left_panel = ft.Container(
             width=SIDEBAR_EXPANDED_WIDTH_PX,
@@ -1701,6 +1693,9 @@ class MarkdownStudio(
             self._chat_input.update()
         if self._header_shell and _ctrl_on_page(self._header_shell):
             self._header_shell.update()
+        self._compose_preview_md.md_style_sheet = ui_theme.compose_preview_markdown_style_sheet()
+        if _ctrl_on_page(self._compose_preview_md):
+            self._compose_preview_md.update()
         self._refresh_compare_tab_candidate_ui()
         self._refresh_compose_tab_label()
         self.page.update()

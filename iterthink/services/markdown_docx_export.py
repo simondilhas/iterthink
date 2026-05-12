@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
@@ -269,6 +269,14 @@ def _collect_footnote_defs(fn_block: list[Any]) -> dict[int, list[Any]]:
     return out
 
 
+class _ListRenderMeta(NamedTuple):
+    """Markdown list context while walking tokens (``ordered``, nesting ``depth``, 1-based ``item_index``)."""
+
+    ordered: bool
+    depth: int
+    item_index: int = 0
+
+
 class _Ctx:
     def __init__(
         self,
@@ -287,6 +295,8 @@ class _Ctx:
         self.paragraph_comments = paragraph_comments
         self.comment_author = (comment_author or "").strip()
         self.para_comment_idx = 0
+        # First block in a list item shows bullet/number when the template has no native list styles.
+        self.list_item_mark_pending = True
 
 
 def _attach_export_paragraph_comment(ctx: _Ctx, paragraph: Any) -> None:
@@ -411,11 +421,11 @@ def _render_inline_styled(ctx: _Ctx, paragraph: Any, children: list[Any]) -> Non
             i += 1
 
 
-def _list_depth_parent(list_meta: tuple[bool, int] | None) -> int:
-    return list_meta[1] if list_meta is not None else -1
+def _list_depth_parent(list_meta: _ListRenderMeta | None) -> int:
+    return list_meta.depth if list_meta is not None else -1
 
 
-def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: tuple[bool, int] | None = None) -> None:
+def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: _ListRenderMeta | None = None) -> None:
     i = 0
     n = len(tokens)
     while i < n:
@@ -446,12 +456,19 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: tuple[bool, int] | N
         if t.type == "paragraph_open":
             i += 1
             if list_meta is not None:
-                ordered, depth = list_meta
+                ordered, depth, item_index = list_meta
                 st_name, native = ctx.styles.list_paragraph_style(ctx.doc, ordered=ordered, depth=depth)
                 p = ctx.doc.add_paragraph(style=st_name)
                 if not native:
                     p.paragraph_format.left_indent = Cm(0.55 * (depth + 1))
                     p.paragraph_format.first_line_indent = Cm(-0.32)
+                    if ctx.list_item_mark_pending:
+                        if ordered and item_index > 0:
+                            p.add_run(f"{item_index}.\t")
+                        elif not ordered:
+                            p.add_run("•\t")
+                if ctx.list_item_mark_pending:
+                    ctx.list_item_mark_pending = False
             else:
                 p = ctx.doc.add_paragraph(style=ctx.styles.body)
             if i < n and tokens[i].type == "inline":
@@ -465,6 +482,13 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: tuple[bool, int] | N
         if t.type == "fence":
             body = (t.content or "").rstrip("\n")
             p = ctx.doc.add_paragraph(style=ctx.styles.code_block)
+            if list_meta is not None:
+                ordered, depth, _idx = list_meta
+                _st, native = ctx.styles.list_paragraph_style(ctx.doc, ordered=ordered, depth=depth)
+                if not native:
+                    p.paragraph_format.left_indent = Cm(0.55 * (depth + 1))
+                    p.paragraph_format.first_line_indent = Cm(-0.32)
+                ctx.list_item_mark_pending = False
             lines = body.split("\n")
             for li, line in enumerate(lines):
                 if li:
@@ -488,7 +512,8 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: tuple[bool, int] | N
                     while i < n and tokens[i].type != "list_item_close":
                         inner.append(tokens[i])
                         i += 1
-                    _render_blocks(ctx, inner, (False, parent + 1))
+                    ctx.list_item_mark_pending = True
+                    _render_blocks(ctx, inner, _ListRenderMeta(False, parent + 1, 0))
                     if i < n and tokens[i].type == "list_item_close":
                         i += 1
                 else:
@@ -499,14 +524,17 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: tuple[bool, int] | N
         if t.type == "ordered_list_open":
             parent = _list_depth_parent(list_meta)
             i += 1
+            ord_n = 0
             while i < n and tokens[i].type != "ordered_list_close":
                 if tokens[i].type == "list_item_open":
+                    ord_n += 1
                     i += 1
                     inner = []
                     while i < n and tokens[i].type != "list_item_close":
                         inner.append(tokens[i])
                         i += 1
-                    _render_blocks(ctx, inner, (True, parent + 1))
+                    ctx.list_item_mark_pending = True
+                    _render_blocks(ctx, inner, _ListRenderMeta(True, parent + 1, ord_n))
                     if i < n and tokens[i].type == "list_item_close":
                         i += 1
                 else:

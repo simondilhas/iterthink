@@ -1,7 +1,7 @@
 """Markdown file tree under a root path."""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from iterthink import config
 
@@ -61,16 +61,88 @@ def _scan_excluded(path: Path) -> bool:
         if path.is_relative_to(config.IMPORT_ASSETS_DIR):
             return True
     except (ValueError, AttributeError):
-        if config.STORE_DIR.name in path.parts or ".iterthink" in path.parts:
-            return True
-        if config.IMPORT_ASSETS_DIR.name in path.parts:
-            return True
+        pass
+    if config.STORE_DIR.name in path.parts or ".iterthink" in path.parts:
+        return True
+    if config.IMPORT_ASSETS_DIR.name in path.parts:
+        return True
     return False
 
 
 def is_excluded_from_doc_tree(path: Path) -> bool:
     """True for store paths and other dirs hidden from the documents file tree."""
     return _scan_excluded(path)
+
+
+def list_visible_children(parent: Path) -> tuple[list[Path], list[Path]]:
+    """Immediate subdirectories and ``.md`` files under *parent* (non-recursive).
+
+    Excludes store/import paths via :func:`_scan_excluded`. Non-markdown files are
+    omitted. On ``OSError`` (e.g. permission), returns empty lists.
+    """
+    if not parent.is_dir():
+        return [], []
+    dirs: list[Path] = []
+    files: list[Path] = []
+    try:
+        for p in parent.iterdir():
+            if _scan_excluded(p):
+                continue
+            try:
+                if p.is_dir():
+                    dirs.append(p)
+                elif p.is_file() and p.suffix.lower() == ".md":
+                    files.append(p)
+            except OSError:
+                continue
+    except OSError:
+        return [], []
+    return dirs, files
+
+
+def build_tree_from_md_paths(root: Path, paths: Iterable[Path]) -> dict[str, Any]:
+    """Nested dict tree (same shape as :func:`build_md_tree`) from absolute ``.md`` paths."""
+    tree: dict[str, Any] = {}
+    root_res = root.resolve()
+    for p in paths:
+        p = Path(p)
+        if _scan_excluded(p):
+            continue
+        try:
+            rel = p.resolve().relative_to(root_res)
+        except ValueError:
+            continue
+        if rel.suffix.lower() != ".md":
+            continue
+        add_md_file(tree, rel.parts, p.resolve())
+    return tree
+
+
+def _rel_matches_path_query(rel: Path, q: str) -> bool:
+    return any(q in part.lower() for part in rel.parts)
+
+
+def build_search_md_tree(root: Path, query: str) -> dict[str, Any]:
+    """Like ``build_md_tree`` + ``filter_md_tree`` for search: one ``*.md`` rglob, no ``rglob('*')``.
+
+    A path matches when *query* appears as a substring of any relative path component
+    (directory or filename), mirroring folder-name matches in ``filter_md_tree``.
+    """
+    q = query.strip().lower()
+    if not q or not root.is_dir():
+        return {}
+    root_res = root.resolve()
+    matches: list[Path] = []
+    for p in root_res.rglob("*.md"):
+        if _scan_excluded(p):
+            continue
+        try:
+            rel = p.relative_to(root_res)
+        except ValueError:
+            continue
+        if _rel_matches_path_query(rel, q):
+            matches.append(p)
+    return build_tree_from_md_paths(root_res, matches)
 
 
 def filter_md_tree(node: dict[str, Any], query: str) -> dict[str, Any]:

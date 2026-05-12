@@ -107,6 +107,31 @@ def test_markdown_to_docx_smoke(tmp_path: Path) -> None:
     assert "word/footnotes.xml" in names
 
 
+def test_markdown_to_docx_list_markers_without_template_list_styles(tmp_path: Path) -> None:
+    """``Iterthink Standard`` has no Word list styles; export must still emit bullets/numbers."""
+    tpl = markdown_docx_export.bundled_templates_dir() / "Iterthink Standard.docx"
+    if not tpl.is_file():
+        pytest.skip("Bundled DOCX template missing")
+    md = tmp_path / "note.md"
+    md.write_text("- Alpha\n- Beta\n\n1. One\n2. Two\n", encoding="utf-8")
+    out = tmp_path / "lists.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="A", date_iso="2099-02-02"),
+    )
+    body = _document_xml_text(out)
+    assert "•" in body
+    assert "Alpha" in body
+    assert "Beta" in body
+    assert "1." in body
+    assert "One" in body
+    assert "2." in body
+    assert "Two" in body
+
+
 def test_markdown_to_docx_paragraph_comment(tmp_path: Path) -> None:
     tpl = _minimal_template(tmp_path)
     md = tmp_path / "note.md"

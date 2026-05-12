@@ -20,6 +20,8 @@ from .components import (
     sparkle_margin_popup_menu,
 )
 from iterthink.compare.margin import paragraph_index_at_offset, replace_paragraph_at_index, split_paragraphs
+from .list_continuation import merge_if_list_continuation_after_enter
+from .markdown_preview import markdown_preview_with_task_checkboxes
 from iterthink.ai.llm_router import remote_http_error_message
 from iterthink.ai.ollama_util import chat_response_text, chat_stream_delta, ollama_error_message
 from .constants import (
@@ -458,7 +460,9 @@ class MarkdownStudioCompose:
         in_preview = self._focus_view_mode == "preview"
         self._focus_preview_toggle_btn.visible = on_focus and has_file
         if in_preview:
-            self._compose_preview_md.value = self.editor.value or ""
+            self._compose_preview_md.value = markdown_preview_with_task_checkboxes(
+                self.editor.value or ""
+            )
         self._compose_editor_shell_wrapped.visible = not in_preview
         self._compose_preview_host.visible = in_preview
         self._focus_preview_toggle_btn.icon = (
@@ -612,7 +616,33 @@ class MarkdownStudioCompose:
         self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)
 
     def _on_editor_change(self, _e: ft.ControlEvent) -> None:
+        if self._editor_list_continue_applying:
+            self._editor_prev_for_list_continue = self.editor.value or ""
+            return
+
         self._compose_sel_span = None
+
+        if self._main_tab_index == TAB_PRESENT and self._focus_view_mode == "edit":
+            old = self._editor_prev_for_list_continue
+            new = self.editor.value or ""
+            sel = self.editor.selection
+            if sel is not None and sel.is_collapsed:
+                got = merge_if_list_continuation_after_enter(
+                    old, new, int(sel.start), int(sel.end)
+                )
+                if got is not None:
+                    mval, mcaret = got
+                    self._editor_list_continue_applying = True
+                    try:
+                        self.editor.value = mval
+                        self.editor.selection = ft.TextSelection(mcaret, mcaret)
+                        if _ctrl_on_page(self.editor):
+                            self.editor.update()
+                    finally:
+                        self._editor_list_continue_applying = False
+
+        self._editor_prev_for_list_continue = self.editor.value or ""
+
         self._refresh_title_bar()
         if self._main_tab_index == TAB_PRESENT:
             self._margin_gen += 1

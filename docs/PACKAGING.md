@@ -11,6 +11,10 @@ pip install -r requirements.txt    # installs the package as -e .
 
 Or: `pip install -e .`
 
+## GitHub Actions release (tag push)
+
+Pushing a tag whose name starts with **`v`** (for example `v0.2.0`) runs the **Desktop build** workflow and, when the jobs succeed, publishes a **GitHub Release** with desktop artifacts. Step-by-step: [Release tag quick guide](RELEASE_TAG.md).
+
 ## Flet desktop builds
 
 Build on the **same OS family** as the target (Flet’s [platform matrix](https://flet.dev/docs/publish/)):

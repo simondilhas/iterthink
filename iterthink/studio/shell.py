@@ -22,6 +22,7 @@ from .constants import (
     PANE_HANDLE_STRIP_W_PX,
     PANE_HANDLE_WIDTH_PX,
 )
+from .markdown_preview import markdown_preview_with_task_checkboxes
 from .util import ctrl_on_page as _ctrl_on_page
 
 _HELP_MD_PATH = Path(__file__).resolve().parent / "help.md"
@@ -313,10 +314,11 @@ class MarkdownStudioShell:
                 f"Expected `{_HELP_MD_PATH}` — reinstall or restore **help.md** next to the app package."
             )
         md_view = ft.Markdown(
-            value=md_source,
+            value=markdown_preview_with_task_checkboxes(md_source),
             selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_FLAVORED,
             soft_line_break=True,
+            md_style_sheet=ui_theme.compose_preview_markdown_style_sheet(),
         )
         self.page.show_dialog(
             ft.AlertDialog(
