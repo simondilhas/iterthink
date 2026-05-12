@@ -49,15 +49,7 @@ class MarkdownStudioSidebars:
                     content=ft.Row(
                         [
                             self._tree_search_bar,
-                            ft.Row(
-                                [
-                                    self._tree_add_menu,
-                                    self._tree_explorer_overflow_btn,
-                                ],
-                                tight=True,
-                                spacing=0,
-                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            ),
+                            self._tree_explorer_overflow_btn,
                         ],
                         expand=True,
                         spacing=8,

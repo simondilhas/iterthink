@@ -168,16 +168,16 @@ Using a cloud API key (OpenAI, Anthropic, Gemini) sends your text to that provid
 
 ## Roadmap (not in order)
 
-- Refracture MarkdownStudio
-- Evaluate not only change, but consistency against other files (RAG functionality)
-- Compare Excel sheets
-- Compare PDF Plans (Floorplans, Sections)
-- IFC model comparison — see what changed between two BIM model versions
-- Linux, Windows and macOS installers
-- Sync and version history across devices
-- Team review features for collaborative workflows
-- Deeper [{yourcompany}os](https://yourcompanyos.io) integration — from change detection to closed decisions
-- Redesign with Dart (instead of python and flet) for better performance.
+-[ ] Refracture MarkdownStudio. Code is too complicated.
+-[ ] Evaluate not only change, but consistency against other files (RAG functionality)
+-[ ] Compare Excel sheets
+-[ ] Compare PDF Plans (Floorplans, Sections)
+-[ ] IFC model comparison — see what changed between two BIM model versions
+-[ ] Linux, Windows and macOS installers (started, signing of installers and testing)
+-[ ] Sync and version history across devices
+-[ ] Team review features for collaborative workflows
+-[ ] Deeper [{yourcompany}os](https://yourcompanyos.io) integration — from change detection to closed decisions
+-[ ] Redesign with Dart (instead of python and flet) for better performance.
 
 ---
 

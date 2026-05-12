@@ -19,9 +19,9 @@ from .constants import TAB_FUTURE, TAB_PRESENT
 from .util import ctrl_on_page as _ctrl_on_page
 from .tree import (
     PROJECT_CONTEXT_BASENAME,
-    build_md_tree,
-    filter_md_tree,
+    build_search_md_tree,
     is_excluded_from_doc_tree,
+    list_visible_children,
     project_context_markdown,
 )
 
@@ -62,28 +62,49 @@ def _sorted_file_entries(
     return sorted(entries, key=lambda x: x[0].lower())
 
 
+def _sorted_child_dir_paths(dirs: list[Path], mode: str) -> list[Path]:
+    if mode == "name_az":
+        return sorted(dirs, key=lambda p: p.name.lower())
+    if mode == "name_za":
+        return sorted(dirs, key=lambda p: p.name.lower(), reverse=True)
+    if mode == "mtime_newest":
+        return sorted(dirs, key=lambda p: (-_safe_mtime(p), p.name.lower()))
+    if mode == "mtime_oldest":
+        return sorted(dirs, key=lambda p: (_safe_mtime(p), p.name.lower()))
+    return sorted(dirs, key=lambda p: p.name.lower())
+
+
+def _sorted_child_md_paths(paths: list[Path], mode: str) -> list[Path]:
+    if mode == "name_az":
+        return sorted(paths, key=lambda p: p.name.lower())
+    if mode == "name_za":
+        return sorted(paths, key=lambda p: p.name.lower(), reverse=True)
+    if mode == "mtime_newest":
+        return sorted(paths, key=lambda p: (-_safe_mtime(p), p.name.lower()))
+    if mode == "mtime_oldest":
+        return sorted(paths, key=lambda p: (_safe_mtime(p), p.name.lower()))
+    return sorted(paths, key=lambda p: p.name.lower())
+
+
 def first_markdown_in_tree(root: Path, sort_mode: ExplorerTreeSortMode = "name_az") -> Path | None:
-    """First ``.md`` path in DFS order matching the sidebar (``build_md_tree`` + sort mode)."""
+    """First ``.md`` path in DFS order matching the lazy sidebar (``list_visible_children`` + sort mode)."""
     if not root.is_dir():
         return None
-    tree = build_md_tree(root)
-    if not tree:
-        return None
     mode = sort_mode if sort_mode in ("name_az", "name_za", "mtime_newest", "mtime_oldest") else "name_az"
+    root_res = root.resolve()
 
-    def walk(node: dict[str, Any], parent_path: Path) -> Path | None:
-        for dirname in _sorted_dirnames(node, parent_path, mode):
-            sub = node[dirname]
-            folder_path = parent_path / dirname
-            hit = walk(sub, folder_path)
+    def walk(parent: Path) -> Path | None:
+        dirs, files = list_visible_children(parent)
+        for d in _sorted_child_dir_paths(dirs, mode):
+            hit = walk(d)
             if hit is not None:
                 return hit
-        files = node.get("_files", [])
-        for _fname, fpath in _sorted_file_entries(list(files), mode):
-            return fpath
+        md_sorted = _sorted_child_md_paths(files, mode)
+        if md_sorted:
+            return md_sorted[0]
         return None
 
-    return walk(tree, root)
+    return walk(root_res)
 
 
 class MarkdownStudioExplorer:
@@ -466,6 +487,11 @@ class MarkdownStudioExplorer:
         await asyncio.sleep(0)
         self._show_delete_folder_dialog(path)
 
+    async def _defer_show_move_file_dialog(self, path: Path) -> None:
+        """Open move dialog after the tree popup menu has closed (Flet event / dialog stack ordering)."""
+        await asyncio.sleep(0)
+        self._show_move_file_dialog(path)
+
     def _tree_delete_target_is_open_note(self, rp: Path) -> bool:
         """True when ``rp`` is the note currently open in the editor (symlink-safe)."""
         cur = self.current_path
@@ -772,6 +798,7 @@ class MarkdownStudioExplorer:
         )
 
         async def apply_move(_e: ft.ControlEvent | None = None) -> None:
+            await asyncio.sleep(0)
             raw_key = folder_dd.value
             key = (raw_key or "").strip()
             if key not in keys:
@@ -792,6 +819,8 @@ class MarkdownStudioExplorer:
                 return
             if new_path == old_resolved:
                 self.page.pop_dialog()
+                if _ctrl_on_page(self.page):
+                    self.page.update()
                 return
             if new_path.exists():
                 self._snack("A file with that name already exists in that folder.")
@@ -838,12 +867,17 @@ class MarkdownStudioExplorer:
                     self.current_path = new_resolved
 
             self.page.pop_dialog()
+            if _ctrl_on_page(self.page):
+                self.page.update()
             self._rebuild_tree_ui()
             if _ctrl_on_page(self.tree_column):
                 self.tree_column.update()
             self._refresh_compare_tab_candidate_ui()
             self._refresh_title_bar()
             self._snack("File moved.")
+
+        def on_move_click(_e: ft.ControlEvent | None = None) -> None:
+            self.page.run_task(apply_move)
 
         self.page.show_dialog(
             ft.AlertDialog(
@@ -852,7 +886,7 @@ class MarkdownStudioExplorer:
                 content=folder_dd,
                 actions=[
                     ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
-                    ft.TextButton("Move", on_click=lambda _e: self.page.run_task(apply_move)),
+                    ft.TextButton("Move", on_click=on_move_click),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )
@@ -1106,7 +1140,7 @@ class MarkdownStudioExplorer:
                 ),
                 ft.PopupMenuItem(
                     content=ft.Text("Move to folder…", size=13),
-                    on_click=lambda _e, p=fp: self._show_move_file_dialog(p),
+                    on_click=lambda _e, p=fp: self.page.run_task(self._defer_show_move_file_dialog, p),
                 ),
                 ft.PopupMenuItem(
                     content=ft.Text("Delete file…", size=13),
@@ -1172,12 +1206,11 @@ class MarkdownStudioExplorer:
 
     def _make_tree_folder_title_row(self, dirname: str, folder_path: Path) -> ft.Control:
         fp = folder_path
-        add_menu = ft.PopupMenuButton(
-            icon=ft.Icons.ADD,
+        menu_btn = ft.PopupMenuButton(
+            icon=ft.Icons.MORE_VERT,
             icon_size=18,
-            icon_color=config.PRIMARY_COLOR,
-            tooltip="Add in this folder",
-            style=ft.ButtonStyle(padding=ft.padding.all(2)),
+            icon_color=config.ON_SURFACE_VARIANT,
+            tooltip="Folder actions",
             items=[
                 ft.PopupMenuItem(
                     content=ft.Text("New markdown…", size=13),
@@ -1191,14 +1224,7 @@ class MarkdownStudioExplorer:
                     content=ft.Text("Import…", size=13),
                     on_click=lambda _e, p=fp: self.page.run_task(self._tree_import_new_into_folder, p),
                 ),
-            ],
-        )
-        menu_btn = ft.PopupMenuButton(
-            icon=ft.Icons.MORE_VERT,
-            icon_size=18,
-            icon_color=config.ON_SURFACE_VARIANT,
-            tooltip="Folder actions",
-            items=[
+                ft.PopupMenuItem(),
                 ft.PopupMenuItem(
                     content=ft.Text("Rename…", size=13),
                     on_click=lambda _e, p=fp: self._show_rename_path_dialog(p, is_dir=True),
@@ -1210,15 +1236,7 @@ class MarkdownStudioExplorer:
             ],
         )
         actions_wrap = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Container(content=add_menu, padding=ft.padding.only(right=2)),
-                    ft.Container(content=menu_btn),
-                ],
-                tight=True,
-                spacing=0,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
+            content=menu_btn,
             opacity=0.0,
             animate_opacity=150,
         )
@@ -1245,6 +1263,46 @@ class MarkdownStudioExplorer:
             on_hover=lambda e: self._on_tree_file_row_hover(e, actions_wrap),
         )
 
+    def _render_lazy_folder_children(self, folder_path: Path, depth: int) -> list[ft.Control]:
+        sort_mode = getattr(self, "_tree_sort_mode", "name_az")
+        dirs, files = list_visible_children(folder_path)
+        ctrls: list[ft.Control] = []
+        for d in _sorted_child_dir_paths(dirs, sort_mode):
+            ctrls.append(self._make_lazy_folder_expansion_tile(d, depth + 1))
+        for fp in _sorted_child_md_paths(files, sort_mode):
+            ctrls.append(self._make_tree_file_row(fp.name, fp))
+        return ctrls
+
+    def _make_lazy_folder_expansion_tile(self, folder_path: Path, depth: int) -> ft.Control:
+        inner_col = ft.Column([], tight=True, spacing=0)
+        pad = ft.Container(
+            content=inner_col,
+            padding=ft.Padding.only(left=8),
+        )
+
+        def on_folder_change(e: ft.ControlEvent) -> None:
+            if not e.data:
+                return
+            if inner_col.controls:
+                return
+            inner_col.controls.extend(self._render_lazy_folder_children(folder_path, depth))
+            if _ctrl_on_page(inner_col):
+                inner_col.update()
+
+        return ft.ExpansionTile(
+            title=self._make_tree_folder_title_row(folder_path.name, folder_path),
+            controls=[pad],
+            expanded=False,
+            maintain_state=True,
+            dense=True,
+            affinity=ft.TileAffinity.LEADING,
+            show_trailing_icon=True,
+            leading=None,
+            icon_color=config.ON_SURFACE_VARIANT,
+            collapsed_icon_color=config.ON_SURFACE_VARIANT,
+            on_change=on_folder_change,
+        )
+
     def _rebuild_tree_ui(self) -> None:
         self.tree_column.controls.clear()
         self._tree_file_rename_field = None
@@ -1255,56 +1313,70 @@ class MarkdownStudioExplorer:
             )
             return
 
-        tree = build_md_tree(root)
         q = (self.tree_search_field.value or "").strip()
-        if q:
-            tree = filter_md_tree(tree, q)
-
         sort_mode = getattr(self, "_tree_sort_mode", "name_az")
+        root_res = root.resolve()
 
-        def render_level(node: dict[str, Any], parent_path: Path, depth: int = 0) -> list[ft.Control]:
-            ctrls: list[ft.Control] = []
-            for dirname in _sorted_dirnames(node, parent_path, sort_mode):
-                sub = node[dirname]
-                folder_path = parent_path / dirname
-                inner = render_level(sub, folder_path, depth + 1)
-                ctrls.append(
-                    ft.ExpansionTile(
-                        title=self._make_tree_folder_title_row(dirname, folder_path),
-                        controls=[
-                            ft.Container(
-                                content=ft.Column(inner, tight=True, spacing=0),
-                                padding=ft.Padding.only(left=8),
-                            )
-                        ],
-                        expanded=depth == 0,
-                        dense=True,
-                        show_trailing_icon=True,
-                        leading=None,
-                        icon_color=config.ON_SURFACE_VARIANT,
-                        collapsed_icon_color=config.ON_SURFACE_VARIANT,
+        if q:
+            tree = build_search_md_tree(root_res, q)
+
+            def render_level(node: dict[str, Any], parent_path: Path, depth: int = 0) -> list[ft.Control]:
+                ctrls: list[ft.Control] = []
+                for dirname in _sorted_dirnames(node, parent_path, sort_mode):
+                    sub = node[dirname]
+                    folder_path = parent_path / dirname
+                    inner = render_level(sub, folder_path, depth + 1)
+                    ctrls.append(
+                        ft.ExpansionTile(
+                            title=self._make_tree_folder_title_row(dirname, folder_path),
+                            controls=[
+                                ft.Container(
+                                    content=ft.Column(inner, tight=True, spacing=0),
+                                    padding=ft.Padding.only(left=8),
+                                )
+                            ],
+                            expanded=False,
+                            maintain_state=True,
+                            dense=True,
+                            affinity=ft.TileAffinity.LEADING,
+                            show_trailing_icon=True,
+                            leading=None,
+                            icon_color=config.ON_SURFACE_VARIANT,
+                            collapsed_icon_color=config.ON_SURFACE_VARIANT,
+                        )
                     )
-                )
-            files = node.get("_files", [])
-            for fname, fpath in _sorted_file_entries(list(files), sort_mode):
-                ctrls.append(self._make_tree_file_row(fname, fpath))
-            return ctrls
+                files = node.get("_files", [])
+                for fname, fpath in _sorted_file_entries(list(files), sort_mode):
+                    ctrls.append(self._make_tree_file_row(fname, fpath))
+                return ctrls
 
-        if not tree:
-            if q:
+            if not tree:
                 self.tree_column.controls.append(
                     ft.Text("No matching files.", size=12, color=config.ON_SURFACE_VARIANT)
                 )
             else:
-                self.tree_column.controls.append(
-                    ft.Text(
-                        "No projects yet. Use + → Create project…",
-                        size=12,
-                        color=config.ON_SURFACE_VARIANT,
-                    )
+                self.tree_column.controls.extend(render_level(tree, root_res))
+            return
+
+        dirs, files = list_visible_children(root_res)
+        dirs_s = _sorted_child_dir_paths(dirs, sort_mode)
+        files_s = _sorted_child_md_paths(files, sort_mode)
+        top: list[ft.Control] = []
+        for d in dirs_s:
+            top.append(self._make_lazy_folder_expansion_tile(d, 0))
+        for fp in files_s:
+            top.append(self._make_tree_file_row(fp.name, fp))
+
+        if not top:
+            self.tree_column.controls.append(
+                ft.Text(
+                    "No projects yet. Use the explorer menu → Create project…",
+                    size=12,
+                    color=config.ON_SURFACE_VARIANT,
                 )
+            )
         else:
-            self.tree_column.controls.extend(render_level(tree, root))
+            self.tree_column.controls.extend(top)
 
     async def open_file(
         self,

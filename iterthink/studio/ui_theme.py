@@ -83,6 +83,24 @@ def editor_text_color() -> str:
     return on_surface_soft_ui()
 
 
+def compose_preview_markdown_style_sheet() -> ft.MarkdownStyleSheet:
+    """Focus preview / help: monospace like the editor; strong = body + weight only."""
+    from .constants import COMPARE_COL_FONT_SIZE, COMPARE_COL_LINE_HEIGHT
+
+    fs = int(float(COMPARE_COL_FONT_SIZE))
+    lh = float(COMPARE_COL_LINE_HEIGHT)
+    ec = editor_text_color()
+    ff = "monospace"
+    base = ft.TextStyle(size=fs, height=lh, color=ec, font_family=ff)
+    strong = base.copy(weight=ft.FontWeight.W_700)
+    em = base.copy(italic=True)
+    return ft.MarkdownStyleSheet(
+        p_text_style=base,
+        strong_text_style=strong,
+        em_text_style=em,
+    )
+
+
 def result_card_bg() -> str:
     return ft.Colors.with_opacity(0.97, config.SURFACE_VARIANT)
 
