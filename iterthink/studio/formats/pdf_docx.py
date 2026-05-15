@@ -57,6 +57,7 @@ class MarkdownStudioAssetCompare:
         if (self.editor.value or "") == v and (self._compare_editor.value or "") == v:
             return
         self.editor.value = v
+        self._editor_prev_for_list_continue = v
         self._compare_editor.value = v
         self._refresh_title_bar()
         self._kick_debounced_autosave()

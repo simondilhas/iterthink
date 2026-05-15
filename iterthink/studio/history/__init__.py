@@ -1,7 +1,8 @@
 """Compare tab: candidates, paragraph rows, bulk AI accept.
 
 MRO (first wins if methods ever overlap; keep this order when adding mixins):
-  buffers → dispatch → diff_spans → paragraph_ui → dropdowns → bulk_actions → debounce → margin_ai
+  buffers → dispatch → diff_spans → paragraph_ui → dropdowns → bulk_actions
+  → spell_review → debounce → margin_ai
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from .dispatch import _HistoryDispatchMixin
 from .dropdowns import _HistoryDropdownsMixin
 from .margin_ai import _HistoryMarginAiMixin
 from .paragraph_ui import _HistoryParagraphUIMixin
+from .spell_review import _HistorySpellReviewMixin
 
 
 class MarkdownStudioCompareText(
@@ -31,6 +33,7 @@ class MarkdownStudioCompareText(
     _HistoryParagraphUIMixin,
     _HistoryDropdownsMixin,
     _HistoryBulkActionsMixin,
+    _HistorySpellReviewMixin,
     _HistoryDebounceMixin,
     _HistoryMarginAiMixin,
 ):

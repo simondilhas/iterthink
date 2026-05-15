@@ -108,7 +108,7 @@ def test_markdown_to_docx_smoke(tmp_path: Path) -> None:
 
 
 def test_markdown_to_docx_list_markers_without_template_list_styles(tmp_path: Path) -> None:
-    """``Iterthink Standard`` has no Word list styles; export must still emit bullets/numbers."""
+    """Bundled template uses Word numbering (no literal U+2022 in document.xml); content must export."""
     tpl = markdown_docx_export.bundled_templates_dir() / "Iterthink Standard.docx"
     if not tpl.is_file():
         pytest.skip("Bundled DOCX template missing")
@@ -123,15 +123,63 @@ def test_markdown_to_docx_list_markers_without_template_list_styles(tmp_path: Pa
         meta=ExportMeta(title_stem="note", author="A", date_iso="2099-02-02"),
     )
     body = _document_xml_text(out)
-    assert "•" in body
+    assert "w:numPr" in body
     assert "Alpha" in body
     assert "Beta" in body
-    assert "1." in body
     assert "One" in body
-    assert "2." in body
     assert "Two" in body
 
 
+def test_markdown_to_docx_nested_bullet_list_ilvl(tmp_path: Path) -> None:
+    """Nested markdown list items must get distinct Word list levels (w:ilvl)."""
+    tpl = markdown_docx_export.bundled_templates_dir() / "Iterthink Standard.docx"
+    if not tpl.is_file():
+        pytest.skip("Bundled DOCX template missing")
+    md = tmp_path / "note.md"
+    md.write_text(
+        "- L1\n"
+        "  - L2\n"
+        "    - L3\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "nested.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="A", date_iso="2099-02-02"),
+    )
+    body = _document_xml_text(out)
+    assert "L1" in body and "L2" in body and "L3" in body
+    assert body.count('<w:ilvl w:val="0"/>') >= 1
+    assert body.count('<w:ilvl w:val="1"/>') >= 1
+    assert body.count('<w:ilvl w:val="2"/>') >= 1
+
+
+def test_markdown_to_docx_nested_list_siblings_same_depth(tmp_path: Path) -> None:
+    """Sibling items under one parent must stay nested (same w:ilvl), not promoted to depth 0."""
+    tpl = markdown_docx_export.bundled_templates_dir() / "Iterthink Standard.docx"
+    if not tpl.is_file():
+        pytest.skip("Bundled DOCX template missing")
+    md = tmp_path / "note.md"
+    md.write_text(
+        "- L1\n"
+        "  - L2a\n"
+        "  - L2b\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "siblings.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="A", date_iso="2099-02-02"),
+    )
+    body = _document_xml_text(out)
+    assert "L2a" in body and "L2b" in body
+    assert body.count('<w:ilvl w:val="1"/>') >= 2
 def test_markdown_to_docx_paragraph_comment(tmp_path: Path) -> None:
     tpl = _minimal_template(tmp_path)
     md = tmp_path / "note.md"

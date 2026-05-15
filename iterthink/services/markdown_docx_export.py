@@ -9,6 +9,8 @@ from typing import Any, NamedTuple
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
 from docx.styles import BabelFish
 
@@ -142,6 +144,59 @@ def _style_safe(doc: Document, name: str) -> str | None:
     return resolved
 
 
+def _style_list_numpr(doc: Document, style_name: str) -> tuple[int, int] | None:
+    """Read ``(num_id, base_ilvl)`` from a paragraph style's ``w:pPr/w:numPr``, or ``None``."""
+    if style_name not in doc.styles:
+        return None
+    st = doc.styles[style_name]
+    if st.type != WD_STYLE_TYPE.PARAGRAPH:
+        return None
+    p_pr = st.element.find(qn("w:pPr"))
+    if p_pr is None:
+        return None
+    num_pr = p_pr.find(qn("w:numPr"))
+    if num_pr is None:
+        return None
+    num_id_el = num_pr.find(qn("w:numId"))
+    if num_id_el is None:
+        return None
+    raw_id = num_id_el.get(qn("w:val"))
+    if raw_id is None:
+        return None
+    try:
+        num_id = int(raw_id)
+    except ValueError:
+        return None
+    base_ilvl = 0
+    ilvl_el = num_pr.find(qn("w:ilvl"))
+    if ilvl_el is not None:
+        raw_lv = ilvl_el.get(qn("w:val"))
+        if raw_lv is not None:
+            try:
+                base_ilvl = int(raw_lv)
+            except ValueError:
+                base_ilvl = 0
+    return num_id, base_ilvl
+
+
+def _paragraph_set_list_num_level(paragraph: Any, *, num_id: int, ilvl: int) -> None:
+    """Replace paragraph ``w:numPr`` so Word uses ``ilvl`` (0–8) on the given list instance."""
+    p_el = paragraph._element
+    p_pr = p_el.get_or_add_pPr()
+    for child in list(p_pr):
+        if child.tag == qn("w:numPr"):
+            p_pr.remove(child)
+    ilvl_capped = min(max(ilvl, 0), 8)
+    num_pr = OxmlElement("w:numPr")
+    ilvl_el = OxmlElement("w:ilvl")
+    ilvl_el.set(qn("w:val"), str(ilvl_capped))
+    num_pr.append(ilvl_el)
+    num_id_el = OxmlElement("w:numId")
+    num_id_el.set(qn("w:val"), str(num_id))
+    num_pr.append(num_id_el)
+    p_pr.append(num_pr)
+
+
 def _heading_style_name(doc: Document, level: int) -> str | None:
     candidates: list[str] = [f"Heading {level}"]
     if level == 1:
@@ -177,6 +232,37 @@ def _plaintext_from_inline_tokens(tokens: list[Any]) -> str:
     return "".join(parts)
 
 
+def _list_item_body(tokens: list[Any], i: int) -> tuple[list[Any], int]:
+    """Return ``(tokens inside one list item, index after its list_item_close)``.
+
+    Nested ``list_item_open``/``close`` pairs are included in the body so the slice
+    does not end at the first inner ``list_item_close``.
+    """
+    n = len(tokens)
+    if i >= n or tokens[i].type != "list_item_open":
+        return [], i
+    i += 1
+    body: list[Any] = []
+    depth = 1
+    while i < n and depth:
+        t = tokens[i]
+        if t.type == "list_item_open":
+            depth += 1
+            body.append(t)
+            i += 1
+        elif t.type == "list_item_close":
+            depth -= 1
+            if depth == 0:
+                i += 1
+                break
+            body.append(t)
+            i += 1
+        else:
+            body.append(t)
+            i += 1
+    return body, i
+
+
 def _footnote_body_plaintext(block_tokens: list[Any]) -> str:
     parts: list[str] = []
 
@@ -210,12 +296,8 @@ def _footnote_body_plaintext(block_tokens: list[Any]) -> str:
                 if i < len(tl):
                     i += 1
             elif t.type == "list_item_open":
-                i += 1
-                while i < len(tl) and tl[i].type != "list_item_close":
-                    walk_block([tl[i]])
-                    i += 1
-                if i < len(tl):
-                    i += 1
+                chunk, i = _list_item_body(tl, i)
+                walk_block(chunk)
             elif t.type == "fence":
                 parts.append((t.content or "").strip() + "\n")
                 i += 1
@@ -459,7 +541,14 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: _ListRenderMeta | No
                 ordered, depth, item_index = list_meta
                 st_name, native = ctx.styles.list_paragraph_style(ctx.doc, ordered=ordered, depth=depth)
                 p = ctx.doc.add_paragraph(style=st_name)
-                if not native:
+                applied_style_num = False
+                if native:
+                    snum = _style_list_numpr(ctx.doc, st_name)
+                    if snum is not None:
+                        num_id, _base_ilvl = snum
+                        _paragraph_set_list_num_level(p, num_id=num_id, ilvl=depth)
+                        applied_style_num = True
+                if not applied_style_num:
                     p.paragraph_format.left_indent = Cm(0.55 * (depth + 1))
                     p.paragraph_format.first_line_indent = Cm(-0.32)
                     if ctx.list_item_mark_pending:
@@ -507,15 +596,9 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: _ListRenderMeta | No
             i += 1
             while i < n and tokens[i].type != "bullet_list_close":
                 if tokens[i].type == "list_item_open":
-                    i += 1
-                    inner: list[Any] = []
-                    while i < n and tokens[i].type != "list_item_close":
-                        inner.append(tokens[i])
-                        i += 1
+                    inner, i = _list_item_body(tokens, i)
                     ctx.list_item_mark_pending = True
                     _render_blocks(ctx, inner, _ListRenderMeta(False, parent + 1, 0))
-                    if i < n and tokens[i].type == "list_item_close":
-                        i += 1
                 else:
                     i += 1
             if i < n and tokens[i].type == "bullet_list_close":
@@ -528,15 +611,9 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: _ListRenderMeta | No
             while i < n and tokens[i].type != "ordered_list_close":
                 if tokens[i].type == "list_item_open":
                     ord_n += 1
-                    i += 1
-                    inner = []
-                    while i < n and tokens[i].type != "list_item_close":
-                        inner.append(tokens[i])
-                        i += 1
+                    inner, i = _list_item_body(tokens, i)
                     ctx.list_item_mark_pending = True
                     _render_blocks(ctx, inner, _ListRenderMeta(True, parent + 1, ord_n))
-                    if i < n and tokens[i].type == "list_item_close":
-                        i += 1
                 else:
                     i += 1
             if i < n and tokens[i].type == "ordered_list_close":

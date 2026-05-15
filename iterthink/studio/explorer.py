@@ -669,6 +669,7 @@ class MarkdownStudioExplorer:
         self.current_path = None
         self.last_saved_text = ""
         self.editor.value = ""
+        self._editor_prev_for_list_continue = ""
         self._compare_editor.value = ""
         self._compare_baseline_snapshot = ""
         if _ctrl_on_page(self.editor):
@@ -1402,6 +1403,7 @@ class MarkdownStudioExplorer:
         self.current_path = path
         self.last_saved_text = text
         self.editor.value = text
+        self._editor_prev_for_list_continue = text
         self._compare_editor.value = text
         self._compare_baseline_snapshot = text
         self._refresh_compare_tab_candidate_ui()

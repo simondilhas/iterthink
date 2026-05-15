@@ -20,7 +20,7 @@ from iterthink.services.impact_analysis_runner import (
     FINDINGS_PARAGRAPH_STATUSES,
     _impact_debug_llm_enabled,
 )
-from iterthink.studio.constants import KI_PILL_TEXT_SIZE, TAB_FUTURE
+from iterthink.studio.constants import KI_PILL_TEXT_SIZE, KI_TOPIC_ANALYSE, TAB_FUTURE
 from iterthink.studio.tree import build_md_tree
 from iterthink.studio.util import ctrl_on_page as _ctrl_on_page
 
@@ -326,7 +326,7 @@ class MarkdownStudioImpactMixin:
             getattr(self, "_main_tab_index", -1) == TAB_FUTURE
             and getattr(self, "_review_subtab_index", 0) == 1
         )
-        ki_analyse = int(getattr(self, "_ki_topic_index", 0)) == 2
+        ki_analyse = int(getattr(self, "_ki_topic_index", 0)) == KI_TOPIC_ANALYSE
         # Context file tree: Review → Impact and KI Analyse only (same as run dock intent).
         context_on = impact_subtab and ki_analyse
         prompt_ready = impact_subtab and self._active_impact_prompt_id is not None

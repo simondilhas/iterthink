@@ -50,6 +50,10 @@ COMPOSE_EDITOR_LINE_HEIGHT_PX = float(COMPARE_COL_FONT_SIZE * COMPARE_COL_LINE_H
 COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX = 4
 COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX = 4
 COMPOSE_EDITOR_CONTENT_PAD_TOP_PX = 0
+# Subtracted from editor content width before wrap column count (caret / scrollbar slop heuristic).
+COMPOSE_EDITOR_WRAP_WIDTH_RESERVE_PX = 3
+# Compose TextField uses monospace; heuristic advance for wrap / toolbar X (tuned below generic 0.6em).
+COMPOSE_EDITOR_MONO_CHAR_WIDTH_EST_PX = float(COMPARE_COL_FONT_SIZE) * 0.58
 COMPOSE_MARGIN_COL_W = 104
 COMPARE_PILL_COL_W = 100
 
@@ -77,10 +81,21 @@ TAB_HISTORY = 0
 TAB_PRESENT = 1
 TAB_FUTURE = 2
 
+# KI right strip: Comments first, then Discuss / Change / Analyse / Act (must match strip order).
+KI_TOPIC_COMMENTS = 0
+KI_TOPIC_DISCUSS = 1
+KI_TOPIC_CHANGE = 2
+KI_TOPIC_ANALYSE = 3
+KI_TOPIC_ACT = 4
+
 # Review tab: no DB proposal loaded; candidate mirrors compose so Accept still persists.
 REVIEW_MANUAL_CANDIDATE_ACTION_ID = "manual_review"
 # Review candidate dropdown: compare editor draft against an editable copy (no AI snapshot).
 REVIEW_KEY_DRAFT_MIRROR = "__review_draft_mirror__"
+# Review candidate dropdown: draft vs pyspellchecker-suggested body (SPELL_PREVIEW source).
+REVIEW_KEY_SPELL_CHECK = "__review_spell_check__"
+# Accept / snapshot label when applying spelling suggestions from Review.
+REVIEW_SPELL_CANDIDATE_ACTION_ID = "spell_review"
 
 # History toolbar: horizontal gap between Older vs Newer version dropdown columns.
 # At ~96 dpi, 76 px ≈ 2 cm total; with equal flex children each dropdown column is ~1 cm narrower.

@@ -10,6 +10,8 @@ import flet as ft
 from iterthink import config
 from iterthink.compare import paragraph_compare
 from iterthink.compare.paragraph_align import compute_alignment, compute_hash
+from iterthink.db.session import session_scope
+from iterthink.persistence import paragraph_user_comments, version_storage
 
 from ..action_chrome import wrap_workspace_action_chrome
 from ..components import (
@@ -17,7 +19,7 @@ from ..components import (
     action_rail_approve_icon_button,
     action_rail_icon_button_style,
     action_rail_reject_icon_button,
-    build_action_square,
+    build_action_rectangle,
 )
 from .. import ui_theme
 from ..constants import (
@@ -39,23 +41,66 @@ _COMPARE_HISTORY_CELL_PAD = ft.padding.all(8)
 
 
 class _HistoryParagraphUIMixin:
+    def _review_comment_presence_icon(self, *, has_comment: bool) -> ft.Control:
+        """Non-interactive comment glyph below the action square (same rail width)."""
+        outline_col = ui_theme.outline_muted(alpha=0.88)
+        icon_col = config.HIGHLIGHT if has_comment else outline_col
+        ic = ft.Icon(ft.Icons.COMMENT_OUTLINED, size=16, color=icon_col)
+        return ft.Container(
+            width=float(COMPARE_ACTION_COL_W),
+            padding=ft.padding.only(top=2, bottom=2),
+            alignment=ft.Alignment.TOP_CENTER,
+            content=ic,
+        )
+
     def _build_actions_square(
         self,
         i: int,
         *,
         persistent: bool = False,
+        draft_paragraph_index: int | None = None,
+        has_user_comment: bool = False,
     ) -> tuple[ft.Container, ft.Container | None]:
-        """Slim Review action grid: check + x only. Returns (actions_ctrl, hover_wrap_or_None)."""
-        actions_inner = build_action_square(
-            left=action_rail_approve_icon_button(
+        """Review: action grid (hover) + non-interactive comment icon below; rail width fixed."""
+        dis_comment = draft_paragraph_index is None
+
+        comment_btn = ft.IconButton(
+            ft.Icons.CHAT_BUBBLE_OUTLINE,
+            icon_size=ACTION_RAIL_ICON_SIZE,
+            icon_color=config.HIGHLIGHT if has_user_comment else config.ON_SURFACE_VARIANT,
+            tooltip="Paragraph comment" if not dis_comment else "No paragraph slot for a comment here",
+            style=action_rail_icon_button_style(),
+            disabled=dis_comment,
+            on_click=lambda _e, p=draft_paragraph_index, se=(not has_user_comment): self.page.run_task(
+                self._open_ki_comments_for_paragraph_async, p, se
+            ),
+        )
+        bottom_right_spacer = ft.Container(height=COMPARE_ACTION_GRID_CELL, expand=True)
+        actions_inner = build_action_rectangle(
+            top_left=action_rail_approve_icon_button(
                 on_click=lambda _e, ix=i: self.page.run_task(self._compare_accept_paragraph_async, ix),
             ),
-            right=action_rail_reject_icon_button(
+            top_right=action_rail_reject_icon_button(
                 on_click=lambda _e, ix=i: self.page.run_task(self._compare_decline_paragraph_async, ix),
             ),
+            bottom_left=comment_btn,
+            bottom_right=bottom_right_spacer,
             row_h=COMPARE_ACTION_GRID_CELL,
         )
-        return wrap_workspace_action_chrome(actions_inner, persistent=persistent)
+        inner_chrome, hover = wrap_workspace_action_chrome(actions_inner, persistent=persistent)
+        presence = self._review_comment_presence_icon(has_comment=has_user_comment)
+        rail_col = ft.Column(
+            [inner_chrome, presence],
+            spacing=2,
+            tight=True,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        rail = ft.Container(
+            width=float(COMPARE_ACTION_COL_W),
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            content=rail_col,
+        )
+        return rail, hover
 
     def _rebuild_compare_paragraph_ui(self) -> None:
         """History tab: eval | old | pill | new — with ghost rows at old positions of moved content.
@@ -364,6 +409,19 @@ class _HistoryParagraphUIMixin:
             "content_padding": ft.padding.all(0),
         }
         show_actions = bool(self.current_path)
+        future_user_comments: dict[int, str] = {}
+        if show_actions:
+            try:
+                with session_scope() as s:
+                    doc = version_storage.get_document_by_resolved_path(s, self.current_path.resolve())
+                    if doc is not None:
+                        snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+                        if snaps:
+                            future_user_comments = paragraph_user_comments.map_for_version(
+                                s, document_id=int(doc.id), version_id=int(snaps[0].version_id)
+                            )
+            except Exception:
+                future_user_comments = {}
         eval_spacer_w = COMPARE_EVAL_COL_W
         comp_idx = 0
         field_idx = 0
@@ -469,7 +527,9 @@ class _HistoryParagraphUIMixin:
                 ]
                 if show_actions:
                     actions_ctrl, hover_wrap_future = self._build_actions_square(
-                        field_idx, persistent=False
+                        field_idx,
+                        draft_paragraph_index=None,
+                        has_user_comment=False,
                     )
                     row_cells.append(actions_ctrl)
                     row_inner = ft.Row(
@@ -559,8 +619,12 @@ class _HistoryParagraphUIMixin:
                 right_cell,
             ]
             if show_actions:
+                cand_pi = row.new_paragraph_index
+                has_uc = cand_pi in future_user_comments
                 actions_ctrl, hover_wrap_future = self._build_actions_square(
-                    field_idx, persistent=False
+                    field_idx,
+                    draft_paragraph_index=int(cand_pi),
+                    has_user_comment=has_uc,
                 )
                 row_cells.append(actions_ctrl)
                 row_inner = ft.Row(
@@ -614,5 +678,6 @@ class _HistoryParagraphUIMixin:
             self._refresh_all_eval_cells()
 
         self._refresh_compare_bulk_buttons()
-        self._compare_refine_gen += 1
-        self.page.run_task(self._debounced_refine_compare_slots, self._compare_refine_gen)
+        if self._compare_candidate_source != CompareCandidateSource.SPELL_PREVIEW:
+            self._compare_refine_gen += 1
+            self.page.run_task(self._debounced_refine_compare_slots, self._compare_refine_gen)

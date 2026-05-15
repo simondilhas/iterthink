@@ -10,6 +10,7 @@ class CompareCandidateSource(StrEnum):
 
     DRAFT = "draft"
     AI_PREVIEW = "ai_preview"
+    SPELL_PREVIEW = "spell_preview"
     SNAPSHOT = "snapshot"
     PDF_ORIGINAL = "pdf_original"
     DOCX_ORIGINAL = "docx_original"

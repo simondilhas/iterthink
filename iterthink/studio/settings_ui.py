@@ -21,6 +21,7 @@ from iterthink.ai.llm_router import (
     SECRET_COMPANY_OPENAI,
 )
 from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS, TOPIC_EVALUATE, VALID_TOPICS
+from iterthink.studio.history import spell_suggest
 from iterthink.ai.ollama_models import classify_installed_models
 from iterthink.ai.ollama_util import ollama_error_message
 from .constants import KI_TIER_TAB_ICON_PX, SIDEBAR_TOOLBAR_ROW_H_PX
@@ -574,6 +575,47 @@ async def _open_settings_dialog(studio: Any) -> None:
             new_note_template_tf.update()
 
     daily_log_sw.on_change = _on_daily_log_switch
+
+    spell_dict_tf = ft.TextField(
+        label="Spelling dictionary file",
+        value=store_db.settings_get(studio._db, store_db.SETTINGS_SPELLCHECK_DICTIONARY_PATH) or "",
+        hint_text="Optional. Pyspellchecker JSON word→count (plain .json or .json.gz). Empty = bundled English.",
+        expand=True,
+        dense=True,
+    )
+
+    async def browse_spell_dictionary(_e: ft.ControlEvent | None = None) -> None:
+        studio.ensure_file_pickers()
+        try:
+            files = await studio._fp_spell_dict.pick_files(
+                dialog_title="Choose spelling dictionary",
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["json", "gz"],
+            )
+        except BaseException as ex:
+            studio._snack(f"Picker failed: {ex}")
+            return
+        if not files or not getattr(files[0], "path", None):
+            return
+        spell_dict_tf.value = str(files[0].path)
+        if _ctrl_on_page(spell_dict_tf):
+            spell_dict_tf.update()
+
+    def clear_spell_dictionary(_e: ft.ControlEvent | None = None) -> None:
+        spell_dict_tf.value = ""
+        if _ctrl_on_page(spell_dict_tf):
+            spell_dict_tf.update()
+
+    async def save_spell_dictionary(_e: ft.ControlEvent | None = None) -> None:
+        path = (spell_dict_tf.value or "").strip()
+        if path:
+            expanded = Path(path).expanduser()
+            if not expanded.is_file():
+                studio._snack("Dictionary path must be empty or an existing file.")
+                return
+        store_db.settings_set(studio._db, store_db.SETTINGS_SPELLCHECK_DICTIONARY_PATH, path)
+        spell_suggest.reset_spellchecker_cache()
+        studio._snack("Spelling dictionary setting saved.")
 
     async def save_app_fields(_e: ft.ControlEvent | None = None) -> None:
         before_store = studio._store_dir_resolved
@@ -1178,6 +1220,27 @@ async def _open_settings_dialog(studio: Any) -> None:
                     "When off, it opens the first note in the tree (same order as the sidebar) or creates the next file from the template.",
                     size=11,
                     color=config.ON_SURFACE_VARIANT,
+                ),
+                ft.Text("Spelling", weight=ft.FontWeight.W_500, size=13),
+                spell_dict_tf,
+                ft.Row(
+                    [
+                        ft.OutlinedButton(
+                            "Browse…",
+                            on_click=lambda e: page.run_task(browse_spell_dictionary, e),
+                        ),
+                        ft.OutlinedButton("Clear", on_click=clear_spell_dictionary),
+                    ],
+                    spacing=8,
+                ),
+                ft.Text(
+                    "Same format as pyspellchecker language packages (e.g. en.json.gz): lowercase keys, integer counts.",
+                    size=11,
+                    color=config.ON_SURFACE_VARIANT,
+                ),
+                ft.FilledButton(
+                    "Save spelling dictionary",
+                    on_click=lambda e: page.run_task(save_spell_dictionary, e),
                 ),
                 ft.FilledButton("Save app settings", on_click=lambda e: page.run_task(save_app_fields, e)),
             ],

@@ -94,17 +94,24 @@ def test_merge_happy_path_ordered() -> None:
     assert merged[caret - 1] == " "
 
 
-def test_merge_wrong_caret_returns_none() -> None:
+def test_merge_wrong_caret_still_resolves_when_single_newline_unique() -> None:
+    """Insert index comes from the diff; stale TextField selection must not skip merge."""
     old = "- a"
     new = "- a\n"
-    assert merge_if_list_continuation_after_enter(old, new, 0, 0) is None
-    assert merge_if_list_continuation_after_enter(old, new, 3, 3) is None
+    want = ("- a\n- ", 6)
+    for caret in (0, 2, 4):
+        got = merge_if_list_continuation_after_enter(old, new, caret, caret)
+        assert got is not None
+        assert got == want
 
 
-def test_merge_non_collapsed_selection() -> None:
+def test_merge_non_collapsed_selection_still_merges_when_newline_diff_unique() -> None:
+    """Non-collapsed selection must not block merge when insert index is unambiguous."""
     old = "- a"
     new = "- a\n"
-    assert merge_if_list_continuation_after_enter(old, new, 0, 2) is None
+    got = merge_if_list_continuation_after_enter(old, new, 0, 2)
+    assert got is not None
+    assert got[0] == "- a\n- "
 
 
 def test_merge_double_newline() -> None:
@@ -162,3 +169,53 @@ def test_merge_empty_task_exits_list() -> None:
     merged, caret = got
     assert merged == "x\n\n"
     assert caret == 3
+
+
+def test_merge_nested_empty_bullet_outdents_wrong_caret() -> None:
+    old = "- a\n  - x\n  - "
+    new = old + "\n"
+    want_merged = "- a\n  - x\n- \n"
+    want_caret = 12
+    for caret in (0, 5, len(new)):
+        got = merge_if_list_continuation_after_enter(old, new, caret, caret)
+        assert got is not None
+        merged, c = got
+        assert merged == want_merged
+        assert c == want_caret
+
+
+def test_merge_nested_empty_then_top_level_exit() -> None:
+    """After outdent to top-level empty marker, next Enter exits the list."""
+    old = "- a\n  - x\n- "
+    new = "- a\n  - x\n- \n"
+    got = merge_if_list_continuation_after_enter(old, new, len(new), len(new))
+    assert got is not None
+    merged, caret = got
+    assert merged == "- a\n  - x\n\n"
+    assert caret == 11
+
+
+def test_merge_deep_nested_empty_bullet_outdents() -> None:
+    old = "- a\n    - "
+    new = old + "\n"
+    got = merge_if_list_continuation_after_enter(old, new, len(new), len(new))
+    assert got is not None
+    merged, caret = got
+    assert merged == "- a\n  - \n"
+    assert caret == 8
+
+
+def test_merge_nested_list_first_enter_continues() -> None:
+    old = "- a\n  - item"
+    new = old + "\n"
+    got = merge_if_list_continuation_after_enter(old, new, 1, 1)
+    assert got is not None
+    merged, caret = got
+    assert merged == "- a\n  - item\n  - "
+    assert caret == len(merged)
+
+
+def test_merge_ambiguous_double_newline_buffer_returns_none() -> None:
+    """When two positions look like a single inserted \\n, single_newline is None; no merge."""
+    assert single_newline_insert_index("\n", "\n\n") is None
+    assert merge_if_list_continuation_after_enter("\n", "\n\n", 2, 2) is None

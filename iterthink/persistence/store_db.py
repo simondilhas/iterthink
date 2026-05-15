@@ -26,6 +26,7 @@ SETTINGS_CLOUD_ANTHROPIC_MODEL = "cloud_anthropic_model"
 SETTINGS_CLOUD_OPENAI_MODEL = "cloud_openai_model"
 SETTINGS_CLOUD_GOOGLE_MODEL = "cloud_google_model"
 SETTINGS_EXPORT_AUTHOR = "export_author"
+SETTINGS_SPELLCHECK_DICTIONARY_PATH = "spellcheck_dictionary_path"
 
 
 def ensure_store_dir() -> None:

@@ -31,6 +31,7 @@ from .constants import (
     TAB_HISTORY,
     TAB_PRESENT,
 )
+from .history.candidate_state import CompareCandidateSource
 from .util import ctrl_on_page as _ctrl_on_page
 
 _log = logging.getLogger(__name__)
@@ -380,12 +381,17 @@ class MainWorkspaceTabsMixin:
             await asyncio.sleep(0)  # yield so the client paints Review + spinner before snapshot IO
 
             try:
-                already_staged = (
-                    self._compare_candidate_source == "ai_preview"
+                spell_review_hold = (
+                    self._compare_candidate_source == CompareCandidateSource.SPELL_PREVIEW
+                )
+                already_staged = spell_review_hold or (
+                    self._compare_candidate_source == CompareCandidateSource.AI_PREVIEW
                     and self._pending_ai_accept_action_id
                     and self._compare_snapshot_version_id is not None
                 )
-                pdf_import_review = self._compare_candidate_source == "pdf_original"
+                pdf_import_review = (
+                    self._compare_candidate_source == CompareCandidateSource.PDF_ORIGINAL
+                )
                 if not already_staged and not pdf_import_review:
                     target_vid = self._latest_ai_proposal_vid
                     if target_vid is None and self.current_path:
@@ -402,7 +408,7 @@ class MainWorkspaceTabsMixin:
                         # No proposals: mirror compose into the candidate so rows are editable (equal/replace),
                         # and set a synthetic action id so Accept / approve-all still write disk + snapshots.
                         seeded = self.editor.value or ""
-                        self._compare_candidate_source = "ai_preview"
+                        self._compare_candidate_source = CompareCandidateSource.AI_PREVIEW
                         self._compare_editor.value = seeded
                         self._pending_ai_accept_action_id = REVIEW_MANUAL_CANDIDATE_ACTION_ID
                         self._compare_snapshot_version_id = None
@@ -412,6 +418,8 @@ class MainWorkspaceTabsMixin:
                     self._main_tab_index = prev
                     self._apply_active_tab_ui_state()
                     return
+                if self._compare_candidate_source == CompareCandidateSource.SPELL_PREVIEW:
+                    await self._sync_spell_candidate_for_review_tab_async()
                 self._rebuild_future_paragraph_ui()
             except BaseException as ex:
                 _log.exception("Review tab: failed while loading snapshot or building rows")
@@ -430,8 +438,9 @@ class MainWorkspaceTabsMixin:
             self._compare_newer_dropdown_hover = False
         if new_ix == TAB_PRESENT:
             self._compare_tab_bar_hover_index1 = False
-        self._apply_compare_candidate_dropdown_tab_chrome()
+        # Populate History/Review dropdown options before chrome (disabled state depends on options).
         self._refresh_compare_tab_candidate_ui()
+        self._apply_compare_candidate_dropdown_tab_chrome()
         if new_ix == TAB_HISTORY:
             self._refresh_plan_compare_bar()
         self._apply_active_tab_ui_state()

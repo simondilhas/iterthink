@@ -55,6 +55,52 @@ def is_empty_list_item_line(line: str) -> bool:
     return False
 
 
+_EMPTY_TASK_LINE = re.compile(r"^(\s*)([-*+])\s+\[[ xX]\]\s*$")
+_EMPTY_ORDERED_LINE = re.compile(r"^(\s*)(\d+)\.\s*$")
+_EMPTY_BULLET_LINE = re.compile(r"^(\s*)([-*+])\s*$")
+
+
+def _outdent_leading_ws_one_step(indent: str) -> str:
+    """One CommonMark-style list level: drop a tab or two spaces from the left."""
+    if indent.endswith("\t"):
+        return indent[:-1]
+    if len(indent) >= 2:
+        return indent[:-2]
+    if len(indent) == 1:
+        return ""
+    return indent
+
+
+def outdent_empty_list_item_line(line: str) -> str | None:
+    """
+    If ``line`` is a nested empty list marker, return the same marker outdented one step.
+    If already top-level, return ``None`` (caller should exit the list instead).
+    """
+    t = _normalize_line(line).rstrip(" \t")
+    m = _EMPTY_TASK_LINE.match(t)
+    if m:
+        indent, marker = m.group(1), m.group(2)
+        if not indent:
+            return None
+        new_indent = _outdent_leading_ws_one_step(indent)
+        return f"{new_indent}{marker} [ ] "
+    m = _EMPTY_ORDERED_LINE.match(t)
+    if m:
+        indent, num_s = m.group(1), m.group(2)
+        if not indent:
+            return None
+        new_indent = _outdent_leading_ws_one_step(indent)
+        return f"{new_indent}{num_s}. "
+    m = _EMPTY_BULLET_LINE.match(t)
+    if m:
+        indent, marker = m.group(1), m.group(2)
+        if not indent:
+            return None
+        new_indent = _outdent_leading_ws_one_step(indent)
+        return f"{new_indent}{marker} "
+    return None
+
+
 def markdown_list_continuation_prefix(line: str) -> str | None:
     """Return text to insert after ``\\n`` to continue a list, or ``None``."""
     line = _normalize_line(line)
@@ -84,15 +130,24 @@ def merge_if_list_continuation_after_enter(
     selection_end: int,
 ) -> tuple[str, int] | None:
     """Handle Enter after a list line: continue list, or exit an empty list item."""
-    if selection_start != selection_end:
-        return None
-    caret = selection_start
-    i = _newline_insert_index_at_caret(old, new, caret)
+    # Prefer diff-based index: TextField on_change selection can lag one frame (e.g. still
+    # non-collapsed after a word selection) even when the buffer already has exactly one
+    # new newline vs ``old`` — do not require a collapsed selection in that case.
+    i = single_newline_insert_index(old, new)
+    if i is None:
+        if selection_start != selection_end:
+            return None
+        i = _newline_insert_index_at_caret(old, new, selection_start)
     if i is None:
         return None
     line_start = old.rfind("\n", 0, i) + 1
     line = old[line_start:i]
     if is_empty_list_item_line(line):
+        outdented = outdent_empty_list_item_line(line)
+        if outdented is not None:
+            merged = old[:line_start] + outdented + "\n" + old[i:]
+            new_caret = line_start + len(outdented)
+            return merged, new_caret
         merged = old[:line_start] + "\n" + old[i:]
         new_caret = line_start + 1
         return merged, new_caret
