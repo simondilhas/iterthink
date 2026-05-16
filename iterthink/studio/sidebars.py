@@ -42,25 +42,56 @@ class MarkdownStudioSidebars:
                 expand=True,
                 vertical_alignment=ft.CrossAxisAlignment.STRETCH,
             )
+        tab_ix = getattr(self, "_left_sidebar_tab", 0)
+        files_tab = self._build_left_sidebar_tab_button(
+            icon=ft.Icons.FOLDER_OUTLINED,
+            tooltip="Files",
+            idx=0,
+        )
+        content_tab = self._build_left_sidebar_tab_button(
+            icon=ft.Icons.LIST_ALT,
+            tooltip="Content",
+            idx=1,
+        )
+        toolbar_band = ft.Container(
+            height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+            visible=tab_ix == 0,
+            content=ft.Row(
+                [
+                    self._tree_search_bar,
+                    self._tree_explorer_overflow_btn,
+                ],
+                expand=True,
+                spacing=8,
+                height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+        self._left_sidebar_toolbar_band = toolbar_band
+        tree_well = ft.Container(
+            content=self.tree_column,
+            expand=True,
+            visible=tab_ix == 0,
+        )
+        content_well = ft.Container(
+            content=self._content_sidebar_panel,
+            expand=True,
+            visible=tab_ix == 1,
+        )
+        self._left_sidebar_tree_well = tree_well
+        self._left_sidebar_content_well = content_well
         return ft.Column(
             [
-                ft.Container(
+                ft.Row(
+                    [files_tab, content_tab],
                     height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-                    content=ft.Row(
-                        [
-                            self._tree_search_bar,
-                            self._tree_explorer_overflow_btn,
-                        ],
-                        expand=True,
-                        spacing=8,
-                        height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
+                    spacing=0,
                 ),
+                toolbar_band,
                 ft.Row(
                     [
                         ft.Container(
-                            content=self.tree_column,
+                            content=ft.Stack([tree_well, content_well], expand=True),
                             expand=True,
                             padding=float(SIDEBAR_INNER_PAD_PX),
                             border_radius=float(SIDEBAR_INNER_BORDER_RADIUS_PX),

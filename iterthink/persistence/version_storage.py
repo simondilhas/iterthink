@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from iterthink import config
 from iterthink.db.models import Document, DocumentVersion
+from iterthink.persistence import paragraph_user_comments
 
 SnapshotReason = Literal[
     "manual",
@@ -27,6 +28,8 @@ SnapshotReason = Literal[
     "ai_proposal",
     "review_edit",
     "before_apply",
+    "before_spell_apply",
+    "spell_apply",
     "import",
 ]
 
@@ -327,6 +330,19 @@ def persist_version_snapshot(
     )
     session.add(ver)
     session.flush()
+    if parent_id is not None and last is not None:
+        try:
+            old_body = read_snapshot_body_by_relpath(last.snapshot_relpath)
+        except OSError:
+            old_body = ""
+        paragraph_user_comments.migrate_comments_to_new_version(
+            session,
+            document_id=int(doc.id),
+            parent_version_id=int(parent_id),
+            new_version_id=int(ver.id),
+            old_body=old_body,
+            new_body=body,
+        )
     pk = path_key_for(resolved_doc)
     if pdf_source_path is not None and pdf_source_path.is_file():
         dest_dir = _pdf_assets_dir_for_doc(resolved_doc)

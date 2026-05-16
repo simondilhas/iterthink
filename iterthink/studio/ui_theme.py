@@ -98,6 +98,9 @@ def compose_preview_markdown_style_sheet() -> ft.MarkdownStyleSheet:
         p_text_style=base,
         strong_text_style=strong,
         em_text_style=em,
+        # Nested lists read flat when indent is tight; match monospace column feel.
+        list_indent=28,
+        blockquote_padding=ft.padding.only(left=10, top=2, bottom=2, right=4),
     )
 
 

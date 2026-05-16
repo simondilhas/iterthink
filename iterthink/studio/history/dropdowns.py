@@ -13,6 +13,7 @@ from .. import ui_theme
 from ..constants import (
     COMPARE_KEY_CURRENT as _COMPARE_KEY_CURRENT,
     REVIEW_KEY_DRAFT_MIRROR,
+    REVIEW_KEY_SPELL_CHECK,
     REVIEW_MANUAL_CANDIDATE_ACTION_ID,
     TAB_FUTURE,
     TAB_HISTORY,
@@ -165,6 +166,11 @@ class _HistoryDropdownsMixin:
                     text="Draft vs draft (editable copy)",
                     style=_st,
                 ),
+                ft.dropdown.Option(
+                    key=REVIEW_KEY_SPELL_CHECK,
+                    text="Draft vs spelling (suggested)",
+                    style=_st,
+                ),
                 *snapshot_review_opts,
             ]
             self._review_candidate_dropdown.options = review_opts
@@ -176,6 +182,8 @@ class _HistoryDropdownsMixin:
                 and self._compare_snapshot_version_id is not None
             ):
                 preferred = str(self._compare_snapshot_version_id)
+            elif self._compare_candidate_source == CompareCandidateSource.SPELL_PREVIEW:
+                preferred = REVIEW_KEY_SPELL_CHECK
             elif (
                 self._compare_candidate_source == CompareCandidateSource.AI_PREVIEW
                 and self._compare_snapshot_version_id is None
@@ -256,6 +264,9 @@ class _HistoryDropdownsMixin:
             # Review dropdown: ai_proposal / legacy ai_staged snapshot or import — stays on Review tab.
             v = e.control.value
             if v is None:
+                return
+            if v == REVIEW_KEY_SPELL_CHECK:
+                self._enter_spell_review_mode()
                 return
             if v == REVIEW_KEY_DRAFT_MIRROR:
                 self._flush_review_edits_if_changed()

@@ -11,7 +11,12 @@ from iterthink.persistence import version_storage
 from iterthink.persistence.version_storage import SnapshotInfo
 from iterthink.compare.margin import join_paragraphs
 
-from ..constants import REVIEW_MANUAL_CANDIDATE_ACTION_ID, TAB_FUTURE, TAB_HISTORY
+from ..constants import (
+    REVIEW_MANUAL_CANDIDATE_ACTION_ID,
+    REVIEW_SPELL_CANDIDATE_ACTION_ID,
+    TAB_FUTURE,
+    TAB_HISTORY,
+)
 from .candidate_state import CompareCandidateSource
 
 
@@ -24,6 +29,8 @@ def review_action_apply_label(action_id: str) -> str:
         return act.label
     if action_id == REVIEW_MANUAL_CANDIDATE_ACTION_ID:
         return "Manual candidate"
+    if action_id == REVIEW_SPELL_CANDIDATE_ACTION_ID:
+        return "Spelling suggestions"
     return action_id
 
 
@@ -133,6 +140,9 @@ class _HistoryBuffersMixin:
         self._ai_proposal_action_ids.clear()
         self._loaded_proposal_sha = None
         self._pending_post_import_history_vid = None
+        clear_spell = getattr(self, "_clear_spell_suggest_cache", None)
+        if clear_spell is not None:
+            clear_spell()
 
     def _active_compare_buffers(self) -> CompareBuffers:
         """Return the (baseline, candidate) text pair for the active tab.
@@ -182,6 +192,7 @@ class _HistoryBuffersMixin:
         if self._main_tab_index == TAB_HISTORY:
             if self._compare_newer_version_id is None:
                 self.editor.value = merged
+                self._editor_prev_for_list_continue = merged
             else:
                 self._compare_newer_cached_body = merged
         else:

@@ -259,7 +259,7 @@ class _HistoryMarginAiMixin:
 
         if act.topic == TOPIC_CHANGE:
             # Future/review + KI "Change" tab: candidate is already in context — stage immediately, no eye/dismiss row.
-            if self._main_tab_index == TAB_FUTURE and int(getattr(self, "_ki_topic_index", 0)) == 1:
+            if self._main_tab_index == TAB_FUTURE and int(getattr(self, "_ki_topic_index", 0)) == 2:
                 await self._stage_compare_margin_review_async(idx, reply, footer, action_id)
                 return
 

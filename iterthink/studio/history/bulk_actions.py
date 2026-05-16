@@ -12,7 +12,11 @@ from iterthink.compare.margin import (
 from iterthink.db.session import session_scope
 from iterthink.persistence import version_storage
 
-from ..constants import REVIEW_MANUAL_CANDIDATE_ACTION_ID, TAB_FUTURE
+from ..constants import (
+    REVIEW_MANUAL_CANDIDATE_ACTION_ID,
+    REVIEW_SPELL_CANDIDATE_ACTION_ID,
+    TAB_FUTURE,
+)
 from ..util import ctrl_on_page as _ctrl_on_page
 from .buffers import review_action_apply_label
 from .candidate_state import CompareCandidateSource
@@ -55,6 +59,12 @@ class _HistoryBulkActionsMixin:
             return
         apply_label = review_action_apply_label(action_id)
         before_label = "Before accept · all paragraphs" if bulk else f"Before accept · paragraph {para_index + 1}"
+        if action_id == REVIEW_SPELL_CANDIDATE_ACTION_ID:
+            before_reason = "before_spell_apply"
+            after_reason = "spell_apply"
+        else:
+            before_reason = "before_apply"
+            after_reason = "ai_apply"
         try:
             with session_scope() as s:
                 rp = self.current_path.resolve()
@@ -62,14 +72,14 @@ class _HistoryBulkActionsMixin:
                     s,
                     rp,
                     pre_buf,
-                    "before_apply",
+                    before_reason,
                     display_label=before_label,
                 )
                 version_storage.persist_version_snapshot(
                     s,
                     rp,
                     post_buf,
-                    "ai_apply",
+                    after_reason,
                     display_label=apply_label,
                 )
         except BaseException:
@@ -121,11 +131,11 @@ class _HistoryBulkActionsMixin:
                 new_buf = replace_paragraph_at_index(pre_buf, index, cand_para)
         else:
             new_buf = replace_paragraph_at_index(pre_buf, index, cand_para)
-        ai_flow = (
-            self._compare_candidate_source == CompareCandidateSource.AI_PREVIEW
-            and self._pending_ai_accept_action_id
-        )
-        if ai_flow:
+        review_apply = self._compare_candidate_source in (
+            CompareCandidateSource.AI_PREVIEW,
+            CompareCandidateSource.SPELL_PREVIEW,
+        ) and bool(self._pending_ai_accept_action_id)
+        if review_apply:
             self._persist_ai_accept_snapshots(
                 pre_buf,
                 new_buf,
@@ -193,11 +203,11 @@ class _HistoryBulkActionsMixin:
         else:
             parts = [tf.value or "" for tf in self._compare_right_fields]
             new_buf = "\n\n".join(parts)
-        ai_flow = (
-            self._compare_candidate_source == CompareCandidateSource.AI_PREVIEW
-            and self._pending_ai_accept_action_id
-        )
-        if ai_flow:
+        review_apply = self._compare_candidate_source in (
+            CompareCandidateSource.AI_PREVIEW,
+            CompareCandidateSource.SPELL_PREVIEW,
+        ) and bool(self._pending_ai_accept_action_id)
+        if review_apply:
             self._persist_ai_accept_snapshots(
                 pre_buf,
                 new_buf,

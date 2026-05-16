@@ -21,6 +21,8 @@ from iterthink.ai.llm_router import (
     SECRET_COMPANY_OPENAI,
 )
 from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS, TOPIC_EVALUATE, VALID_TOPICS
+from iterthink.studio.history import spell_suggest
+from iterthink.studio.history.spell_lang import SUPPORTED_SPELL_LANGS
 from iterthink.ai.ollama_models import classify_installed_models
 from iterthink.ai.ollama_util import ollama_error_message
 from .constants import KI_TIER_TAB_ICON_PX, SIDEBAR_TOOLBAR_ROW_H_PX
@@ -574,6 +576,85 @@ async def _open_settings_dialog(studio: Any) -> None:
             new_note_template_tf.update()
 
     daily_log_sw.on_change = _on_daily_log_switch
+
+    def _norm_spell_lang(v: str) -> str:
+        x = (v or "en").strip().lower()
+        return x if x in SUPPORTED_SPELL_LANGS else "en"
+
+    _spell_mode_raw = (store_db.settings_get(studio._db, store_db.SETTINGS_SPELLCHECK_LANGUAGE_MODE) or "auto").strip().lower()
+    _spell_mode_val = "manual" if _spell_mode_raw == "manual" else "auto"
+    _spell_lang_val = _norm_spell_lang(store_db.settings_get(studio._db, store_db.SETTINGS_SPELLCHECK_LANGUAGE) or "en")
+
+    spell_mode_dd = ft.Dropdown(
+        label="Spelling language",
+        value=_spell_mode_val,
+        options=[
+            ft.dropdown.Option("auto", "Auto-detect from document"),
+            ft.dropdown.Option("manual", "Manual"),
+        ],
+        dense=True,
+    )
+    spell_manual_lang_dd = ft.Dropdown(
+        label="Language (manual mode, or auto-detect fallback)",
+        value=_spell_lang_val,
+        options=[ft.dropdown.Option(code, code) for code in SUPPORTED_SPELL_LANGS],
+        dense=True,
+        disabled=_spell_mode_val != "manual",
+    )
+
+    def _sync_spell_manual_lang_enabled(_e: ft.ControlEvent | None = None) -> None:
+        spell_manual_lang_dd.disabled = (spell_mode_dd.value or "auto") != "manual"
+        if _ctrl_on_page(spell_manual_lang_dd):
+            spell_manual_lang_dd.update()
+
+    spell_mode_dd.on_change = _sync_spell_manual_lang_enabled
+
+    spell_dict_tf = ft.TextField(
+        label="Custom spelling dictionary file (optional override)",
+        value=store_db.settings_get(studio._db, store_db.SETTINGS_SPELLCHECK_DICTIONARY_PATH) or "",
+        hint_text="Optional. Pyspellchecker JSON word→count (.json or .json.gz). If set, overrides auto/manual and store copies.",
+        expand=True,
+        dense=True,
+    )
+
+    async def browse_spell_dictionary(_e: ft.ControlEvent | None = None) -> None:
+        studio.ensure_file_pickers()
+        try:
+            files = await studio._fp_spell_dict.pick_files(
+                dialog_title="Choose spelling dictionary",
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["json", "gz"],
+            )
+        except BaseException as ex:
+            studio._snack(f"Picker failed: {ex}")
+            return
+        if not files or not getattr(files[0], "path", None):
+            return
+        spell_dict_tf.value = str(files[0].path)
+        if _ctrl_on_page(spell_dict_tf):
+            spell_dict_tf.update()
+
+    def clear_spell_dictionary(_e: ft.ControlEvent | None = None) -> None:
+        spell_dict_tf.value = ""
+        if _ctrl_on_page(spell_dict_tf):
+            spell_dict_tf.update()
+
+    async def save_spell_dictionary(_e: ft.ControlEvent | None = None) -> None:
+        path = (spell_dict_tf.value or "").strip()
+        if path:
+            expanded = Path(path).expanduser()
+            if not expanded.is_file():
+                studio._snack("Dictionary path must be empty or an existing file.")
+                return
+        mode = (spell_mode_dd.value or "auto").strip().lower()
+        if mode not in ("auto", "manual"):
+            mode = "auto"
+        lang = _norm_spell_lang(str(spell_manual_lang_dd.value or "en"))
+        store_db.settings_set(studio._db, store_db.SETTINGS_SPELLCHECK_DICTIONARY_PATH, path)
+        store_db.settings_set(studio._db, store_db.SETTINGS_SPELLCHECK_LANGUAGE_MODE, mode)
+        store_db.settings_set(studio._db, store_db.SETTINGS_SPELLCHECK_LANGUAGE, lang)
+        spell_suggest.reset_spellchecker_cache()
+        studio._snack("Spelling settings saved.")
 
     async def save_app_fields(_e: ft.ControlEvent | None = None) -> None:
         before_store = studio._store_dir_resolved
@@ -1178,6 +1259,36 @@ async def _open_settings_dialog(studio: Any) -> None:
                     "When off, it opens the first note in the tree (same order as the sidebar) or creates the next file from the template.",
                     size=11,
                     color=config.ON_SURFACE_VARIANT,
+                ),
+                ft.Text("Spelling", weight=ft.FontWeight.W_500, size=13),
+                spell_mode_dd,
+                spell_manual_lang_dd,
+                ft.Text(
+                    f"Shipped dictionaries are copied to {config.STORE_DIR / 'spell_dictionaries'} on startup when missing. "
+                    "Auto: guess language from the note (very short text uses the manual language as fallback). "
+                    "Manual: always spellcheck with the selected language.",
+                    size=11,
+                    color=config.ON_SURFACE_VARIANT,
+                ),
+                spell_dict_tf,
+                ft.Row(
+                    [
+                        ft.OutlinedButton(
+                            "Browse…",
+                            on_click=lambda e: page.run_task(browse_spell_dictionary, e),
+                        ),
+                        ft.OutlinedButton("Clear", on_click=clear_spell_dictionary),
+                    ],
+                    spacing=8,
+                ),
+                ft.Text(
+                    "Custom file: same format as pyspellchecker language packages (e.g. en.json.gz): lowercase keys, integer counts.",
+                    size=11,
+                    color=config.ON_SURFACE_VARIANT,
+                ),
+                ft.FilledButton(
+                    "Save spelling settings",
+                    on_click=lambda e: page.run_task(save_spell_dictionary, e),
                 ),
                 ft.FilledButton("Save app settings", on_click=lambda e: page.run_task(save_app_fields, e)),
             ],

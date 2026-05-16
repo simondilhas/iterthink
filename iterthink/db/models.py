@@ -73,6 +73,34 @@ class DocumentVersion(Base):
     document: Mapped["Document"] = relationship("Document", back_populates="versions")
 
 
+class ParagraphUserComment(Base):
+    """User-authored note per markdown paragraph slot for a specific snapshot version."""
+
+    __tablename__ = "paragraph_user_comments"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version_id: Mapped[int] = mapped_column(
+        ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    paragraph_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
+    updated_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id",
+            "version_id",
+            "paragraph_index",
+            name="uq_paragraph_user_comment_key",
+        ),
+    )
+
+
 class ImpactAnnotation(Base):
     """Per-paragraph Impact tab LLM output (Review → Impact), keyed by snapshot version."""
 

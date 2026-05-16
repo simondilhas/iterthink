@@ -27,6 +27,7 @@ class _HistoryDebounceMixin:
             CompareCandidateSource.SNAPSHOT,
             CompareCandidateSource.DRAFT,
             CompareCandidateSource.AI_PREVIEW,
+            CompareCandidateSource.SPELL_PREVIEW,
         ):
             return  # non-text format (PDF, DOCX, IFC, …); no debounced diff needed
         if self._main_tab_index == TAB_HISTORY:
@@ -84,6 +85,8 @@ class _HistoryDebounceMixin:
     async def _debounced_refine_compare_slots(self, gen: int) -> None:
         await asyncio.sleep(0.05)
         if gen != self._compare_refine_gen:
+            return
+        if self._compare_candidate_source == CompareCandidateSource.SPELL_PREVIEW:
             return
         if self._main_tab_index not in (TAB_HISTORY, TAB_FUTURE):
             return

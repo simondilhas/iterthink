@@ -20,27 +20,39 @@ from .constants import (
     TAB_HISTORY,
     TAB_FUTURE,
     TAB_PRESENT,
+    KI_TOPIC_ACT,
+    KI_TOPIC_ANALYSE,
+    KI_TOPIC_CHANGE,
+    KI_TOPIC_COMMENTS,
+    KI_TOPIC_DISCUSS,
 )
 from .llm_backend import sync_llm_tier_tab_icons
 from .util import KI_TIERS, ctrl_on_page as _ctrl_on_page, normalize_ki_tier
 
 # KI strip icon tooltips (must match markdown_studio.py topic mode row order).
-_KI_TOPIC_STRIP_LABELS = ("Discuss", "Change", "Analyse", "Act")
+_KI_TOPIC_STRIP_LABELS = ("Comments", "Discuss", "Change", "Analyse", "Act")
+
+# Discuss tab: double speech bubbles (used by markdown_studio topic mode strip).
+KI_TOPIC_STRIP_DISCUSS_ICON = ft.Icons.QUESTION_ANSWER
 
 
 class MarkdownStudioKiSidebar:
     def _ki_topic_allowed_indices(self) -> frozenset[int]:
         tab = int(getattr(self, "_main_tab_index", TAB_PRESENT))
         if tab == TAB_HISTORY:
-            return frozenset({0})
+            return frozenset({KI_TOPIC_COMMENTS, KI_TOPIC_DISCUSS})
         if tab == TAB_PRESENT:
-            return frozenset({0, 1})
-        return frozenset({0, 1, 2, 3})
+            return frozenset({KI_TOPIC_COMMENTS, KI_TOPIC_DISCUSS, KI_TOPIC_CHANGE})
+        return frozenset(
+            {KI_TOPIC_COMMENTS, KI_TOPIC_DISCUSS, KI_TOPIC_CHANGE, KI_TOPIC_ANALYSE, KI_TOPIC_ACT}
+        )
 
     def _ki_topic_strip_disabled_tooltip(self, index: int) -> str:
-        if index == 1:
+        if index == KI_TOPIC_COMMENTS:
+            return "Open a markdown note first."
+        if index == KI_TOPIC_CHANGE:
             return "Switch to Focus Area to use Change."
-        if index == 2:
+        if index == KI_TOPIC_ANALYSE:
             return "Switch to Review to use Analyse."
         return "Switch to Review to use Act."
 
@@ -103,6 +115,8 @@ class MarkdownStudioKiSidebar:
         self._sync_ki_topic_mode_buttons()
         if hasattr(self, "_sync_impact_ki_context_visibility"):
             self._sync_impact_ki_context_visibility()
+        if hasattr(self, "_on_ki_topic_index_changed"):
+            self._on_ki_topic_index_changed(ix)
 
     def _sync_ki_topic_strip_after_workspace_tab_change(self) -> None:
         """After ``_main_tab_index`` updates: reclamp topic, pill page, strip, impact dock.

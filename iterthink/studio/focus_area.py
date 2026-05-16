@@ -16,9 +16,20 @@ from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS, TOPIC_EVALUATE
 from iterthink.persistence import version_storage
 from .components import (
     ACTION_RAIL_ICON_SIZE,
+    SPARKLE_MENU_ICON,
     action_rail_icon_button_style,
     sparkle_margin_popup_menu,
 )
+from .compose_selection_markdown import (
+    apply_bold_wrap,
+    apply_bullet_block,
+    apply_checklist_block,
+    apply_indent_block,
+    apply_italic_wrap,
+    apply_numbered_block,
+    apply_outdent_block,
+)
+from .compose_toolbar_layout import selection_first_line_anchor_px
 from iterthink.compare.margin import paragraph_index_at_offset, replace_paragraph_at_index, split_paragraphs
 from .list_continuation import merge_if_list_continuation_after_enter
 from .markdown_preview import markdown_preview_with_task_checkboxes
@@ -27,14 +38,30 @@ from iterthink.ai.ollama_util import chat_response_text, chat_stream_delta, olla
 from .constants import (
     AUTOSAVE_DISK_IDLE_SEC,
     AUTOSAVE_SNAPSHOT_IDLE_SEC,
+    COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX,
+    COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX,
+    COMPOSE_EDITOR_CONTENT_PAD_TOP_PX,
+    COMPOSE_EDITOR_LINE_HEIGHT_PX,
+    COMPOSE_EDITOR_MONO_CHAR_WIDTH_EST_PX,
+    COMPOSE_EDITOR_WRAP_WIDTH_RESERVE_PX,
     COMPOSE_READING_WIDTH_FRAC,
     PROJECT_PAGE_URL as _PROJECT_PAGE_URL,
     READING_MAX_PX,
     TAB_FUTURE,
     TAB_HISTORY,
     TAB_PRESENT,
+    KI_TOPIC_CHANGE,
+    KI_TOPIC_DISCUSS,
 )
 from .util import ctrl_on_page as _ctrl_on_page
+
+# Selection toolbar overlay: estimated size for clamping (actual row is similar).
+_COMPOSE_SEL_TOOLBAR_EST_W = 300.0
+_COMPOSE_SEL_TOOLBAR_EST_H = 38.0
+_COMPOSE_SEL_TOOLBAR_MARGIN = 6.0
+_COMPOSE_SEL_TOOLBAR_ABOVE_GAP = 2.0
+# Toolbar vertical anchor uses line box top only (no inset into the line; avoids overlap with highlight).
+_COMPOSE_SEL_TOOLBAR_LINE_TOP_INSET_FRAC = 0.0
 
 
 _TOPIC_MENU_LABEL: dict[str, str] = {
@@ -66,8 +93,8 @@ def _ki_topic_index_for_prompt_topic(topic: str) -> int:
     """Map prompts.yaml margin action topic to KI tab strip index (Discuss / Change only)."""
     t = (topic or "").strip()
     if t == TOPIC_CHANGE:
-        return 1
-    return 0
+        return KI_TOPIC_CHANGE
+    return KI_TOPIC_DISCUSS
 
 
 class MarkdownStudioCompose:
@@ -256,9 +283,15 @@ class MarkdownStudioCompose:
         ctx = getattr(self, "_editor_ctx_menu", None)
         if ctx is None:
             return
-        ctx.items = self._build_editor_ctx_menu_items()
+        items = self._build_editor_ctx_menu_items()
+        ctx.items = items
         if _ctrl_on_page(ctx):
             ctx.update()
+        pop = getattr(self, "_compose_selection_toolbar_popup", None)
+        if pop is not None:
+            pop.items = items
+            if _ctrl_on_page(pop):
+                pop.update()
 
     def _on_compose_editor_area_secondary_down(self, e: ft.TapEvent) -> None:
         """Open editor context menu at pointer; ContextMenu.open() uses items=."""
@@ -274,6 +307,285 @@ class MarkdownStudioCompose:
         if ctx is None:
             return
         await ctx.open(global_position=ft.Offset(gx, gy))
+
+    def _on_compose_editor_stack_resize(self, e: ft.LayoutSizeChangeEvent) -> None:
+        self._compose_editor_stack_width = max(80.0, float(e.width))
+        self._compose_editor_stack_height = max(60.0, float(e.height))
+        host = getattr(self, "_compose_selection_toolbar_host", None)
+        if host is not None and host.visible:
+            self._compose_selection_toolbar_reposition()
+            if _ctrl_on_page(host):
+                host.update()
+
+    def _compose_selection_toolbar_reposition(self) -> None:
+        """Place toolbar above the first line of the selection (text-anchored), clamped to stack."""
+        host = getattr(self, "_compose_selection_toolbar_host", None)
+        if host is None:
+            return
+        w = max(80.0, float(getattr(self, "_compose_editor_stack_width", 400.0)))
+        h = max(60.0, float(getattr(self, "_compose_editor_stack_height", 320.0)))
+        buf = self.editor.value or ""
+        span: tuple[int, int] | None = None
+        sel = self.editor.selection
+        if sel is not None and not sel.is_collapsed:
+            a, b = int(sel.start), int(sel.end)
+            if 0 <= a <= b <= len(buf) and (buf[a:b] or "").strip():
+                span = (a, b)
+        if span is None:
+            stored = getattr(self, "_compose_sel_span", None)
+            if stored is not None:
+                a, b = int(stored[0]), int(stored[1])
+                if 0 <= a <= b <= len(buf) and (buf[a:b] or "").strip():
+                    span = (a, b)
+        anchor = None
+        if span is not None:
+            anchor = selection_first_line_anchor_px(
+                buf,
+                span[0],
+                span[1],
+                stack_w=w,
+                pad_l=float(COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX),
+                pad_r=float(COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX),
+                pad_t=float(COMPOSE_EDITOR_CONTENT_PAD_TOP_PX),
+                char_w_px=float(COMPOSE_EDITOR_MONO_CHAR_WIDTH_EST_PX),
+                line_h_px=float(COMPOSE_EDITOR_LINE_HEIGHT_PX),
+                wrap_width_reserve=float(COMPOSE_EDITOR_WRAP_WIDTH_RESERVE_PX),
+            )
+        line_top: float | None = None
+        if anchor is not None:
+            ax, line_top = anchor
+            line_h = float(COMPOSE_EDITOR_LINE_HEIGHT_PX)
+            kiss_y = line_top + _COMPOSE_SEL_TOOLBAR_LINE_TOP_INSET_FRAC * line_h
+        else:
+            ax = w - _COMPOSE_SEL_TOOLBAR_MARGIN - 24.0
+            kiss_y = _COMPOSE_SEL_TOOLBAR_MARGIN + 28.0
+        half = _COMPOSE_SEL_TOOLBAR_EST_W / 2.0
+        left = ax - half
+        left = max(
+            _COMPOSE_SEL_TOOLBAR_MARGIN,
+            min(left, w - _COMPOSE_SEL_TOOLBAR_EST_W - _COMPOSE_SEL_TOOLBAR_MARGIN),
+        )
+        top = kiss_y - _COMPOSE_SEL_TOOLBAR_EST_H - _COMPOSE_SEL_TOOLBAR_ABOVE_GAP
+        flipped_below = False
+        if top < _COMPOSE_SEL_TOOLBAR_MARGIN:
+            flipped_below = True
+            if line_top is not None:
+                line_h = float(COMPOSE_EDITOR_LINE_HEIGHT_PX)
+                top = line_top + line_h + _COMPOSE_SEL_TOOLBAR_ABOVE_GAP
+            else:
+                top = kiss_y + _COMPOSE_SEL_TOOLBAR_ABOVE_GAP
+        top = max(
+            _COMPOSE_SEL_TOOLBAR_MARGIN,
+            min(top, h - _COMPOSE_SEL_TOOLBAR_EST_H - _COMPOSE_SEL_TOOLBAR_MARGIN),
+        )
+        if not flipped_below and line_top is not None:
+            max_top_above = (
+                line_top
+                - _COMPOSE_SEL_TOOLBAR_EST_H
+                - _COMPOSE_SEL_TOOLBAR_ABOVE_GAP
+            )
+            top = min(top, max_top_above)
+        top = max(
+            _COMPOSE_SEL_TOOLBAR_MARGIN,
+            min(top, h - _COMPOSE_SEL_TOOLBAR_EST_H - _COMPOSE_SEL_TOOLBAR_MARGIN),
+        )
+        host.left = left
+        host.top = top
+        host.right = None
+
+    # --- Compose floating selection toolbar (Focus editor, edit mode) ---
+
+    def _init_compose_selection_toolbar(self) -> None:
+        _ico = ACTION_RAIL_ICON_SIZE
+        _st = action_rail_icon_button_style()
+
+        def _btn(icon, tip: str, fn) -> ft.IconButton:
+            return ft.IconButton(
+                icon,
+                icon_size=_ico,
+                icon_color=config.ON_SURFACE,
+                tooltip=tip,
+                style=_st,
+                on_click=fn,
+            )
+
+        self._compose_selection_toolbar_popup = ft.PopupMenuButton(
+            icon=SPARKLE_MENU_ICON,
+            icon_size=_ico + 2,
+            icon_color=ft.Colors.with_opacity(0.85, config.PRIMARY_COLOR),
+            tooltip="LLM and clipboard (same as right-click)",
+            items=self._build_editor_ctx_menu_items(),
+            menu_position=ft.PopupMenuPosition.UNDER,
+            style=ft.ButtonStyle(
+                color=ft.Colors.with_opacity(0.5, config.ON_SURFACE),
+                padding=ft.padding.all(2),
+                visual_density=ft.VisualDensity.COMPACT,
+            ),
+            on_open=lambda _e: self._compose_snapshot_margin_selection_for_menu(),
+            on_cancel=lambda _e: self._compose_clear_margin_menu_snap(),
+        )
+        sparkle_wrap = ft.GestureDetector(
+            on_tap_down=lambda _e: self._compose_snapshot_margin_selection_for_menu(),
+            content=self._compose_selection_toolbar_popup,
+        )
+
+        row = ft.Row(
+            [
+                _btn(ft.Icons.SPELLCHECK, "Spelling review (Review tab)", self._compose_toolbar_spellcheck),
+                _btn(ft.Icons.FORMAT_BOLD, "Bold **", self._compose_toolbar_bold),
+                _btn(ft.Icons.FORMAT_ITALIC, "Italic *", self._compose_toolbar_italic),
+                _btn(ft.Icons.FORMAT_LIST_BULLETED, "Bullet list", self._compose_toolbar_bullet),
+                _btn(ft.Icons.FORMAT_LIST_NUMBERED, "Numbered list", self._compose_toolbar_numbered),
+                _btn(ft.Icons.CHECKLIST, "Task list - [ ]", self._compose_toolbar_checklist),
+                _btn(ft.Icons.FORMAT_INDENT_INCREASE, "Indent lines", self._compose_toolbar_indent),
+                _btn(ft.Icons.FORMAT_INDENT_DECREASE, "Outdent lines", self._compose_toolbar_outdent),
+                sparkle_wrap,
+            ],
+            spacing=0,
+            tight=True,
+            scroll=ft.ScrollMode.AUTO,
+        )
+        self._compose_selection_toolbar_host = ft.Container(
+            visible=False,
+            bgcolor=ft.Colors.with_opacity(0.94, config.SURFACE),
+            border=ft.border.all(1, ft.Colors.with_opacity(0.35, config.OUTLINE)),
+            border_radius=8,
+            padding=ft.padding.symmetric(horizontal=2, vertical=0),
+            content=row,
+            left=8,
+            top=8,
+            right=None,
+        )
+
+    def _compose_sync_selection_toolbar_visibility(self) -> None:
+        host = getattr(self, "_compose_selection_toolbar_host", None)
+        if host is None:
+            return
+        ok_tab = getattr(self, "_main_tab_index", None) == TAB_PRESENT
+        ok_mode = getattr(self, "_focus_view_mode", "edit") == "edit"
+        show = ok_tab and ok_mode
+        if show:
+            buf = self.editor.value or ""
+            sel = self.editor.selection
+            if sel is None or sel.is_collapsed:
+                show = False
+            else:
+                show = bool(sel.get_selected_text(buf).strip())
+        changed = host.visible != show
+        host.visible = show
+        if show:
+            self._compose_selection_toolbar_reposition()
+        if _ctrl_on_page(host) and (changed or show):
+            host.update()
+
+    def _compose_apply_toolbar_text_mutation(
+        self, new_text: str, sel_start: int, sel_end: int
+    ) -> None:
+        self._compose_toolbar_applying = True
+        try:
+            self.editor.value = new_text
+            self.editor.selection = ft.TextSelection(sel_start, sel_end)
+            self._compose_sel_span = (
+                (sel_start, sel_end) if sel_start != sel_end else None
+            )
+            if _ctrl_on_page(self.editor):
+                self.editor.update()
+            self._after_editor_programmatic_change()
+        finally:
+            self._compose_toolbar_applying = False
+        self._compose_sync_selection_toolbar_visibility()
+
+    def _compose_toolbar_range(self) -> tuple[int, int] | None:
+        return self._ctx_selection_range()
+
+    def _compose_toolbar_bold(self, _e: ft.ControlEvent) -> None:
+        rng = self._compose_toolbar_range()
+        if rng is None:
+            return
+        a, b = rng
+        got = apply_bold_wrap(self.editor.value or "", a, b)
+        if got is None:
+            return
+        new_t, s0, s1 = got
+        self._compose_apply_toolbar_text_mutation(new_t, s0, s1)
+
+    def _compose_toolbar_italic(self, _e: ft.ControlEvent) -> None:
+        rng = self._compose_toolbar_range()
+        if rng is None:
+            return
+        a, b = rng
+        got = apply_italic_wrap(self.editor.value or "", a, b)
+        if got is None:
+            return
+        new_t, s0, s1 = got
+        self._compose_apply_toolbar_text_mutation(new_t, s0, s1)
+
+    def _compose_toolbar_bullet(self, _e: ft.ControlEvent) -> None:
+        rng = self._compose_toolbar_range()
+        if rng is None:
+            return
+        a, b = rng
+        got = apply_bullet_block(self.editor.value or "", a, b)
+        if got is None:
+            return
+        new_t, s0, s1 = got
+        self._compose_apply_toolbar_text_mutation(new_t, s0, s1)
+
+    def _compose_toolbar_numbered(self, _e: ft.ControlEvent) -> None:
+        rng = self._compose_toolbar_range()
+        if rng is None:
+            return
+        a, b = rng
+        got = apply_numbered_block(self.editor.value or "", a, b)
+        if got is None:
+            return
+        new_t, s0, s1 = got
+        self._compose_apply_toolbar_text_mutation(new_t, s0, s1)
+
+    def _compose_toolbar_checklist(self, _e: ft.ControlEvent) -> None:
+        rng = self._compose_toolbar_range()
+        if rng is None:
+            return
+        a, b = rng
+        got = apply_checklist_block(self.editor.value or "", a, b)
+        if got is None:
+            return
+        new_t, s0, s1 = got
+        self._compose_apply_toolbar_text_mutation(new_t, s0, s1)
+
+    def _compose_toolbar_indent(self, _e: ft.ControlEvent) -> None:
+        rng = self._compose_toolbar_range()
+        if rng is None:
+            return
+        a, b = rng
+        got = apply_indent_block(self.editor.value or "", a, b)
+        if got is None:
+            return
+        new_t, s0, s1 = got
+        self._compose_apply_toolbar_text_mutation(new_t, s0, s1)
+
+    def _compose_toolbar_outdent(self, _e: ft.ControlEvent) -> None:
+        rng = self._compose_toolbar_range()
+        if rng is None:
+            return
+        a, b = rng
+        got = apply_outdent_block(self.editor.value or "", a, b)
+        if got is None:
+            return
+        new_t, s0, s1 = got
+        self._compose_apply_toolbar_text_mutation(new_t, s0, s1)
+
+    def _compose_toolbar_spellcheck(self, _e: ft.ControlEvent) -> None:
+        if not self.current_path:
+            self._snack("Open a note first.")
+            return
+        self.page.run_task(self._compose_toolbar_spellcheck_open_review_async)
+
+    async def _compose_toolbar_spellcheck_open_review_async(self) -> None:
+        """Review tab, Difference panel, full-document spelling suggestions."""
+        self._select_review_subtab(0)
+        self._enter_spell_review_mode()
+        await self._request_tab_switch_async(TAB_FUTURE)
 
     def _kick_debounced_compare_diff_if_main_editor_backs_buffers(self) -> None:
         """Review baseline and History newer=current draft both read from ``editor``; keep analyse in sync."""
@@ -294,6 +606,7 @@ class MarkdownStudioCompose:
         self._kick_debounced_compare_diff_if_main_editor_backs_buffers()
         if not self.current_path:
             return
+        self._kick_spell_cache_from_compose_if_needed()
         self._kick_debounced_autosave()
 
     def _cancel_autosave_timers(self) -> None:
@@ -479,6 +792,7 @@ class MarkdownStudioCompose:
         ):
             if _ctrl_on_page(c):
                 c.update()
+        self._compose_sync_selection_toolbar_visibility()
 
     def _compose_tab_exit_rename_mode(self) -> None:
         self._compose_tab_inline_rename_active = False
@@ -620,13 +934,16 @@ class MarkdownStudioCompose:
             self._editor_prev_for_list_continue = self.editor.value or ""
             return
 
-        self._compose_sel_span = None
+        if not getattr(self, "_compose_toolbar_applying", False):
+            self._compose_sel_span = None
 
         if self._main_tab_index == TAB_PRESENT and self._focus_view_mode == "edit":
             old = self._editor_prev_for_list_continue
             new = self.editor.value or ""
             sel = self.editor.selection
-            if sel is not None and sel.is_collapsed:
+            # Do not require collapsed selection: merge_if_list_continuation_after_enter
+            # resolves the newline from the diff when unambiguous (see list_continuation).
+            if sel is not None:
                 got = merge_if_list_continuation_after_enter(
                     old, new, int(sel.start), int(sel.end)
                 )
@@ -655,8 +972,11 @@ class MarkdownStudioCompose:
         ):
             self._refresh_compare_diff_immediate()
         self._kick_debounced_compare_diff_if_main_editor_backs_buffers()
+        if getattr(self, "_left_sidebar_tab", 0) == 1 and hasattr(self, "_rebuild_content_tree"):
+            self._rebuild_content_tree()
         if not self.current_path:
             return
+        self._kick_spell_cache_from_compose_if_needed()
         self._kick_debounced_autosave()
 
     async def _debounced_compose_rebuild(self, gen: int) -> None:
@@ -693,12 +1013,14 @@ class MarkdownStudioCompose:
                 self._compose_sel_span = (int(sel.start), int(sel.end))
             else:
                 self._compose_sel_span = None
+            self._compose_sync_selection_toolbar_visibility()
             return
         if self._compose_sel_span is not None and sel is not None:
             a, b = self._compose_sel_span
             cur = int(sel.start)
             if cur < a or cur > b:
                 self._compose_sel_span = None
+        self._compose_sync_selection_toolbar_visibility()
 
     def _paragraph_sparkle_menu_control(self, para_index: int, *, for_compare: bool, compact: bool = False) -> ft.Control:
         """Compose: one popup with topic sections + prompts. Compare: Change-topic flat popup."""
@@ -805,10 +1127,22 @@ class MarkdownStudioCompose:
             items=compose_items,
         )
 
-    def _on_compare_row_hover(self, e: ft.ControlEvent, actions_wrap: ft.Container) -> None:
-        actions_wrap.opacity = 1.0 if e.data else 0.0
+    def _on_compare_row_hover(
+        self,
+        e: ft.ControlEvent,
+        actions_wrap: ft.Container,
+        presence_host: ft.Container | None = None,
+    ) -> None:
+        hovered = bool(e.data)
+        actions_wrap.opacity = 1.0 if hovered else 0.0
+        # Keep presence in layout stack but invisible on hover; ignore hits so action buttons work.
+        if presence_host is not None:
+            presence_host.opacity = 0.0 if hovered else 1.0
+            presence_host.ignore_interactions = hovered
         if _ctrl_on_page(actions_wrap):
             actions_wrap.update()
+        if presence_host is not None and _ctrl_on_page(presence_host):
+            presence_host.update()
 
     async def _compose_restore_editor_selection(self, a: int, b: int) -> None:
         await asyncio.sleep(0.06)

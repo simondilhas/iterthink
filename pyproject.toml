@@ -44,6 +44,8 @@ dependencies = [
     "sqlite-vec>=0.1.9",
     "markdown-it-py>=3.0.0",
     "mdit-py-plugins>=0.4.0",
+    "pyspellchecker>=0.8.0",
+    "langdetect>=1.0.9",
 ]
 
 [project.optional-dependencies]

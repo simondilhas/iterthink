@@ -13,7 +13,14 @@ from ollama import AsyncClient
 
 from iterthink import config
 from iterthink.ai import passphrase_keyring
-from iterthink.persistence import impact_annotations, store_db, vault_store, version_storage
+from iterthink.persistence import (
+    impact_annotations,
+    paragraph_user_comments,
+    spell_resources,
+    store_db,
+    vault_store,
+    version_storage,
+)
 from iterthink.services import markdown_docx_export
 
 from . import ui_theme
@@ -37,6 +44,7 @@ from .constants import (
     KI_TAB_BAR_TO_PILLS_GAP_PX,
     KI_TAB_ICON_PX,
     KI_TAB_PAGE_PAD_V_PX,
+    KI_TOPIC_COMMENTS,
     KI_TIER_TAB_ICON_PX,
     RESULT_CARD_W as _RESULT_CARD_W,
     SIDEBAR_EXPANDED_WIDTH_PX,
@@ -50,10 +58,12 @@ from .constants import (
 from .explorer import MarkdownStudioExplorer, first_markdown_in_tree
 from .focus_area import MarkdownStudioCompose
 from .history import CompareCandidateSource, MarkdownStudioCompareText
-from .ki_sidebar import MarkdownStudioKiSidebar
+from .ki_comments import paragraph_comment_label, sorted_comment_rows
+from .ki_sidebar import KI_TOPIC_STRIP_DISCUSS_ICON, MarkdownStudioKiSidebar
 from .llm_backend import MarkdownStudioLlmBackend, build_llm_tier_tabs
 from .main_workspace_tabs import MainWorkspaceTabsMixin
 from .shell import MarkdownStudioShell
+from .content_tree import MarkdownStudioContentTree
 from .sidebars import MarkdownStudioSidebars
 from .util import (
     KI_TIERS,
@@ -71,6 +81,7 @@ class MarkdownStudio(
     MarkdownStudioCompareText,
     MainWorkspaceTabsMixin,
     MarkdownStudioSidebars,
+    MarkdownStudioContentTree,
     MarkdownStudioKiSidebar,
     MarkdownStudioExplorer,
     MarkdownStudioImpactMixin,
@@ -91,6 +102,7 @@ class MarkdownStudio(
         self.ollama = AsyncClient(host=config.OLLAMA_HOST) if config.OLLAMA_HOST else AsyncClient()
         self._db = store_db.connect()
         store_db.init_schema(self._db)
+        spell_resources.ensure_spell_dictionaries()
         self.ollama_model: str = store_db.settings_get(self._db, store_db.SETTINGS_CHAT) or config.DEFAULT_OLLAMA_MODEL
         self._api_secrets_cache: dict[str, str] | None = None
         if vault_store.vault_exists():
@@ -124,12 +136,18 @@ class MarkdownStudio(
         # List continuation on Enter: previous buffer + re-entrancy guard while rewriting value.
         self._editor_prev_for_list_continue: str = ""
         self._editor_list_continue_applying: bool = False
+        self._compose_toolbar_applying: bool = False
+        self._compose_editor_stack_width: float = 400.0
+        self._compose_editor_stack_height: float = 320.0
         # Right-click context menu wrapping the editor; items rebuilt when prompts.yaml reloads.
         self._editor_ctx_menu: ft.ContextMenu | None = None
         self.left_open: bool = True
 
         self._margin_gen: int = 0
         self._compare_diff_gen: int = 0
+        self._spell_suggest_gen: int = 0
+        self._spell_suggest_cached_body: str = ""
+        self._spell_suggest_cached_src_sha: str | None = None
         self._init_main_workspace_tab_fields()
         self._file_drift_dialog_open: bool = False
         self._compare_dropdown_hover: bool = False
@@ -193,6 +211,7 @@ class MarkdownStudio(
         self._plan_overlay_gen: int = 0
         self._fp_import = ft.FilePicker()
         self._fp_export_docx = ft.FilePicker()
+        self._fp_spell_dict = ft.FilePicker()
         self._import_kind: str | None = None
         self._import_flow: str | None = None
         self._import_target_md: Path | None = None
@@ -274,9 +293,21 @@ class MarkdownStudio(
             on_secondary_tap_down=self._on_compose_editor_area_secondary_down,
             expand=True,
         )
+        self._init_compose_selection_toolbar()
         self._compose_editor_and_actions_stack = ft.Container(
             expand=True,
-            content=self._compose_editor_area_gesture,
+            on_size_change=self._on_compose_editor_stack_resize,
+            content=ft.Stack(
+                [
+                    ft.Container(
+                        expand=True,
+                        content=self._compose_editor_area_gesture,
+                    ),
+                    self._compose_selection_toolbar_host,
+                ],
+                expand=True,
+                clip_behavior=ft.ClipBehavior.NONE,
+            ),
         )
         self._compose_editor_shell_wrapped = ft.Container(
             content=self._compose_editor_and_actions_stack,
@@ -1085,6 +1116,13 @@ class MarkdownStudio(
         self._snapshot_autosave_gen: int = 0
 
         self.tree_column = ft.Column(spacing=0, tight=True, scroll=ft.ScrollMode.AUTO, expand=True)
+        self.content_tree_column = ft.Column(
+            spacing=0, tight=True, scroll=ft.ScrollMode.AUTO, expand=True
+        )
+        self._left_sidebar_tab = 0
+        self._left_sidebar_toolbar_band = None
+        self._left_sidebar_tree_well = None
+        self._left_sidebar_content_well = None
         self._tree_sort_mode = "name_az"
         self._tree_explorer_overflow_btn = ft.PopupMenuButton(
             icon=ft.Icons.MORE_VERT,
@@ -1166,6 +1204,8 @@ class MarkdownStudio(
         self.tree_search_field.on_focus = lambda _e: _tree_search_rim(True)
         self.tree_search_field.on_blur = lambda _e: _tree_search_rim(False)
 
+        self._init_content_find_replace_ui(_hint_style)
+
         self.left_panel = ft.Container(
             width=SIDEBAR_EXPANDED_WIDTH_PX,
             margin=12,
@@ -1179,7 +1219,9 @@ class MarkdownStudio(
         self._main_row: ft.Row | None = None
 
         self.right_open: bool = True
-        self._ki_topic_index: int = 0
+        self._ki_topic_index: int = 1
+        self._comment_para_index: int | None = None
+        self._comment_edit_mode: bool = False
         self._chat_api_messages: list[dict[str, str]] = []
 
         # ----- Per-paragraph Analyse checks (KI Analyse tab) -----
@@ -1202,6 +1244,18 @@ class MarkdownStudio(
         self._pill_row_discuss = ft.Row(spacing=4, wrap=True, run_spacing=4)
         self._pill_row_change = ft.Row(spacing=4, wrap=True, run_spacing=4)
         self._pill_row_analyse = ft.Row(spacing=4, wrap=True, run_spacing=4)
+        self._analyse_buttons: dict[str, ft.FilledButton] = {}
+        self._analyse_button_progress: dict[str, ft.ProgressRing] = {}
+        self._analyse_button_count: dict[str, ft.Text] = {}
+        self._impact_analyse_section = ft.Container(
+            visible=False,
+            padding=ft.padding.only(top=4),
+            content=ft.Column(
+                [self._pill_row_impact],
+                spacing=2,
+                tight=True,
+            ),
+        )
         self._ki_act_panel = ft.Column(
             [
                 ft.Text(
@@ -1236,27 +1290,130 @@ class MarkdownStudio(
             ),
             content=self._ki_act_panel,
         )
-        # Analyse buttons keyed by check_id; updated by _refresh_analyse_button_state.
-        self._analyse_buttons: dict[str, ft.FilledButton] = {}
-        self._analyse_button_progress: dict[str, ft.ProgressRing] = {}
-        self._analyse_button_count: dict[str, ft.Text] = {}
-        # Impact checks (impact_checks.yaml) in the KI Analyse tab; visible on Review → Impact only.
-        # Run lives in _impact_run_dock (bottom of _chat_composer); shown for Review→Impact + KI Analyse,
-        # disabled until a check pill is selected (_sync_impact_ki_context_visibility).
-        self._impact_analyse_section = ft.Container(
-            visible=False,
-            padding=ft.padding.only(top=4),
-            content=ft.Column(
-                [self._pill_row_impact],
-                spacing=2,
-                tight=True,
+        self._comment_heading = ft.Text(
+            "",
+            size=13,
+            weight=ft.FontWeight.W_600,
+            color=config.ON_SURFACE,
+            expand=True,
+        )
+        self._comment_edit_btn = ft.IconButton(
+            ft.Icons.EDIT_OUTLINED,
+            icon_size=18,
+            tooltip="Edit comment",
+            icon_color=config.ON_SURFACE_VARIANT,
+            style=ft.ButtonStyle(
+                padding=ft.padding.all(2),
+                visual_density=ft.VisualDensity.COMPACT,
             ),
+        )
+        self._comment_header_row = ft.Row(
+            [self._comment_heading, self._comment_edit_btn],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            tight=True,
+        )
+        self._comment_body_display = ft.Text(
+            "",
+            size=12,
+            selectable=True,
+            color=config.ON_SURFACE,
+        )
+        self._comment_body_edit = ft.TextField(
+            multiline=True,
+            min_lines=4,
+            max_lines=14,
+            expand=True,
+            dense=True,
+            filled=True,
+            fill_color=config.SURFACE,
+            focused_bgcolor=config.SURFACE,
+            bgcolor=config.SURFACE,
+            border_radius=8,
+            text_size=12,
+            color=config.ON_SURFACE,
+            border_color=ui_theme.outline_muted(),
+            focused_border_color=config.PRIMARY_COLOR,
+            cursor_color=config.PRIMARY_COLOR,
+            content_padding=ft.padding.symmetric(horizontal=8, vertical=6),
+            visible=False,
+        )
+        self._comment_save_btn = ft.FilledButton("Save", visible=False)
+        self._comment_cancel_btn = ft.TextButton("Cancel", visible=False)
+
+        def _on_comment_edit(_e: ft.ControlEvent | None = None) -> None:
+            self._comment_edit_mode = True
+            self._comment_body_edit.value = self._comment_body_display.value or ""
+            self._comment_body_edit.visible = True
+            self._comment_body_display.visible = False
+            self._comment_edit_btn.visible = False
+            self._comment_save_btn.visible = True
+            self._comment_cancel_btn.visible = True
+            if _ctrl_on_page(self._comment_body_edit):
+                self._comment_body_edit.update()
+            if _ctrl_on_page(self._comment_body_display):
+                self._comment_body_display.update()
+            for b in (self._comment_edit_btn, self._comment_save_btn, self._comment_cancel_btn):
+                if _ctrl_on_page(b):
+                    b.update()
+
+        def _on_comment_cancel(_e: ft.ControlEvent | None = None) -> None:
+            self._comment_edit_mode = False
+            self._comment_body_edit.visible = False
+            self._comment_body_display.visible = True
+            self._comment_edit_btn.visible = bool((self._comment_body_display.value or "").strip())
+            self._comment_save_btn.visible = False
+            self._comment_cancel_btn.visible = False
+            if _ctrl_on_page(self._comment_body_edit):
+                self._comment_body_edit.update()
+            if _ctrl_on_page(self._comment_body_display):
+                self._comment_body_display.update()
+            for b in (self._comment_edit_btn, self._comment_save_btn, self._comment_cancel_btn):
+                if _ctrl_on_page(b):
+                    b.update()
+
+        self._comment_edit_btn.on_click = _on_comment_edit
+        self._comment_save_btn.on_click = lambda _e: self.page.run_task(self._save_ki_paragraph_comment_async)
+        self._comment_cancel_btn.on_click = _on_comment_cancel
+        self._ki_comments_list = ft.ListView(
+            expand=True,
+            spacing=12,
+            padding=ft.padding.symmetric(horizontal=4, vertical=4),
+        )
+        self._ki_comments_detail = ft.Column(
+            [
+                self._comment_header_row,
+                self._comment_body_display,
+                self._comment_body_edit,
+                ft.Row(
+                    [self._comment_save_btn, self._comment_cancel_btn],
+                    spacing=8,
+                    tight=True,
+                ),
+            ],
+            spacing=8,
+            tight=True,
+            visible=False,
+        )
+        self._ki_comments_panel = ft.Column(
+            [self._ki_comments_list, self._ki_comments_detail],
+            spacing=8,
+            expand=True,
+        )
+        self._ki_comments_container = ft.Container(
+            expand=True,
+            padding=ft.padding.symmetric(
+                horizontal=4,
+                vertical=KI_TAB_PAGE_PAD_V_PX,
+            ),
+            content=self._ki_comments_panel,
         )
         # Pages are kept separately so we can hot-swap them as the active tab
         # changes. A plain Container (without bounded height) lets the wrap Row
         # render its full intrinsic height instead of being clipped by a
         # TabBarView's PageView constraint.
         self._ki_tab_pages: list[ft.Control] = [
+            self._ki_comments_container,
             ft.Container(
                 padding=ft.padding.symmetric(
                     horizontal=4,
@@ -1285,7 +1442,8 @@ class MarkdownStudio(
             self._ki_act_container,
         ]
         self._ki_tab_bar_view = ft.Container(
-            content=self._ki_tab_pages[0],
+            expand=bool(self._ki_topic_index == KI_TOPIC_COMMENTS),
+            content=self._ki_tab_pages[self._ki_topic_index],
         )
         _ki_mode_btn_style = ft.ButtonStyle(
             bgcolor=ft.Colors.TRANSPARENT,
@@ -1297,13 +1455,14 @@ class MarkdownStudio(
         self._ki_topic_mode_cells: list[ft.Container] = []
         for i, (ic, tip) in enumerate(
             [
-                (ft.Icons.CHAT_BUBBLE, "Discuss"),
+                (ft.Icons.CHAT_BUBBLE_OUTLINE, "Comments"),
+                (KI_TOPIC_STRIP_DISCUSS_ICON, "Discuss"),
                 (ft.Icons.MODE_EDIT, "Change"),
                 (ft.Icons.INSIGHTS, "Analyse"),
                 (ft.Icons.PRECISION_MANUFACTURING, "Act"),
             ]
         ):
-            sel = i == 0
+            sel = i == self._ki_topic_index
             ib = ft.IconButton(
                 icon=ic,
                 tooltip=tip,
@@ -1341,6 +1500,7 @@ class MarkdownStudio(
             content=self._ki_topic_top_strip,
         )
         self._ki_topic_tabs = ft.Container(
+            expand=bool(self._ki_topic_index == KI_TOPIC_COMMENTS),
             padding=ft.padding.only(top=float(KI_TAB_BAR_TO_PILLS_GAP_PX)),
             content=self._ki_tab_bar_view,
         )
@@ -1538,6 +1698,7 @@ class MarkdownStudio(
             self.page.services.append(self._fp_store)
             self.page.services.append(self._fp_import)
             self.page.services.append(self._fp_export_docx)
+            self.page.services.append(self._fp_spell_dict)
             self.page.update()
 
     def refresh_ollama_client(self) -> None:
@@ -1648,6 +1809,7 @@ class MarkdownStudio(
         self._chat_input.focused_bgcolor = config.SURFACE
         self._chat_input.border_color = ui_theme.outline_muted()
         self._tree_search_bar.bgcolor = config.SURFACE
+        self._sync_content_find_replace_field_theme(_hs)
         self._apply_main_workspace_tab_chrome_theme()
         self._apply_ki_tier_tab_bar_theme()
         self.left_panel.content = self._build_left_column()
@@ -1802,6 +1964,253 @@ class MarkdownStudio(
         self._rebuild_tree_ui()
         self.tree_column.update()
         await self.open_file(path)
+
+    def _ki_comments_for_current_version(self) -> dict[int, str]:
+        if not self.current_path:
+            return {}
+        try:
+            with session_scope() as s:
+                doc = version_storage.get_document_by_resolved_path(s, self.current_path.resolve())
+                if doc is None:
+                    return {}
+                snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+                if not snaps:
+                    return {}
+                anchor_body = version_storage.load_version_body(s, int(snaps[0].version_id))
+                display_body = self._editor_buffer() or ""
+                return paragraph_user_comments.map_resolved_for_display(
+                    s,
+                    document_id=int(doc.id),
+                    version_id=int(snaps[0].version_id),
+                    anchor_body=anchor_body,
+                    display_body=display_body,
+                )
+        except BaseException:
+            return {}
+
+    def _sync_ki_comments_detail_visibility(self) -> None:
+        show = self._comment_para_index is not None
+        detail = getattr(self, "_ki_comments_detail", None)
+        if detail is not None and detail.visible != show:
+            detail.visible = show
+            if _ctrl_on_page(detail):
+                detail.update()
+
+    def _rebuild_ki_comments_list(self) -> None:
+        lv = getattr(self, "_ki_comments_list", None)
+        if lv is None:
+            return
+        selected = self._comment_para_index
+        rows = sorted_comment_rows(self._ki_comments_for_current_version())
+        controls: list[ft.Control] = []
+        if not rows:
+            controls.append(
+                ft.Text(
+                    "No comments in this note yet.",
+                    size=12,
+                    color=config.ON_SURFACE_VARIANT,
+                    italic=True,
+                )
+            )
+        else:
+            for pi, body in rows:
+                highlight = selected is not None and int(pi) == int(selected)
+                card = ft.Container(
+                    key=f"ki_comment_{pi}",
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                paragraph_comment_label(pi),
+                                size=13,
+                                weight=ft.FontWeight.W_600,
+                                color=config.ON_SURFACE,
+                            ),
+                            ft.Text(
+                                body,
+                                size=12,
+                                selectable=True,
+                                color=config.ON_SURFACE,
+                            ),
+                        ],
+                        tight=True,
+                        spacing=4,
+                    ),
+                    padding=ft.padding.symmetric(horizontal=8, vertical=6),
+                    border_radius=8,
+                    bgcolor=(
+                        ft.Colors.with_opacity(0.12, config.HIGHLIGHT)
+                        if highlight
+                        else None
+                    ),
+                    border=(
+                        ft.border.all(1, config.HIGHLIGHT)
+                        if highlight
+                        else ft.border.all(1, ui_theme.outline_muted(alpha=0.25))
+                    ),
+                    on_click=lambda _e, p=int(pi): self.page.run_task(
+                        self._open_ki_comments_for_paragraph_async, p, False
+                    ),
+                )
+                controls.append(card)
+        lv.controls = controls
+        if _ctrl_on_page(lv):
+            lv.update()
+
+    def _sync_ki_comments_tab_layout(self) -> None:
+        comments_active = int(getattr(self, "_ki_topic_index", -1)) == KI_TOPIC_COMMENTS
+        chat = getattr(self, "_right_chat_section", None)
+        if chat is not None and chat.visible == comments_active:
+            chat.visible = not comments_active
+            if _ctrl_on_page(chat):
+                chat.update()
+        for ctrl in (getattr(self, "_ki_topic_tabs", None), getattr(self, "_ki_tab_bar_view", None)):
+            if ctrl is not None and bool(getattr(ctrl, "expand", False)) != comments_active:
+                ctrl.expand = comments_active
+                if _ctrl_on_page(ctrl):
+                    ctrl.update()
+        if comments_active:
+            self._rebuild_ki_comments_list()
+            self._sync_ki_comments_detail_visibility()
+
+    def _on_ki_topic_index_changed(self, ix: int) -> None:
+        self._sync_ki_comments_tab_layout()
+        if ix == KI_TOPIC_COMMENTS:
+            return
+        if not getattr(self, "_comment_edit_mode", False):
+            return
+        self._comment_edit_mode = False
+        self._comment_body_edit.visible = False
+        self._comment_body_display.visible = True
+        self._comment_save_btn.visible = False
+        self._comment_cancel_btn.visible = False
+        self._comment_edit_btn.visible = bool((self._comment_body_display.value or "").strip())
+        for c in (
+            self._comment_body_edit,
+            self._comment_body_display,
+            self._comment_edit_btn,
+            self._comment_save_btn,
+            self._comment_cancel_btn,
+        ):
+            if _ctrl_on_page(c):
+                c.update()
+
+    def _sync_ki_comment_tab_from_store(self) -> None:
+        """Load comment body for ``_comment_para_index`` from the latest snapshot."""
+        pi = self._comment_para_index
+        self._comment_heading.value = (
+            paragraph_comment_label(pi) if pi is not None else "No paragraph selected"
+        )
+        body = ""
+        if pi is not None:
+            body = self._ki_comments_for_current_version().get(int(pi), "")
+        self._comment_body_display.value = body
+        if not self._comment_edit_mode:
+            self._comment_body_edit.value = body
+
+    async def _scroll_ki_comments_to_paragraph(self, paragraph_index: int) -> None:
+        lv = getattr(self, "_ki_comments_list", None)
+        if lv is None or not _ctrl_on_page(lv):
+            return
+        rows = sorted_comment_rows(self._ki_comments_for_current_version())
+        idx = next((i for i, (p, _) in enumerate(rows) if int(p) == int(paragraph_index)), None)
+        if idx is None:
+            return
+        key = f"ki_comment_{paragraph_index}"
+        try:
+            await lv.scroll_to(scroll_key=key, duration=150)
+            return
+        except (TypeError, AttributeError):
+            pass
+        await lv.scroll_to(offset=float(idx) * 72.0, duration=150)
+
+    async def _open_ki_comments_for_paragraph_async(
+        self, paragraph_index: int | None, start_in_edit: bool = True
+    ) -> None:
+        if paragraph_index is None:
+            self._snack("No paragraph slot for a comment here.")
+            return
+        if not self.current_path:
+            self._snack("Open a note first.")
+            return
+        if not self.right_open:
+            self.toggle_right()
+        self._comment_para_index = int(paragraph_index)
+        self._comment_edit_mode = bool(start_in_edit)
+        self._set_ki_topic(KI_TOPIC_COMMENTS)
+        self._ki_comments_detail.visible = True
+        self._sync_ki_comment_tab_from_store()
+        if start_in_edit:
+            self._comment_body_edit.value = self._comment_body_display.value or ""
+            self._comment_body_edit.visible = True
+            self._comment_body_display.visible = False
+            self._comment_edit_btn.visible = False
+            self._comment_save_btn.visible = True
+            self._comment_cancel_btn.visible = True
+        else:
+            self._comment_body_edit.visible = False
+            self._comment_body_display.visible = True
+            self._comment_edit_btn.visible = bool((self._comment_body_display.value or "").strip())
+            self._comment_save_btn.visible = False
+            self._comment_cancel_btn.visible = False
+        self._rebuild_ki_comments_list()
+        await self._scroll_ki_comments_to_paragraph(int(paragraph_index))
+        for c in (
+            self._ki_comments_detail,
+            self._comment_heading,
+            self._comment_body_display,
+            self._comment_body_edit,
+            self._comment_edit_btn,
+            self._comment_save_btn,
+            self._comment_cancel_btn,
+        ):
+            if _ctrl_on_page(c):
+                c.update()
+
+    async def _save_ki_paragraph_comment_async(self, _e: ft.ControlEvent | None = None) -> None:
+        if self._comment_para_index is None or not self.current_path:
+            self._snack("Nothing to save.")
+            return
+        raw = (self._comment_body_edit.value or "").strip()
+        try:
+            with session_scope() as s:
+                doc = version_storage.get_document_by_resolved_path(s, self.current_path.resolve())
+                if doc is None:
+                    self._snack("Document is not indexed yet.")
+                    return
+                snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+                if not snaps:
+                    self._snack("Save the note once so a version exists for comments.")
+                    return
+                display_body = self._editor_buffer() or ""
+                paragraph_user_comments.upsert(
+                    s,
+                    document_id=int(doc.id),
+                    version_id=int(snaps[0].version_id),
+                    paragraph_index=int(self._comment_para_index),
+                    body=raw,
+                    paragraph_body=display_body,
+                )
+        except BaseException as ex:
+            self._snack(f"Could not save comment: {ex}")
+            return
+        self._comment_edit_mode = False
+        self._sync_ki_comment_tab_from_store()
+        self._rebuild_ki_comments_list()
+        self._comment_body_edit.visible = False
+        self._comment_body_display.visible = True
+        self._comment_edit_btn.visible = bool((self._comment_body_display.value or "").strip())
+        self._comment_save_btn.visible = False
+        self._comment_cancel_btn.visible = False
+        for c in (
+            self._comment_body_edit,
+            self._comment_body_display,
+            self._comment_edit_btn,
+            self._comment_save_btn,
+            self._comment_cancel_btn,
+        ):
+            if _ctrl_on_page(c):
+                c.update()
+        self._refresh_compare_diff_immediate()
 
     async def save_file(
         self,
