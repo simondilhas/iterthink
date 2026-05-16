@@ -24,7 +24,10 @@ from ..components import (
 from .. import ui_theme
 from ..constants import (
     COMPARE_ACTION_COL_W,
+    COMPARE_ACTION_COMMENT_ICON_CX,
+    COMPARE_ACTION_COMMENT_ICON_CY,
     COMPARE_ACTION_GRID_CELL,
+    COMPARE_ACTION_RAIL_HOVER_WRAP_MIN_H,
     COMPARE_COL_FONT_SIZE,
     COMPARE_COL_LINE_HEIGHT,
     COMPARE_EVAL_COL_W,
@@ -41,16 +44,37 @@ _COMPARE_HISTORY_CELL_PAD = ft.padding.all(8)
 
 
 class _HistoryParagraphUIMixin:
-    def _review_comment_presence_icon(self, *, has_comment: bool) -> ft.Control:
-        """Non-interactive comment glyph below the action square (same rail width)."""
-        outline_col = ui_theme.outline_muted(alpha=0.88)
-        icon_col = config.HIGHLIGHT if has_comment else outline_col
-        ic = ft.Icon(ft.Icons.COMMENT_OUTLINED, size=16, color=icon_col)
+    def _review_comment_presence_icon(
+        self, *, has_comment: bool, rail_h: float = float(COMPARE_ACTION_RAIL_HOVER_WRAP_MIN_H)
+    ) -> ft.Container | None:
+        """Non-interactive outline bubble exactly over the comment ``IconButton`` (same size / center)."""
+        if not has_comment:
+            return None
+        iz = float(ACTION_RAIL_ICON_SIZE)
+        cx = COMPARE_ACTION_COMMENT_ICON_CX
+        cy = COMPARE_ACTION_COMMENT_ICON_CY
+        ic = ft.Icon(
+            ft.Icons.CHAT_BUBBLE_OUTLINE,
+            size=int(iz),
+            color=ft.Colors.with_opacity(0.42, config.ON_SURFACE_VARIANT),
+        )
         return ft.Container(
             width=float(COMPARE_ACTION_COL_W),
-            padding=ft.padding.only(top=2, bottom=2),
-            alignment=ft.Alignment.TOP_CENTER,
-            content=ic,
+            height=rail_h,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            opacity=1.0,
+            content=ft.Stack(
+                controls=[
+                    ft.Container(
+                        left=cx - iz * 0.5,
+                        top=cy - iz * 0.5,
+                        width=iz,
+                        height=iz,
+                        alignment=ft.Alignment.CENTER,
+                        content=ic,
+                    ),
+                ],
+            ),
         )
 
     def _build_actions_square(
@@ -60,8 +84,8 @@ class _HistoryParagraphUIMixin:
         persistent: bool = False,
         draft_paragraph_index: int | None = None,
         has_user_comment: bool = False,
-    ) -> tuple[ft.Container, ft.Container | None]:
-        """Review: action grid (hover) + non-interactive comment icon below; rail width fixed."""
+    ) -> tuple[ft.Container, ft.Container | None, ft.Container | None]:
+        """Review: action grid (hover); optional comment glyph shares the same rail footprint."""
         dis_comment = draft_paragraph_index is None
 
         comment_btn = ft.IconButton(
@@ -88,19 +112,34 @@ class _HistoryParagraphUIMixin:
             row_h=COMPARE_ACTION_GRID_CELL,
         )
         inner_chrome, hover = wrap_workspace_action_chrome(actions_inner, persistent=persistent)
-        presence = self._review_comment_presence_icon(has_comment=has_user_comment)
-        rail_col = ft.Column(
-            [inner_chrome, presence],
-            spacing=2,
-            tight=True,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        )
+        _rail_h = float(COMPARE_ACTION_RAIL_HOVER_WRAP_MIN_H)
+        presence = self._review_comment_presence_icon(has_comment=has_user_comment, rail_h=_rail_h)
+        if presence is not None:
+            rail_content = ft.Stack(
+                fit=ft.StackFit.EXPAND,
+                width=float(COMPARE_ACTION_COL_W),
+                height=_rail_h,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                controls=[
+                    ft.Container(
+                        width=float(COMPARE_ACTION_COL_W),
+                        height=_rail_h,
+                        alignment=ft.Alignment.TOP_CENTER,
+                        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                        content=inner_chrome,
+                    ),
+                    presence,
+                ],
+            )
+        else:
+            rail_content = inner_chrome
         rail = ft.Container(
             width=float(COMPARE_ACTION_COL_W),
+            height=_rail_h,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            content=rail_col,
+            content=rail_content,
         )
-        return rail, hover
+        return rail, hover, presence
 
     def _rebuild_compare_paragraph_ui(self) -> None:
         """History tab: eval | old | pill | new — with ghost rows at old positions of moved content.
@@ -417,8 +456,15 @@ class _HistoryParagraphUIMixin:
                     if doc is not None:
                         snaps = version_storage.list_snapshots(s, self.current_path.resolve())
                         if snaps:
-                            future_user_comments = paragraph_user_comments.map_for_version(
-                                s, document_id=int(doc.id), version_id=int(snaps[0].version_id)
+                            anchor_body = version_storage.load_version_body(
+                                s, int(snaps[0].version_id)
+                            )
+                            future_user_comments = paragraph_user_comments.map_resolved_for_display(
+                                s,
+                                document_id=int(doc.id),
+                                version_id=int(snaps[0].version_id),
+                                anchor_body=anchor_body,
+                                display_body=ai_text,
                             )
             except Exception:
                 future_user_comments = {}
@@ -476,7 +522,7 @@ class _HistoryParagraphUIMixin:
                     ghost_row_cells.append(
                         ft.Container(
                             width=COMPARE_ACTION_COL_W,
-                            padding=ft.padding.only(top=4),
+                            height=float(COMPARE_ACTION_RAIL_HOVER_WRAP_MIN_H),
                         )
                     )
                 row_inner = ft.Row(
@@ -526,7 +572,7 @@ class _HistoryParagraphUIMixin:
                     right_cell,
                 ]
                 if show_actions:
-                    actions_ctrl, hover_wrap_future = self._build_actions_square(
+                    actions_ctrl, hover_wrap_future, presence_host = self._build_actions_square(
                         field_idx,
                         draft_paragraph_index=None,
                         has_user_comment=False,
@@ -539,7 +585,9 @@ class _HistoryParagraphUIMixin:
                     )
                     row_wrap = ft.Container(
                         content=row_inner,
-                        on_hover=lambda e, w=hover_wrap_future: self._on_compare_row_hover(e, w),
+                        on_hover=lambda e, w=hover_wrap_future, ph=presence_host: self._on_compare_row_hover(
+                            e, w, ph
+                        ),
                     )
                     self._future_rows_listview.controls.append(row_wrap)
                 else:
@@ -621,7 +669,7 @@ class _HistoryParagraphUIMixin:
             if show_actions:
                 cand_pi = row.new_paragraph_index
                 has_uc = cand_pi in future_user_comments
-                actions_ctrl, hover_wrap_future = self._build_actions_square(
+                actions_ctrl, hover_wrap_future, presence_host = self._build_actions_square(
                     field_idx,
                     draft_paragraph_index=int(cand_pi),
                     has_user_comment=has_uc,
@@ -634,7 +682,9 @@ class _HistoryParagraphUIMixin:
                 )
                 row_wrap = ft.Container(
                     content=row_inner,
-                    on_hover=lambda e, w=hover_wrap_future: self._on_compare_row_hover(e, w),
+                    on_hover=lambda e, w=hover_wrap_future, ph=presence_host: self._on_compare_row_hover(
+                        e, w, ph
+                    ),
                 )
                 self._future_rows_listview.controls.append(row_wrap)
             else:

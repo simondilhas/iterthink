@@ -47,12 +47,13 @@ class _HistorySpellReviewMixin:
             return
         if not spellchecker_available():
             self._snack(
-                "Spelling review needs a working pyspellchecker English dictionary "
-                "(install the package and ensure spellchecker resource files are on PYTHONPATH)."
+                "Spelling review needs a working pyspellchecker dictionary "
+                "(install the package, copy language files into the store spell_dictionaries folder on startup, "
+                "or set a custom dictionary file in Settings)."
             )
             return
         if (self._compare_editor.value or "") == (self.editor.value or ""):
-            self._snack("No unknown English words found — suggested text matches the draft.")
+            self._snack("No unknown words found — suggested text matches the draft.")
 
     async def _debounced_spell_suggest_cache(self, gen: int) -> None:
         await asyncio.sleep(0.32)

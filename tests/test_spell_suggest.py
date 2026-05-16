@@ -47,22 +47,29 @@ def test_suggest_common_typos(src: str, expect_sub: str) -> None:
 
 def test_reset_spellchecker_cache_forces_rebuild(monkeypatch: pytest.MonkeyPatch) -> None:
     builds = {"n": 0}
-    real = spell_suggest._build_spellchecker_for_path
+    real_try = spell_suggest._try_load_spellchecker
+    real_fb = spell_suggest._fallback_package_spellchecker
 
-    def wrapped(path: str):
+    def wrapped_try(*a: object, **kw: object):
         builds["n"] += 1
-        return real(path)
+        return real_try(*a, **kw)
 
-    monkeypatch.setattr(spell_suggest, "_build_spellchecker_for_path", wrapped)
+    def wrapped_fb(lang: str):
+        builds["n"] += 1
+        return real_fb(lang)
+
+    monkeypatch.setattr(spell_suggest, "_try_load_spellchecker", wrapped_try)
+    monkeypatch.setattr(spell_suggest, "_fallback_package_spellchecker", wrapped_fb)
     spell_suggest.reset_spellchecker_cache()
+    n0 = builds["n"]
     assert spell_suggest.spellchecker_available() in (True, False)
+    assert builds["n"] > n0
     n1 = builds["n"]
-    assert n1 >= 1
     _ = spell_suggest.spellchecker_available()
     assert builds["n"] == n1
     spell_suggest.reset_spellchecker_cache()
     _ = spell_suggest.spellchecker_available()
-    assert builds["n"] == n1 + 1
+    assert builds["n"] > n1
 
 
 def test_custom_local_dictionary_path(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

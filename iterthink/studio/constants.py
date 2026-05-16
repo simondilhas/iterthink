@@ -65,6 +65,25 @@ COMPARE_ACTION_INNER_W = COMPARE_ACTION_GRID_CELL * 2
 COMPARE_ACTION_H_PAD = 5
 COMPARE_ACTION_V_PAD = 2
 COMPARE_ACTION_COL_W = COMPARE_ACTION_INNER_W + 2 * COMPARE_ACTION_H_PAD
+# Vertical size of the 2×2 compare action rectangle (grid + vertical padding + 1px border top+bottom).
+COMPARE_ACTION_RECTANGLE_OUTER_MIN_H = (
+    2 * COMPARE_ACTION_GRID_CELL + 2 * COMPARE_ACTION_V_PAD + 2
+)
+# Top padding on the hover wrapper around that rectangle (see action_chrome.wrap_workspace_action_chrome).
+COMPARE_ACTION_RAIL_CHROME_TOP_PAD = 4
+COMPARE_ACTION_RAIL_HOVER_WRAP_MIN_H = COMPARE_ACTION_RAIL_CHROME_TOP_PAD + COMPARE_ACTION_RECTANGLE_OUTER_MIN_H
+# ``build_action_rectangle`` uses ``ft.border.all(1, …)``; center of bottom-left (comment) cell for overlay alignment.
+_COMPARE_ACTION_CARD_BORDER_PX = 1
+COMPARE_ACTION_COMMENT_ICON_CX = float(
+    _COMPARE_ACTION_CARD_BORDER_PX + COMPARE_ACTION_H_PAD + COMPARE_ACTION_GRID_CELL / 2
+)
+COMPARE_ACTION_COMMENT_ICON_CY = float(
+    COMPARE_ACTION_RAIL_CHROME_TOP_PAD
+    + _COMPARE_ACTION_CARD_BORDER_PX
+    + COMPARE_ACTION_V_PAD
+    + COMPARE_ACTION_GRID_CELL
+    + COMPARE_ACTION_GRID_CELL / 2
+)
 # Eval column on Compare/Review rows mirrors the action column width so the row stays symmetric.
 COMPARE_EVAL_COL_W = COMPARE_ACTION_COL_W
 # Wider eval column when showing symbol + truncated paragraph summary.

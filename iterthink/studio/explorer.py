@@ -1401,6 +1401,9 @@ class MarkdownStudioExplorer:
         # Reset all compare-side state for the incoming document.
         self._reset_compare_state()
         self.current_path = path
+        self._comment_para_index = None
+        if hasattr(self, "_sync_ki_comments_tab_layout"):
+            self._sync_ki_comments_tab_layout()
         self.last_saved_text = text
         self.editor.value = text
         self._editor_prev_for_list_continue = text
@@ -1434,6 +1437,8 @@ class MarkdownStudioExplorer:
 
         if getattr(self, "_impact_tab_initialized", False) and hasattr(self, "_rebuild_impact_context_tree"):
             self._rebuild_impact_context_tree()
+        if hasattr(self, "_rebuild_content_tree"):
+            self._rebuild_content_tree()
 
         try:
             with session_scope() as s:

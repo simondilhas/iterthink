@@ -86,6 +86,7 @@ class ParagraphUserComment(Base):
         ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True
     )
     paragraph_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
     updated_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())

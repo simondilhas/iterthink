@@ -3,11 +3,23 @@
 from __future__ import annotations
 
 import time
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Iterable
+
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from iterthink.compare.paragraph_align import compute_alignment
+from iterthink.compare.margin import split_paragraphs
+from iterthink.compare.paragraph_align import compute_alignment, compute_hash
 from iterthink.db.models import ParagraphUserComment
+
+
+@dataclass(frozen=True)
+class StoredComment:
+    paragraph_index: int
+    body: str
+    content_hash: str | None = None
 
 
 def alignment_old_to_new_paragraph_index(old_text: str, new_text: str) -> dict[int, int]:
@@ -20,6 +32,102 @@ def alignment_old_to_new_paragraph_index(old_text: str, new_text: str) -> dict[i
     return out
 
 
+def hash_for_paragraph(body: str, index: int) -> str | None:
+    paras = split_paragraphs(body)
+    if index < 0 or index >= len(paras):
+        return None
+    return compute_hash(paras[index])
+
+
+def _display_hash_to_indices(display_body: str) -> dict[str, list[int]]:
+    paras = split_paragraphs(display_body)
+    out: dict[str, list[int]] = defaultdict(list)
+    for i, para in enumerate(paras):
+        out[compute_hash(para)].append(i)
+    return dict(out)
+
+
+def _merge_comment_texts(texts: list[str]) -> str:
+    return "\n---\n".join(dict.fromkeys(t for t in texts if (t or "").strip()))
+
+
+def resolve_comments_for_body(
+    anchor_body: str,
+    display_body: str,
+    stored: Iterable[StoredComment],
+) -> dict[int, str]:
+    """
+    Map stored comments onto ``display_body`` paragraph indices.
+
+    1. Exact ``content_hash`` match on display paragraphs (tie-break by index distance).
+    2. Alignment fallback: ``anchor_body`` index → display index.
+    3. Orphans merge into paragraph index 0.
+    """
+    comments = [
+        StoredComment(
+            paragraph_index=int(c.paragraph_index),
+            body=(c.body or "").strip(),
+            content_hash=(c.content_hash or None),
+        )
+        for c in stored
+        if (c.body or "").strip()
+    ]
+    if not comments:
+        return {}
+
+    hash_map = _display_hash_to_indices(display_body)
+    idx_map = alignment_old_to_new_paragraph_index(anchor_body, display_body)
+    bucket: defaultdict[int, list[str]] = defaultdict(list)
+    orphans: list[str] = []
+
+    for c in comments:
+        target: int | None = None
+        h = (c.content_hash or "").strip()
+        if h and h in hash_map:
+            candidates = hash_map[h]
+            if len(candidates) == 1:
+                target = candidates[0]
+            else:
+                target = min(candidates, key=lambda i: abs(i - c.paragraph_index))
+
+        if target is None:
+            mapped = idx_map.get(int(c.paragraph_index))
+            if mapped is not None:
+                target = int(mapped)
+
+        if target is None:
+            orphans.append(c.body)
+        else:
+            bucket[int(target)].append(c.body)
+
+    if orphans:
+        bucket[0].extend(orphans)
+
+    out: dict[int, str] = {}
+    for idx, texts in bucket.items():
+        merged = _merge_comment_texts(texts)
+        if merged:
+            out[int(idx)] = merged
+    return out
+
+
+def list_stored_for_version(session: Session, *, document_id: int, version_id: int) -> list[StoredComment]:
+    rows = session.execute(
+        select(ParagraphUserComment).where(
+            ParagraphUserComment.document_id == document_id,
+            ParagraphUserComment.version_id == version_id,
+        )
+    ).scalars()
+    return [
+        StoredComment(
+            paragraph_index=int(r.paragraph_index),
+            body=r.body or "",
+            content_hash=r.content_hash,
+        )
+        for r in rows
+    ]
+
+
 def map_for_version(session: Session, *, document_id: int, version_id: int) -> dict[int, str]:
     rows = session.execute(
         select(ParagraphUserComment).where(
@@ -28,6 +136,18 @@ def map_for_version(session: Session, *, document_id: int, version_id: int) -> d
         )
     ).scalars()
     return {int(r.paragraph_index): (r.body or "").strip() for r in rows if (r.body or "").strip()}
+
+
+def map_resolved_for_display(
+    session: Session,
+    *,
+    document_id: int,
+    version_id: int,
+    anchor_body: str,
+    display_body: str,
+) -> dict[int, str]:
+    stored = list_stored_for_version(session, document_id=document_id, version_id=version_id)
+    return resolve_comments_for_body(anchor_body, display_body, stored)
 
 
 def get_one(session: Session, *, document_id: int, version_id: int, paragraph_index: int) -> str | None:
@@ -48,6 +168,26 @@ def get_one(session: Session, *, document_id: int, version_id: int, paragraph_in
     return b if b else None
 
 
+def get_resolved_one(
+    session: Session,
+    *,
+    document_id: int,
+    version_id: int,
+    anchor_body: str,
+    display_body: str,
+    paragraph_index: int,
+) -> str | None:
+    resolved = map_resolved_for_display(
+        session,
+        document_id=document_id,
+        version_id=version_id,
+        anchor_body=anchor_body,
+        display_body=display_body,
+    )
+    text = (resolved.get(int(paragraph_index)) or "").strip()
+    return text if text else None
+
+
 def upsert(
     session: Session,
     *,
@@ -55,9 +195,13 @@ def upsert(
     version_id: int,
     paragraph_index: int,
     body: str,
+    content_hash: str | None = None,
+    paragraph_body: str | None = None,
 ) -> None:
     now = time.time()
     body = (body or "").strip()
+    if content_hash is None and paragraph_body is not None:
+        content_hash = hash_for_paragraph(paragraph_body, int(paragraph_index))
     row = (
         session.execute(
             select(ParagraphUserComment).where(
@@ -79,6 +223,7 @@ def upsert(
                 document_id=document_id,
                 version_id=version_id,
                 paragraph_index=int(paragraph_index),
+                content_hash=content_hash,
                 body=body,
                 created_at=now,
                 updated_at=now,
@@ -86,6 +231,7 @@ def upsert(
         )
         return
     row.body = body
+    row.content_hash = content_hash
     row.updated_at = now
 
 
@@ -108,30 +254,21 @@ def migrate_comments_to_new_version(
     old_body: str,
     new_body: str,
 ) -> None:
-    """Copy user comments from parent snapshot to ``new_version_id`` using paragraph alignment."""
-    from collections import defaultdict
-
-    old_map = map_for_version(session, document_id=document_id, version_id=parent_version_id)
-    if not old_map:
+    """Copy user comments from parent snapshot to ``new_version_id`` using hash + alignment."""
+    stored = list_stored_for_version(session, document_id=document_id, version_id=parent_version_id)
+    if not stored:
         return
-    idx_map = alignment_old_to_new_paragraph_index(old_body, new_body)
-    bucket: defaultdict[int, list[str]] = defaultdict(list)
-    for old_i, text in old_map.items():
-        new_i = idx_map.get(int(old_i))
-        if new_i is None:
-            continue
-        t = (text or "").strip()
-        if t:
-            bucket[int(new_i)].append(t)
-    for new_i, texts in bucket.items():
-        merged = "\n---\n".join(dict.fromkeys(texts))
+    resolved = resolve_comments_for_body(old_body, new_body, stored)
+    for new_i, text in resolved.items():
         upsert(
             session,
             document_id=document_id,
             version_id=new_version_id,
             paragraph_index=int(new_i),
-            body=merged,
+            body=text,
+            paragraph_body=new_body,
         )
+    session.flush()
 
 
 def merge_with_impact_for_export(

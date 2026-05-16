@@ -27,6 +27,8 @@ SETTINGS_CLOUD_OPENAI_MODEL = "cloud_openai_model"
 SETTINGS_CLOUD_GOOGLE_MODEL = "cloud_google_model"
 SETTINGS_EXPORT_AUTHOR = "export_author"
 SETTINGS_SPELLCHECK_DICTIONARY_PATH = "spellcheck_dictionary_path"
+SETTINGS_SPELLCHECK_LANGUAGE_MODE = "spellcheck_language_mode"
+SETTINGS_SPELLCHECK_LANGUAGE = "spellcheck_language"
 
 
 def ensure_store_dir() -> None:

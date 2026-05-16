@@ -972,6 +972,8 @@ class MarkdownStudioCompose:
         ):
             self._refresh_compare_diff_immediate()
         self._kick_debounced_compare_diff_if_main_editor_backs_buffers()
+        if getattr(self, "_left_sidebar_tab", 0) == 1 and hasattr(self, "_rebuild_content_tree"):
+            self._rebuild_content_tree()
         if not self.current_path:
             return
         self._kick_spell_cache_from_compose_if_needed()
@@ -1125,10 +1127,22 @@ class MarkdownStudioCompose:
             items=compose_items,
         )
 
-    def _on_compare_row_hover(self, e: ft.ControlEvent, actions_wrap: ft.Container) -> None:
-        actions_wrap.opacity = 1.0 if e.data else 0.0
+    def _on_compare_row_hover(
+        self,
+        e: ft.ControlEvent,
+        actions_wrap: ft.Container,
+        presence_host: ft.Container | None = None,
+    ) -> None:
+        hovered = bool(e.data)
+        actions_wrap.opacity = 1.0 if hovered else 0.0
+        # Keep presence in layout stack but invisible on hover; ignore hits so action buttons work.
+        if presence_host is not None:
+            presence_host.opacity = 0.0 if hovered else 1.0
+            presence_host.ignore_interactions = hovered
         if _ctrl_on_page(actions_wrap):
             actions_wrap.update()
+        if presence_host is not None and _ctrl_on_page(presence_host):
+            presence_host.update()
 
     async def _compose_restore_editor_selection(self, a: int, b: int) -> None:
         await asyncio.sleep(0.06)
