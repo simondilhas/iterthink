@@ -28,8 +28,7 @@ def test_export_annotated_pdf_writes_file(tmp_path: Path) -> None:
     anns = [
         PlanAnnotation(
             id=1,
-            document_id=1,
-            version_id=1,
+            content_version_id=1,
             paragraph_index=0,
             annotation_kind=KIND_PIN,
             plan_page_index=0,
@@ -40,8 +39,7 @@ def test_export_annotated_pdf_writes_file(tmp_path: Path) -> None:
         ),
         PlanAnnotation(
             id=2,
-            document_id=1,
-            version_id=1,
+            content_version_id=1,
             paragraph_index=1,
             annotation_kind=KIND_REVISION_CLOUD,
             plan_page_index=0,

@@ -27,11 +27,13 @@ def store_conn():
         p.unlink(missing_ok=True)
 
 
-def test_settings_roundtrip(store_conn) -> None:
-    store_db.settings_set(store_conn, "k_test", "v1")
-    assert store_db.settings_get(store_conn, "k_test") == "v1"
-    store_db.settings_set(store_conn, "k_test", "v2")
-    assert store_db.settings_get(store_conn, "k_test") == "v2"
+def test_settings_roundtrip(ephemeral_store: None) -> None:
+    conn = store_db.connect()
+    store_db.settings_set(conn, "k_test", "v1")
+    assert store_db.settings_get(conn, "k_test") == "v1"
+    store_db.settings_set(conn, "k_test", "v2")
+    assert store_db.settings_get(conn, "k_test") == "v2"
+    conn.close()
 
 
 def test_manifest_roundtrip(store_conn) -> None:

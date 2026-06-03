@@ -218,6 +218,15 @@ def paragraph_index_at_offset(text: str, offset: int) -> int:
     return len(parts) - 1
 
 
+def paragraph_offset_at_index(text: str, index: int) -> int:
+    """Return buffer offset at the start of paragraph ``index``."""
+    _, spans = _paragraph_strings_and_spans(text)
+    if not spans:
+        return 0
+    idx = max(0, min(int(index), len(spans) - 1))
+    return spans[idx][0]
+
+
 def visual_line_count_for_paragraph_prefix(
     text: str,
     paragraph_index: int,

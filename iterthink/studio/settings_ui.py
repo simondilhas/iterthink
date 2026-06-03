@@ -1176,11 +1176,83 @@ async def _open_settings_dialog(studio: Any) -> None:
             wrap_crypto,
             wrap_office,
             wrap_cloud,
+            ft.Divider(height=12),
+            ft.Text("Search indexing", size=14, weight=ft.FontWeight.W_600),
         ],
         tight=True,
         spacing=12,
         scroll=ft.ScrollMode.AUTO,
     )
+
+    rag_status_text = ft.Text("", size=12, color=config.ON_SURFACE_SOFT)
+    rag_chunks_text = ft.Text("", size=12, color=config.ON_SURFACE_VARIANT)
+    rag_last_indexed_text = ft.Text("", size=12, color=config.ON_SURFACE_VARIANT)
+    rag_progress_label = ft.Text("", size=12, color=config.ON_SURFACE_SOFT, visible=False)
+    rag_progress_bar = ft.ProgressBar(value=0, visible=False)
+    rag_reindex_btn = ft.OutlinedButton("Re-index all")
+
+    studio._rag_settings_status_text = rag_status_text
+    studio._rag_settings_chunks_text = rag_chunks_text
+    studio._rag_settings_last_indexed_text = rag_last_indexed_text
+    studio._rag_settings_progress_bar = rag_progress_bar
+    studio._rag_settings_progress_label = rag_progress_label
+    studio._rag_settings_reindex_btn = rag_reindex_btn
+
+    async def on_rag_reindex(_e: ft.ControlEvent | None = None) -> None:
+        await studio._rag_reindex_all_from_settings()
+
+    rag_reindex_btn.on_click = lambda e: page.run_task(on_rag_reindex, e)
+
+    rag_search_column = ft.Column(
+        [
+            rag_status_text,
+            rag_chunks_text,
+            rag_last_indexed_text,
+            rag_progress_bar,
+            rag_progress_label,
+            ft.Switch(
+                label="Latest saved version only",
+                value=(store_db.settings_get(studio._db, store_db.SETTINGS_RAG_LATEST_VERSION_ONLY) or "true")
+                != "false",
+                tooltip="Index and search the newest PBS snapshot; older snapshots kept for timetravel",
+                on_change=lambda e: store_db.settings_set(
+                    studio._db,
+                    store_db.SETTINGS_RAG_LATEST_VERSION_ONLY,
+                    "true" if e.control.value else "false",
+                ),
+            ),
+            ft.Dropdown(
+                label="RAG enrichment",
+                value=store_db.settings_get(studio._db, store_db.SETTINGS_RAG_ENRICHMENT_MODE) or "local",
+                options=[
+                    ft.dropdown.Option("local", "Local (Ollama)"),
+                    ft.dropdown.Option("skip", "Skip"),
+                ],
+                on_select=lambda e: store_db.settings_set(
+                    studio._db,
+                    store_db.SETTINGS_RAG_ENRICHMENT_MODE,
+                    str(e.control.value or "local"),
+                ),
+            ),
+            ft.Switch(
+                label="Reranker",
+                value=(store_db.settings_get(studio._db, store_db.SETTINGS_RAG_RERANKER_ENABLED) or "true")
+                != "false",
+                on_change=lambda e: store_db.settings_set(
+                    studio._db,
+                    store_db.SETTINGS_RAG_RERANKER_ENABLED,
+                    "true" if e.control.value else "false",
+                ),
+            ),
+            rag_reindex_btn,
+        ],
+        tight=True,
+        spacing=8,
+    )
+
+    models_models_column.controls.extend([rag_search_column])
+
+    studio._refresh_rag_settings_status()
 
     tab_models = ft.Container(
         padding=8,

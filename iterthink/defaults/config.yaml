@@ -54,6 +54,12 @@ new_note_name_template: "unnamed-{n}.md"
 # Set to true for the Impact (RAG) subtab and pills. User ~/.config/iterthink/config.yaml overrides this file.
 rag_system: false
 
+# Workspace RAG indexing and semantic search
+rag_index_on_startup: true
+rag_overlap_chars: 200
+rag_reranker_enabled: true
+rag_reranker_model: Xenova/ms-marco-MiniLM-L-6-v2
+
 # Privacy shield: redact names, orgs, and API keys locally before Office/Cloud LLM calls.
 privacy_shield_enabled: true
 # Hugging Face GGUF (streamed into store_dir/privacy_shield/ on first run).

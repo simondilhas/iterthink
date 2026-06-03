@@ -22,7 +22,7 @@ import flet as ft
 
 from iterthink import config
 from iterthink.db.session import session_scope
-from iterthink.persistence import version_storage
+from iterthink.persistence import content_repo
 
 from . import ui_theme
 from .constants import (
@@ -332,8 +332,8 @@ class MainWorkspaceTabsMixin:
                 self._pending_post_import_history_vid = None
             elif self.current_path and prev != TAB_HISTORY:
                 with session_scope() as s:
-                    snaps = version_storage.list_snapshots(s, self.current_path.resolve())
-                pick_vid = version_storage.second_newest_history_autosave_version_id(snaps)
+                    snaps = content_repo.list_snapshots(s, self.current_path.resolve())
+                pick_vid = content_repo.second_newest_history_autosave_version_id(snaps)
 
             if pick_vid is not None:
                 self._select_snapshot_as_candidate(pick_vid)
@@ -397,7 +397,7 @@ class MainWorkspaceTabsMixin:
                     target_vid = self._latest_ai_proposal_vid
                     if target_vid is None and self.current_path:
                         with session_scope() as s:
-                            snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+                            snaps = content_repo.list_snapshots(s, self.current_path.resolve())
                         for sn in snaps:  # newest first
                             if sn.reason in ("ai_proposal", "ai_staged", "review_edit"):
                                 target_vid = sn.version_id
@@ -413,7 +413,7 @@ class MainWorkspaceTabsMixin:
                         self._compare_editor.value = seeded
                         self._pending_ai_accept_action_id = REVIEW_MANUAL_CANDIDATE_ACTION_ID
                         self._compare_snapshot_version_id = None
-                        self._loaded_proposal_sha = version_storage.content_sha256(seeded)
+                        self._loaded_proposal_sha = content_repo.content_sha256(seeded)
                 if self._is_tab_switch_stale(switch_seq):
                     self._discard_future_tab_loading_spinner()
                     self._main_tab_index = prev

@@ -23,8 +23,10 @@ def ephemeral_store(monkeypatch: pytest.MonkeyPatch):
     store_dir = _SCRATCH_ROOT / f"iterthink_{uuid.uuid4().hex}"
     store_dir.mkdir(parents=True, exist_ok=True)
     db_path = store_dir / "store.sqlite3"
+    rag_path = store_dir / "store.rag.sqlite3"
     monkeypatch.setattr(config, "STORE_DIR", store_dir)
     monkeypatch.setattr(config, "STORE_DB_PATH", db_path)
+    monkeypatch.setattr(config, "RAG_DB_PATH", rag_path)
     db_session.reset_engine_cache()
     bootstrap.bootstrap_database()
     yield

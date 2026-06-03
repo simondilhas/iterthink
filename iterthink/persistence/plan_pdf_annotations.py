@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from iterthink.db.models import ParagraphUserComment
+from iterthink.persistence import content_changes
 
 KIND_PARAGRAPH = "paragraph"
 KIND_PIN = "pin"
@@ -22,8 +22,7 @@ _PLAN_KINDS = (KIND_PIN, KIND_REVISION_CLOUD)
 @dataclass(frozen=True)
 class PlanAnnotation:
     id: int
-    document_id: int
-    version_id: int
+    content_version_id: int
     paragraph_index: int
     annotation_kind: str
     plan_page_index: int
@@ -31,6 +30,14 @@ class PlanAnnotation:
     plan_norm_y: float | None
     body: str
     geometry_json: str | None
+
+    @property
+    def document_id(self) -> int:
+        return self.content_version_id
+
+    @property
+    def version_id(self) -> int:
+        return self.content_version_id
 
     def cloud_bbox_norm(self) -> dict[str, float] | None:
         if self.annotation_kind != KIND_REVISION_CLOUD or not self.geometry_json:
@@ -50,8 +57,7 @@ class PlanAnnotation:
 def _row_to_annotation(row: ParagraphUserComment) -> PlanAnnotation:
     return PlanAnnotation(
         id=int(row.id),
-        document_id=int(row.document_id),
-        version_id=int(row.version_id),
+        content_version_id=int(row.content_version_id),
         paragraph_index=int(row.paragraph_index),
         annotation_kind=str(row.annotation_kind or KIND_PIN),
         plan_page_index=int(row.plan_page_index or 0),
@@ -62,12 +68,11 @@ def _row_to_annotation(row: ParagraphUserComment) -> PlanAnnotation:
     )
 
 
-def next_paragraph_slot(session: Session, *, document_id: int, version_id: int) -> int:
+def next_paragraph_slot(session: Session, *, content_version_id: int) -> int:
     session.flush()
     indices = session.execute(
         select(ParagraphUserComment.paragraph_index).where(
-            ParagraphUserComment.document_id == int(document_id),
-            ParagraphUserComment.version_id == int(version_id),
+            ParagraphUserComment.content_version_id == int(content_version_id),
         )
     ).scalars()
     slots = [int(i) for i in indices]
@@ -76,14 +81,11 @@ def next_paragraph_slot(session: Session, *, document_id: int, version_id: int) 
     return max(slots) + 1
 
 
-def list_for_plan_version(
-    session: Session, *, document_id: int, version_id: int
-) -> list[PlanAnnotation]:
+def list_for_plan_version(session: Session, *, content_version_id: int) -> list[PlanAnnotation]:
     rows = session.execute(
         select(ParagraphUserComment)
         .where(
-            ParagraphUserComment.document_id == int(document_id),
-            ParagraphUserComment.version_id == int(version_id),
+            ParagraphUserComment.content_version_id == int(content_version_id),
             ParagraphUserComment.annotation_kind.in_(_PLAN_KINDS),
         )
         .order_by(ParagraphUserComment.plan_page_index, ParagraphUserComment.id)
@@ -92,11 +94,11 @@ def list_for_plan_version(
 
 
 def list_pins_and_clouds_by_page(
-    session: Session, *, document_id: int, version_id: int, page_index: int
+    session: Session, *, content_version_id: int, page_index: int
 ) -> list[PlanAnnotation]:
     return [
         a
-        for a in list_for_plan_version(session, document_id=document_id, version_id=version_id)
+        for a in list_for_plan_version(session, content_version_id=content_version_id)
         if a.plan_page_index == int(page_index)
     ]
 
@@ -109,13 +111,12 @@ def get_by_id(session: Session, annotation_id: int) -> PlanAnnotation | None:
 
 
 def get_by_paragraph_index(
-    session: Session, *, document_id: int, version_id: int, paragraph_index: int
+    session: Session, *, content_version_id: int, paragraph_index: int
 ) -> PlanAnnotation | None:
     row = (
         session.execute(
             select(ParagraphUserComment).where(
-                ParagraphUserComment.document_id == int(document_id),
-                ParagraphUserComment.version_id == int(version_id),
+                ParagraphUserComment.content_version_id == int(content_version_id),
                 ParagraphUserComment.paragraph_index == int(paragraph_index),
                 ParagraphUserComment.annotation_kind.in_(_PLAN_KINDS),
             )
@@ -131,18 +132,16 @@ def get_by_paragraph_index(
 def insert_pin(
     session: Session,
     *,
-    document_id: int,
-    version_id: int,
+    content_version_id: int,
     plan_page_index: int,
     plan_norm_x: float,
     plan_norm_y: float,
     body: str = "",
 ) -> PlanAnnotation:
     now = time.time()
-    slot = next_paragraph_slot(session, document_id=document_id, version_id=version_id)
+    slot = next_paragraph_slot(session, content_version_id=content_version_id)
     row = ParagraphUserComment(
-        document_id=int(document_id),
-        version_id=int(version_id),
+        content_version_id=int(content_version_id),
         paragraph_index=slot,
         annotation_kind=KIND_PIN,
         plan_page_index=int(plan_page_index),
@@ -156,14 +155,15 @@ def insert_pin(
     )
     session.add(row)
     session.flush()
-    return _row_to_annotation(row)
+    ann = _row_to_annotation(row)
+    content_changes.sync_plan_annotation_geometry(session, ann)
+    return ann
 
 
 def insert_revision_cloud(
     session: Session,
     *,
-    document_id: int,
-    version_id: int,
+    content_version_id: int,
     plan_page_index: int,
     x0: float,
     y0: float,
@@ -172,15 +172,14 @@ def insert_revision_cloud(
     body: str = "",
 ) -> PlanAnnotation:
     now = time.time()
-    slot = next_paragraph_slot(session, document_id=document_id, version_id=version_id)
+    slot = next_paragraph_slot(session, content_version_id=content_version_id)
     lo_x, hi_x = sorted((float(x0), float(x1)))
     lo_y, hi_y = sorted((float(y0), float(y1)))
     geom = json.dumps({"x0": lo_x, "y0": lo_y, "x1": hi_x, "y1": hi_y})
     cx = (lo_x + hi_x) * 0.5
     cy = (lo_y + hi_y) * 0.5
     row = ParagraphUserComment(
-        document_id=int(document_id),
-        version_id=int(version_id),
+        content_version_id=int(content_version_id),
         paragraph_index=slot,
         annotation_kind=KIND_REVISION_CLOUD,
         plan_page_index=int(plan_page_index),
@@ -194,7 +193,9 @@ def insert_revision_cloud(
     )
     session.add(row)
     session.flush()
-    return _row_to_annotation(row)
+    ann = _row_to_annotation(row)
+    content_changes.sync_plan_annotation_geometry(session, ann)
+    return ann
 
 
 def update_body(session: Session, *, annotation_id: int, body: str) -> None:
@@ -206,15 +207,19 @@ def update_body(session: Session, *, annotation_id: int, body: str) -> None:
 
 
 def delete_annotation(session: Session, *, annotation_id: int) -> None:
+    row = session.get(ParagraphUserComment, int(annotation_id))
+    if row is not None:
+        content_changes.delete_plan_annotation_geometry(
+            session,
+            content_version_id=int(row.content_version_id),
+            annotation_id=int(annotation_id),
+        )
     session.execute(delete(ParagraphUserComment).where(ParagraphUserComment.id == int(annotation_id)))
 
 
-def plan_comments_map_for_ki(
-    session: Session, *, document_id: int, version_id: int
-) -> dict[int, str]:
-    """Paragraph-index keyed comment bodies for KI list (user text only)."""
+def plan_comments_map_for_ki(session: Session, *, content_version_id: int) -> dict[int, str]:
     out: dict[int, str] = {}
-    for a in list_for_plan_version(session, document_id=document_id, version_id=version_id):
+    for a in list_for_plan_version(session, content_version_id=content_version_id):
         text = (a.body or "").strip()
         if text:
             out[a.paragraph_index] = text
@@ -226,9 +231,7 @@ def plan_comment_list_title(ann: PlanAnnotation) -> str:
     return f"Page {ann.plan_page_index + 1} · {label}"
 
 
-def cloud_bbox_from_points(
-    x0: float, y0: float, x1: float, y1: float
-) -> dict[str, float]:
+def cloud_bbox_from_points(x0: float, y0: float, x1: float, y1: float) -> dict[str, float]:
     lo_x, hi_x = sorted((float(x0), float(x1)))
     lo_y, hi_y = sorted((float(y0), float(y1)))
     return {"x0": lo_x, "y0": lo_y, "x1": hi_x, "y1": hi_y}

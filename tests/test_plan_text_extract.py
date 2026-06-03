@@ -84,14 +84,22 @@ def test_write_plan_text_sidecar(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_get_version_pdf_profile_plan_vs_text(tmp_path: Path, monkeypatch) -> None:
-    """Plan and text PDF profiles persist on the version row for compare routing."""
+    """Plan lineages use artifact_kind=plan; render profile derives as plan."""
     import iterthink.config as cfg
+    from iterthink.contract import enums as pbs
     from iterthink.db.session import session_scope
-    from iterthink.persistence import version_storage
+    from iterthink.persistence import content_repo
 
     store = tmp_path / "store"
     monkeypatch.setattr(cfg, "STORE_DIR", store)
+    monkeypatch.setattr(cfg, "STORE_DB_PATH", store / "store.sqlite3")
+    monkeypatch.setattr(cfg, "RAG_DB_PATH", store / "store.rag.sqlite3")
     store.mkdir(parents=True, exist_ok=True)
+    from iterthink.db import bootstrap as db_bootstrap
+    from iterthink.db.session import reset_engine_cache
+
+    reset_engine_cache()
+    db_bootstrap.bootstrap_database()
     doc = tmp_path / "docs" / "note.md"
     doc.parent.mkdir(parents=True)
     doc.write_text("<!-- pdf_profile:plan -->\n", encoding="utf-8")
@@ -102,7 +110,7 @@ def test_get_version_pdf_profile_plan_vs_text(tmp_path: Path, monkeypatch) -> No
         w.write(f)
 
     with session_scope() as s:
-        plan_vid = version_storage.persist_version_snapshot(
+        plan_vid = content_repo.persist_version_snapshot(
             s,
             doc.resolve(),
             doc.read_text(encoding="utf-8"),
@@ -112,7 +120,14 @@ def test_get_version_pdf_profile_plan_vs_text(tmp_path: Path, monkeypatch) -> No
             pdf_profile="plan",
         )
         assert plan_vid is not None
-        assert version_storage.get_version_pdf_profile(s, plan_vid) == "plan"
+        assert content_repo.get_version_pdf_profile(s, plan_vid) == "plan"
+        assert (
+            content_repo.get_lineage_artifact_kind(s, resolved_doc=doc.resolve())
+            == pbs.ARTIFACT_KIND_PLAN
+        )
+        ver_row = content_repo.get_version_row(s, plan_vid)
+        assert ver_row is not None
+        assert content_repo.content_attrs(ver_row).get("pdf_profile") is None
 
     md_text, prof = document_import.import_pdf_for_profile(pdf)
     assert prof == "plan"
@@ -120,3 +135,58 @@ def test_get_version_pdf_profile_plan_vs_text(tmp_path: Path, monkeypatch) -> No
 
     text_md = document_import.import_pdf_with_profile(pdf, "text")
     assert "<!-- pdf_profile:plan -->" not in text_md
+
+
+def test_legacy_pdf_profile_plan_fallback(tmp_path: Path, monkeypatch) -> None:
+    """Legacy rows with pdf_profile=plan on version still resolve as plan."""
+    import json
+
+    import iterthink.config as cfg
+    from iterthink.contract import enums as pbs
+    from iterthink.db.session import session_scope
+    from iterthink.persistence import content_repo
+
+    store = tmp_path / "store"
+    monkeypatch.setattr(cfg, "STORE_DIR", store)
+    monkeypatch.setattr(cfg, "STORE_DB_PATH", store / "store.sqlite3")
+    monkeypatch.setattr(cfg, "RAG_DB_PATH", store / "store.rag.sqlite3")
+    store.mkdir(parents=True, exist_ok=True)
+    from iterthink.db import bootstrap as db_bootstrap
+    from iterthink.db.session import reset_engine_cache
+
+    reset_engine_cache()
+    db_bootstrap.bootstrap_database()
+    doc = tmp_path / "docs" / "legacy_plan.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("<!-- pdf_profile:plan -->\n", encoding="utf-8")
+    pdf = tmp_path / "drawing.pdf"
+    w = PdfWriter()
+    w.add_blank_page(width=612, height=792)
+    with open(pdf, "wb") as f:
+        w.write(f)
+
+    with session_scope() as s:
+        plan_vid = content_repo.persist_version_snapshot(
+            s,
+            doc.resolve(),
+            doc.read_text(encoding="utf-8"),
+            "import",
+            skip_if_unchanged_sha=False,
+            pdf_source_path=pdf,
+            pdf_profile="plan",
+        )
+        assert plan_vid is not None
+        ver_row = content_repo.get_version_row(s, plan_vid)
+        assert ver_row is not None
+        anchor = content_repo._lineage_anchor(s, ver_row.lineage_id)
+        assert anchor is not None
+        anchor_attrs = content_repo.content_attrs(anchor)
+        anchor_attrs["artifact_kind"] = pbs.ARTIFACT_KIND_TEXT_DOCUMENT
+        anchor.attributes = json.dumps(anchor_attrs, ensure_ascii=False)
+        ver_attrs = content_repo.content_attrs(ver_row)
+        ver_attrs["pdf_profile"] = "plan"
+        ver_row.attributes = json.dumps(ver_attrs, ensure_ascii=False)
+        s.flush()
+
+        assert content_repo.get_version_pdf_profile(s, plan_vid) == "plan"
+        assert content_repo.is_plan_lineage(s, doc.resolve())

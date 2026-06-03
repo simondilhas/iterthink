@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from iterthink.persistence import version_storage
+from iterthink.persistence import content_repo
 
 from ..constants import REVIEW_KEY_SPELL_CHECK, REVIEW_SPELL_CANDIDATE_ACTION_ID, TAB_FUTURE, TAB_PRESENT
 from ..util import ctrl_on_page as _ctrl_on_page
@@ -23,7 +23,7 @@ class _HistorySpellReviewMixin:
         self._pending_ai_accept_action_id = REVIEW_SPELL_CANDIDATE_ACTION_ID
         self._compare_snapshot_version_id = None
         self._sync_spell_candidate_from_cache()
-        self._loaded_proposal_sha = version_storage.content_sha256(
+        self._loaded_proposal_sha = content_repo.content_sha256(
             self._compare_editor.value or ""
         )
         if _ctrl_on_page(self._compare_editor):
@@ -64,7 +64,7 @@ class _HistorySpellReviewMixin:
         if gen != self._spell_suggest_gen:
             return
         self._spell_suggest_cached_body = body
-        self._spell_suggest_cached_src_sha = version_storage.content_sha256(text)
+        self._spell_suggest_cached_src_sha = content_repo.content_sha256(text)
         # SPELL_PREVIEW: keep candidate aligned with latest suggestion (MVP; overwrites right edits).
         if (
             self._compare_candidate_source == CompareCandidateSource.SPELL_PREVIEW
@@ -90,7 +90,7 @@ class _HistorySpellReviewMixin:
         self._spell_suggest_cached_src_sha = None
 
     def _editor_sha256(self) -> str:
-        return version_storage.content_sha256(self.editor.value or "")
+        return content_repo.content_sha256(self.editor.value or "")
 
     def _sync_spell_candidate_from_cache(self) -> None:
         """Set ``_compare_editor`` from cache when SHA matches current editor (else sync compute)."""

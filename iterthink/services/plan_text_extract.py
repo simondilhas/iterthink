@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from iterthink import config
-from iterthink.persistence.version_storage import path_key_for
+from iterthink.persistence.content_repo import path_key_for
 from iterthink.services import document_import
 
 _PLAN_PROFILE_MARKER = "<!-- pdf_profile:plan -->"

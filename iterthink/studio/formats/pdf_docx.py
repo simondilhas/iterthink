@@ -8,7 +8,7 @@ from pathlib import Path
 import flet as ft
 
 from iterthink import config
-from iterthink.persistence import plan_pdf_annotations, version_storage
+from iterthink.persistence import content_repo, plan_pdf_annotations
 from iterthink.services import document_import
 from iterthink.services.plan_pdf_export import export_annotated_pdf
 from iterthink.services.plan_text_extract import (
@@ -130,7 +130,7 @@ class MarkdownStudioAssetCompare:
         if not self.current_path:
             return None
         with session_scope() as s:
-            det = version_storage.latest_pdf_version_detail(s, self.current_path.resolve())
+            det = content_repo.latest_pdf_version_detail(s, self.current_path.resolve())
         if det is not None:
             prof = (det[2] or "").strip()
             if prof:
@@ -152,7 +152,7 @@ class MarkdownStudioAssetCompare:
     @staticmethod
     def _tree_suffix_for_path(fpath: Path) -> str:
         with session_scope() as s:
-            det = version_storage.latest_pdf_version_detail(s, fpath.resolve())
+            det = content_repo.latest_pdf_version_detail(s, fpath.resolve())
         return ".pdf" if det is not None else ".md"
 
     def _tree_display_name(self, fpath: Path) -> str:
@@ -163,7 +163,7 @@ class MarkdownStudioAssetCompare:
             return None
         try:
             with session_scope() as s:
-                return version_storage.get_version_pdf_profile(s, int(vid))
+                return content_repo.get_version_pdf_profile(s, int(vid))
         except BaseException:
             return None
 
@@ -183,7 +183,7 @@ class MarkdownStudioAssetCompare:
         if not self.current_path:
             return 0
         with session_scope() as s:
-            pairs = version_storage.list_plan_pdf_version_options(s, self.current_path.resolve())
+            pairs = content_repo.list_plan_pdf_version_options(s, self.current_path.resolve())
         return len(pairs)
 
     def _apply_plan_import_open_state(self) -> None:
@@ -538,17 +538,17 @@ class MarkdownStudioAssetCompare:
         if not self.current_path:
             return None
         with session_scope() as s:
-            doc = version_storage.get_document_by_resolved_path(s, self.current_path.resolve())
+            doc = content_repo.get_document_by_resolved_path(s, self.current_path.resolve())
             if doc is None:
                 return None
-            det = version_storage.latest_pdf_version_detail(s, self.current_path.resolve())
+            det = content_repo.latest_pdf_version_detail(s, self.current_path.resolve())
             if det is None:
                 return None
             vid, rel, profile = det
             if (profile or "").strip() != "plan" and self._document_pdf_profile() != "plan":
                 return None
             try:
-                pdf_abs = version_storage.pdf_asset_abs_path(rel)
+                pdf_abs = content_repo.pdf_asset_abs_path(rel)
             except (ValueError, OSError):
                 return None
             doc_id = int(doc.id)
@@ -565,7 +565,7 @@ class MarkdownStudioAssetCompare:
         doc_id, vid, _pdf = ctx
         with session_scope() as s:
             anns = plan_pdf_annotations.list_for_plan_version(
-                s, document_id=doc_id, version_id=vid
+                s, content_version_id=vid
             )
         markers: list[plan_picture_viewer.PlanMarkerView] = []
         for a in anns:
@@ -600,8 +600,7 @@ class MarkdownStudioAssetCompare:
         with session_scope() as s:
             ann = plan_pdf_annotations.insert_pin(
                 s,
-                document_id=doc_id,
-                version_id=vid,
+                content_version_id=vid,
                 plan_page_index=page_ix,
                 plan_norm_x=u,
                 plan_norm_y=v,
@@ -640,8 +639,7 @@ class MarkdownStudioAssetCompare:
         with session_scope() as s:
             plan_pdf_annotations.insert_revision_cloud(
                 s,
-                document_id=doc_id,
-                version_id=vid,
+                content_version_id=vid,
                 plan_page_index=page_ix,
                 x0=x0,
                 y0=y0,
@@ -692,7 +690,7 @@ class MarkdownStudioAssetCompare:
             return
         with session_scope() as s:
             anns = plan_pdf_annotations.list_for_plan_version(
-                s, document_id=_doc_id, version_id=_vid
+                s, content_version_id=_vid
             )
 
         def _run() -> None:
@@ -749,13 +747,13 @@ class MarkdownStudioAssetCompare:
             self._hide_compose_plan_surface()
             return
         with session_scope() as s:
-            det = version_storage.latest_pdf_version_detail(s, self.current_path.resolve())
+            det = content_repo.latest_pdf_version_detail(s, self.current_path.resolve())
         if det is None:
             self._hide_compose_plan_surface()
             return
         vid, rel, profile = det
         with session_scope() as s:
-            doc = version_storage.get_document_by_resolved_path(s, self.current_path.resolve())
+            doc = content_repo.get_document_by_resolved_path(s, self.current_path.resolve())
             if doc is not None:
                 self._compose_plan_document_id = int(doc.id)
                 self._compose_plan_version_id = int(vid)
@@ -764,7 +762,7 @@ class MarkdownStudioAssetCompare:
                 self._hide_compose_plan_surface()
                 return
         try:
-            pdf_abs = version_storage.pdf_asset_abs_path(rel)
+            pdf_abs = content_repo.pdf_asset_abs_path(rel)
         except (ValueError, OSError):
             self._hide_compose_plan_surface()
             return
@@ -919,7 +917,7 @@ class MarkdownStudioAssetCompare:
             self._plan_compare.set_bar_visible(False)
             return
         with session_scope() as s:
-            pairs = version_storage.list_plan_pdf_version_options(s, self.current_path.resolve())
+            pairs = content_repo.list_plan_pdf_version_options(s, self.current_path.resolve())
         opts = [(str(vid), lbl) for vid, lbl in pairs]
         self._fill_all_plan_compare_dropdowns(opts)
         is_plan = self._is_plan_pdf_compare()
@@ -1049,12 +1047,12 @@ class MarkdownStudioAssetCompare:
             self._snack("Pick two different PDF versions for overlay.")
             return
         with session_scope() as s:
-            ra = version_storage.get_version_pdf_relpath(s, bid)
-            rb = version_storage.get_version_pdf_relpath(s, cid)
+            ra = content_repo.get_version_pdf_relpath(s, bid)
+            rb = content_repo.get_version_pdf_relpath(s, cid)
         if not ra or not rb:
             return
-        pa = version_storage.pdf_asset_abs_path(ra)
-        pb = version_storage.pdf_asset_abs_path(rb)
+        pa = content_repo.pdf_asset_abs_path(ra)
+        pb = content_repo.pdf_asset_abs_path(rb)
         gen = self._plan_overlay_gen + 1
         self._plan_overlay_gen = gen
 
@@ -1094,11 +1092,11 @@ class MarkdownStudioAssetCompare:
         rp = self.current_path.resolve()
         with session_scope() as s:
             if self._compare_pdf_peer_snapshot_id is not None:
-                rel = version_storage.get_version_pdf_relpath(s, self._compare_pdf_peer_snapshot_id)
+                rel = content_repo.get_version_pdf_relpath(s, self._compare_pdf_peer_snapshot_id)
                 if rel:
                     return (self._compare_pdf_peer_snapshot_id, rel)
                 return None
-            return version_storage.latest_pdf_version_for_document(s, rp)
+            return content_repo.latest_pdf_version_for_document(s, rp)
 
     def _compare_resolve_pdf_asset_right(self) -> tuple[int, str] | None:
         """Prefer explicit PDF version from Compare bar when set."""
@@ -1109,7 +1107,7 @@ class MarkdownStudioAssetCompare:
             except (TypeError, ValueError):
                 return self._compare_resolve_pdf_asset()
             with session_scope() as s:
-                rel = version_storage.get_version_pdf_relpath(s, vid)
+                rel = content_repo.get_version_pdf_relpath(s, vid)
                 if rel:
                     return (vid, rel)
         return self._compare_resolve_pdf_asset()
@@ -1122,7 +1120,7 @@ class MarkdownStudioAssetCompare:
             except (TypeError, ValueError):
                 return self._compare_resolve_pdf_asset()
             with session_scope() as s:
-                rel = version_storage.get_version_pdf_relpath(s, vid)
+                rel = content_repo.get_version_pdf_relpath(s, vid)
                 if rel:
                     return (vid, rel)
         return self._compare_resolve_pdf_asset()
@@ -1167,7 +1165,7 @@ class MarkdownStudioAssetCompare:
             return None
         _, rel = resolved
         try:
-            pdf_abs = version_storage.pdf_asset_abs_path(rel)
+            pdf_abs = content_repo.pdf_asset_abs_path(rel)
         except (ValueError, OSError):
             return None
         if pdf_abs is None or not pdf_abs.is_file():
@@ -1281,7 +1279,7 @@ class MarkdownStudioAssetCompare:
             return
         _, rel = resolved
         try:
-            pdf_abs = version_storage.pdf_asset_abs_path(rel)
+            pdf_abs = content_repo.pdf_asset_abs_path(rel)
         except (ValueError, OSError):
             pdf_abs = None
         if pdf_abs is None or not pdf_abs.is_file():

@@ -13,7 +13,7 @@ from typing import Any, Literal
 import flet as ft
 
 from iterthink import config
-from iterthink.persistence import store_db, version_storage
+from iterthink.persistence import content_repo, store_db
 from iterthink.services import document_import
 from iterthink.db.session import session_scope
 from .constants import TAB_FUTURE, TAB_HISTORY, TAB_PRESENT
@@ -226,9 +226,9 @@ class MarkdownStudioExplorer:
         try:
             with session_scope() as s:
                 if is_dir:
-                    st = version_storage.update_document_paths_after_dir_rename(s, old_resolved, new_resolved)
+                    st = content_repo.update_document_paths_after_dir_rename(s, old_resolved, new_resolved)
                 else:
-                    st = version_storage.update_document_path_after_rename(s, old_resolved, new_resolved)
+                    st = content_repo.update_document_path_after_rename(s, old_resolved, new_resolved)
                 if st == "collision":
                     raise RuntimeError(_db_collision)
         except RuntimeError as ex:
@@ -568,10 +568,12 @@ class MarkdownStudioExplorer:
                 self._flush_review_edits_if_changed()
 
             doc_id: int | None = None
+            lineage_id: str | None = None
             try:
                 with session_scope() as s:
-                    doc_id = version_storage.document_id_for_resolved_path(s, rp)
-                    version_storage.delete_document_row_if_any(s, rp)
+                    lineage_id = content_repo.lineage_id_for_resolved_path(s, rp)
+                    doc_id = content_repo.document_id_for_resolved_path(s, rp)
+                    content_repo.delete_document_row_if_any(s, rp)
             except BaseException as ex:
                 print(traceback.format_exc(), file=sys.stderr, flush=True)
                 self._snack(f"Could not update library: {ex}")
@@ -586,9 +588,14 @@ class MarkdownStudioExplorer:
                     store_db.impact_version_chunk_delete_for_document(self._db, doc_id)
                 except BaseException:
                     print(traceback.format_exc(), file=sys.stderr, flush=True)
+            if lineage_id:
+                try:
+                    store_db.rag_delete_for_lineage(self._db, lineage_id)
+                except BaseException:
+                    print(traceback.format_exc(), file=sys.stderr, flush=True)
 
             try:
-                version_storage.purge_document_store_dirs(rp)
+                content_repo.purge_document_store_dirs(rp)
             except BaseException as ex:
                 print(traceback.format_exc(), file=sys.stderr, flush=True)
                 self._snack(f"Could not remove stored assets: {ex}")
@@ -648,10 +655,12 @@ class MarkdownStudioExplorer:
             try:
                 for rp in md_paths:
                     doc_id: int | None = None
+                    folder_lid: str | None = None
                     try:
                         with session_scope() as s:
-                            doc_id = version_storage.document_id_for_resolved_path(s, rp)
-                            version_storage.delete_document_row_if_any(s, rp)
+                            folder_lid = content_repo.lineage_id_for_resolved_path(s, rp)
+                            doc_id = content_repo.document_id_for_resolved_path(s, rp)
+                            content_repo.delete_document_row_if_any(s, rp)
                     except BaseException as ex:
                         print(traceback.format_exc(), file=sys.stderr, flush=True)
                         self._snack(f"Could not update library: {ex}")
@@ -661,8 +670,13 @@ class MarkdownStudioExplorer:
                             store_db.impact_version_chunk_delete_for_document(self._db, doc_id)
                         except BaseException:
                             print(traceback.format_exc(), file=sys.stderr, flush=True)
+                    if folder_lid:
+                        try:
+                            store_db.rag_delete_for_lineage(self._db, folder_lid)
+                        except BaseException:
+                            print(traceback.format_exc(), file=sys.stderr, flush=True)
                     try:
-                        version_storage.purge_document_store_dirs(rp)
+                        content_repo.purge_document_store_dirs(rp)
                     except BaseException as ex:
                         print(traceback.format_exc(), file=sys.stderr, flush=True)
                         self._snack(f"Could not remove stored assets: {ex}")
@@ -883,7 +897,7 @@ class MarkdownStudioExplorer:
             _db_collision = "iterthink_move_db_collision"
             try:
                 with session_scope() as s:
-                    st = version_storage.update_document_path_after_rename(s, old_resolved, new_resolved)
+                    st = content_repo.update_document_path_after_rename(s, old_resolved, new_resolved)
                     if st == "collision":
                         raise RuntimeError(_db_collision)
             except RuntimeError as ex:
@@ -1206,7 +1220,7 @@ class MarkdownStudioExplorer:
         if pdf_src is not None and not pdf_src.is_file():
             self._snack("PDF file is no longer available. Import again.")
             return
-        pdf_prof: version_storage.PdfProfile | None = None
+        pdf_prof: content_repo.PdfProfile | None = None
         lazy_geometry_src: Path | None = None
         progress: _ImportProgressHandle | None = None
         if ext == "pdf":
@@ -1218,7 +1232,7 @@ class MarkdownStudioExplorer:
                     if progress is not None:
                         await progress.set_message("Saving plan PDF…")
 
-                    def _fast_plan() -> tuple[str, version_storage.PdfProfile | None]:
+                    def _fast_plan() -> tuple[str, content_repo.PdfProfile | None]:
                         return document_import.import_plan_pdf_fast_stub(), "plan"
 
                     md, pdf_prof, _ = await asyncio.to_thread(_fast_plan)
@@ -1227,7 +1241,7 @@ class MarkdownStudioExplorer:
                     if progress is not None:
                         await progress.set_message("Extracting text from PDF…")
 
-                    def _extract_text() -> tuple[str, version_storage.PdfProfile | None, None]:
+                    def _extract_text() -> tuple[str, content_repo.PdfProfile | None, None]:
                         prof = pdf_prof or "text"
                         md_body, _geo = document_import.import_pdf_with_profile_and_geometry(
                             src, prof  # type: ignore[arg-type]
@@ -1260,7 +1274,7 @@ class MarkdownStudioExplorer:
         new_vid: int | None = None
         try:
             with session_scope() as s:
-                new_vid = version_storage.persist_version_snapshot(
+                new_vid = content_repo.persist_version_snapshot(
                     s,
                     dest.resolve(),
                     md,
@@ -1275,7 +1289,7 @@ class MarkdownStudioExplorer:
             return
         if pdf_prof == "plan" and new_vid is not None:
             with session_scope() as s:
-                pdf_rel = version_storage.get_version_pdf_relpath(s, new_vid)
+                pdf_rel = content_repo.get_version_pdf_relpath(s, new_vid)
             if not pdf_rel:
                 self._snack("Plan PDF could not be saved to the library.")
                 return
@@ -1731,6 +1745,6 @@ class MarkdownStudioExplorer:
 
         try:
             with session_scope() as s:
-                version_storage.update_document_last_disk_state(s, path, body=text)
+                content_repo.update_document_last_disk_state(s, path, body=text)
         except BaseException:
             pass

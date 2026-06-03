@@ -7,8 +7,8 @@ from typing import NamedTuple
 import flet as ft
 
 from iterthink import prompts
-from iterthink.persistence import version_storage
-from iterthink.persistence.version_storage import SnapshotInfo
+from iterthink.persistence import content_repo
+from iterthink.persistence.content_repo import SnapshotInfo
 from iterthink.compare.margin import join_paragraphs
 
 from ..constants import (
@@ -72,8 +72,8 @@ def build_history_snapshot_dropdown_options(
     ordered = sorted(slist, key=lambda sn: (sn.created_at, sn.version_id), reverse=True)
     out: list[ft.dropdown.Option] = []
     for sn in ordered:
-        row_text = version_storage.snapshot_dropdown_text(sn)
-        if version_storage.snapshot_bucket(sn) == "import":
+        row_text = content_repo.snapshot_dropdown_text(sn)
+        if content_repo.snapshot_bucket(sn) == "import":
             out.append(
                 ft.dropdown.Option(
                     key=str(sn.version_id),
@@ -118,7 +118,7 @@ class _HistoryBuffersMixin:
         if not older_slice:
             return None
         allowed = {s.version_id for s in older_slice}
-        pick = version_storage.second_newest_history_autosave_version_id(snaps_all)
+        pick = content_repo.second_newest_history_autosave_version_id(snaps_all)
         if pick is not None and pick in allowed:
             return pick
         return older_slice[0].version_id

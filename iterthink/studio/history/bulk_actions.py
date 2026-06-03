@@ -10,7 +10,7 @@ from iterthink.compare.margin import (
     split_paragraphs,
 )
 from iterthink.db.session import session_scope
-from iterthink.persistence import version_storage
+from iterthink.persistence import content_repo
 
 from ..constants import (
     REVIEW_MANUAL_CANDIDATE_ACTION_ID,
@@ -68,14 +68,14 @@ class _HistoryBulkActionsMixin:
         try:
             with session_scope() as s:
                 rp = self.current_path.resolve()
-                version_storage.persist_version_snapshot(
+                content_repo.persist_version_snapshot(
                     s,
                     rp,
                     pre_buf,
                     before_reason,
                     display_label=before_label,
                 )
-                version_storage.persist_version_snapshot(
+                content_repo.persist_version_snapshot(
                     s,
                     rp,
                     post_buf,
@@ -260,10 +260,10 @@ class _HistoryBulkActionsMixin:
         """If persist returned None (SHA dedup), use newest snapshot row matching ``cand_body``."""
         if new_vid is not None or not self.current_path:
             return new_vid
-        want_sha = version_storage.content_sha256(cand_body)
+        want_sha = content_repo.content_sha256(cand_body)
         try:
             with session_scope() as s:
-                snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+                snaps = content_repo.list_snapshots(s, self.current_path.resolve())
             for sn in snaps:
                 if sn.content_sha256 == want_sha:
                     return sn.version_id

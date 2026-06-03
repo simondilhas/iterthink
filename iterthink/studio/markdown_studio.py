@@ -19,7 +19,7 @@ from iterthink.persistence import (
     spell_resources,
     store_db,
     vault_store,
-    version_storage,
+    content_repo,
 )
 from iterthink.services import markdown_docx_export
 
@@ -56,6 +56,7 @@ from .constants import (
     TAB_FUTURE,
 )
 from .explorer import MarkdownStudioExplorer, first_markdown_in_tree
+from .search_results_ui import MarkdownStudioSearchResults
 from .focus_area import MarkdownStudioCompose
 from .history import CompareCandidateSource, MarkdownStudioCompareText
 from .ki_comments import paragraph_comment_label, plan_comment_list_label, sorted_comment_rows
@@ -89,6 +90,7 @@ class MarkdownStudio(
     MarkdownStudioContentTree,
     MarkdownStudioKiSidebar,
     MarkdownStudioExplorer,
+    MarkdownStudioSearchResults,
     MarkdownStudioImpactMixin,
     MarkdownStudioChecksUi,
     MarkdownStudioAssetCompare,   # PDF / DOCX compare rendering
@@ -305,6 +307,7 @@ class MarkdownStudio(
         )
 
         self._compose_plan_host = ft.Container(expand=True, visible=False)
+        self._init_search_results_ui()
         self._compose_plan_load_gen = 0
         self._compose_plan_surface_key: tuple[int, bool, str] | None = None
         self._compose_plan_load_inflight_key: tuple[int, bool, str] | None = None
@@ -362,6 +365,7 @@ class MarkdownStudio(
         self._compose_reading_inner = ft.Column(
             [
                 self._compose_plan_host,
+                self._search_results_host,
                 self._compose_writing_slot,
             ],
             expand=True,
@@ -1259,7 +1263,7 @@ class MarkdownStudio(
         )
 
         self.tree_search_field = ft.TextField(
-            hint_text="Search files…",
+            hint_text="Search… (/f for filenames)",
             dense=True,
             filled=True,
             fill_color=config.SURFACE,
@@ -2104,21 +2108,20 @@ class MarkdownStudio(
                     doc_id, vid, _pdf = ctx
                 with session_scope() as s:
                     return plan_pdf_annotations.plan_comments_map_for_ki(
-                        s, document_id=int(doc_id), version_id=int(vid)
+                        s, content_version_id=int(vid)
                     )
             with session_scope() as s:
-                doc = version_storage.get_document_by_resolved_path(s, self.current_path.resolve())
+                doc = content_repo.get_document_by_resolved_path(s, self.current_path.resolve())
                 if doc is None:
                     return {}
-                snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+                snaps = content_repo.list_snapshots(s, self.current_path.resolve())
                 if not snaps:
                     return {}
-                anchor_body = version_storage.load_version_body(s, int(snaps[0].version_id))
+                anchor_body = content_repo.load_version_body(s, int(snaps[0].version_id))
                 display_body = self._editor_buffer() or ""
                 return paragraph_user_comments.map_resolved_for_display(
                     s,
-                    document_id=int(doc.id),
-                    version_id=int(snaps[0].version_id),
+                    content_version_id=int(snaps[0].version_id),
                     anchor_body=anchor_body,
                     display_body=display_body,
                 )
@@ -2142,8 +2145,7 @@ class MarkdownStudio(
         with session_scope() as s:
             ann = plan_pdf_annotations.get_by_paragraph_index(
                 s,
-                document_id=int(doc_id),
-                version_id=int(vid),
+                content_version_id=int(vid),
                 paragraph_index=int(paragraph_index),
             )
         if ann is None:
@@ -2162,7 +2164,7 @@ class MarkdownStudio(
             doc_id, vid, _pdf = ctx
         with session_scope() as s:
             anns = plan_pdf_annotations.list_for_plan_version(
-                s, document_id=int(doc_id), version_id=int(vid)
+                s, content_version_id=int(vid)
             )
         rows: list[tuple[int, str]] = []
         for a in anns:
@@ -2184,8 +2186,7 @@ class MarkdownStudio(
         with session_scope() as s:
             ann = plan_pdf_annotations.get_by_paragraph_index(
                 s,
-                document_id=int(doc_id),
-                version_id=int(vid),
+                content_version_id=int(vid),
                 paragraph_index=int(paragraph_index),
             )
         return (ann.body or "").strip() if ann is not None else ""
@@ -2411,8 +2412,7 @@ class MarkdownStudio(
                 with session_scope() as s:
                     ann = plan_pdf_annotations.get_by_paragraph_index(
                         s,
-                        document_id=int(doc_id),
-                        version_id=int(vid),
+                        content_version_id=int(vid),
                         paragraph_index=int(self._comment_para_index),
                     )
                     if ann is None:
@@ -2421,19 +2421,18 @@ class MarkdownStudio(
                     plan_pdf_annotations.update_body(s, annotation_id=int(ann.id), body=raw)
             else:
                 with session_scope() as s:
-                    doc = version_storage.get_document_by_resolved_path(s, self.current_path.resolve())
+                    doc = content_repo.get_document_by_resolved_path(s, self.current_path.resolve())
                     if doc is None:
                         self._snack("Document is not indexed yet.")
                         return
-                    snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+                    snaps = content_repo.list_snapshots(s, self.current_path.resolve())
                     if not snaps:
                         self._snack("Save the note once so a version exists for comments.")
                         return
                     display_body = self._editor_buffer() or ""
                     paragraph_user_comments.upsert(
                         s,
-                        document_id=int(doc.id),
-                        version_id=int(snaps[0].version_id),
+                        content_version_id=int(snaps[0].version_id),
                         paragraph_index=int(self._comment_para_index),
                         body=raw,
                         paragraph_body=display_body,
@@ -2467,7 +2466,7 @@ class MarkdownStudio(
         _e: ft.ControlEvent | None = None,
         *,
         silent: bool = False,
-        snapshot_reason: version_storage.SnapshotReason | None = None,
+        snapshot_reason: content_repo.SnapshotReason | None = None,
         version_display_label: str | None = None,
         persist_snapshot: bool = True,
         for_shutdown: bool = False,
@@ -2478,7 +2477,7 @@ class MarkdownStudio(
             return
         self._flush_review_edits_if_changed(refresh_compare_ui=not for_shutdown)
         buf = self._working_document_text()
-        reason: version_storage.SnapshotReason = snapshot_reason or ("autosave" if silent else "manual")
+        reason: content_repo.SnapshotReason = snapshot_reason or ("autosave" if silent else "manual")
         try:
             self.current_path.write_text(buf, encoding="utf-8")
         except OSError as ex:
@@ -2487,14 +2486,14 @@ class MarkdownStudio(
         self.last_saved_text = buf
         try:
             with session_scope() as s:
-                version_storage.update_document_last_disk_state(s, self.current_path.resolve(), body=buf)
+                content_repo.update_document_last_disk_state(s, self.current_path.resolve(), body=buf)
         except BaseException:
             pass
         if persist_snapshot:
             try:
                 with session_scope() as s:
                     if version_display_label:
-                        version_storage.persist_version_snapshot(
+                        content_repo.persist_version_snapshot(
                             s,
                             self.current_path.resolve(),
                             buf,
@@ -2502,9 +2501,10 @@ class MarkdownStudio(
                             display_label=version_display_label,
                         )
                     else:
-                        version_storage.persist_version_snapshot(s, self.current_path.resolve(), buf, reason)
+                        content_repo.persist_version_snapshot(s, self.current_path.resolve(), buf, reason)
             except BaseException:
                 pass
+            self.schedule_rag_reindex(self.current_path.resolve())
         if not for_shutdown:
             self._refresh_compare_tab_candidate_ui()
             self._margin_gen += 1
@@ -2519,15 +2519,15 @@ class MarkdownStudio(
     def _export_paragraph_comments_for_doc(self, md_path: Path) -> dict[int, str]:
         try:
             with session_scope() as s:
-                doc = version_storage.get_document_by_resolved_path(s, md_path)
+                doc = content_repo.get_document_by_resolved_path(s, md_path)
                 if doc is None:
                     return {}
-                snaps = version_storage.list_snapshots(s, md_path)
+                snaps = content_repo.list_snapshots(s, md_path)
                 if not snaps:
                     return {}
                 vid = snaps[0].version_id
                 return impact_annotations.paragraph_comments_map_for_export(
-                    s, document_id=int(doc.id), version_id=int(vid)
+                    s, content_version_id=int(vid)
                 )
         except BaseException:
             return {}
@@ -2714,7 +2714,7 @@ class MarkdownStudio(
             return
         try:
             with session_scope() as s:
-                stale = version_storage.is_document_disk_stale(s, path)
+                stale = content_repo.is_document_disk_stale(s, path)
         except BaseException:
             return
         if not stale:
@@ -2744,7 +2744,7 @@ class MarkdownStudio(
             if c:
                 try:
                     with session_scope() as s:
-                        version_storage.refresh_document_last_disk_state_from_disk(s, c)
+                        content_repo.refresh_document_last_disk_state_from_disk(s, c)
                 except BaseException:
                     pass
             self._snack("Keeping your edits. Saving will overwrite the file on disk.")

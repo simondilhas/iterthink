@@ -11,7 +11,7 @@ from iterthink import config
 from iterthink.compare import paragraph_compare
 from iterthink.compare.paragraph_align import compute_alignment, compute_hash
 from iterthink.db.session import session_scope
-from iterthink.persistence import paragraph_user_comments, version_storage
+from iterthink.persistence import content_repo, paragraph_user_comments
 
 from ..action_chrome import wrap_workspace_action_chrome
 from ..components import (
@@ -459,17 +459,16 @@ class _HistoryParagraphUIMixin:
         if show_actions:
             try:
                 with session_scope() as s:
-                    doc = version_storage.get_document_by_resolved_path(s, self.current_path.resolve())
+                    doc = content_repo.get_document_by_resolved_path(s, self.current_path.resolve())
                     if doc is not None:
-                        snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+                        snaps = content_repo.list_snapshots(s, self.current_path.resolve())
                         if snaps:
-                            anchor_body = version_storage.load_version_body(
+                            anchor_body = content_repo.load_version_body(
                                 s, int(snaps[0].version_id)
                             )
                             future_user_comments = paragraph_user_comments.map_resolved_for_display(
                                 s,
-                                document_id=int(doc.id),
-                                version_id=int(snaps[0].version_id),
+                                content_version_id=int(snaps[0].version_id),
                                 anchor_body=anchor_body,
                                 display_body=ai_text,
                             )

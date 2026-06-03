@@ -20,7 +20,7 @@ from iterthink.ai.privacy_shield import (
 from ..privacy_shield_chat_ui import append_privacy_turn_to_history, build_privacy_turn_bubble
 from iterthink.compare.margin import replace_paragraph_at_index, split_paragraphs
 from iterthink.db.session import session_scope
-from iterthink.persistence import version_storage
+from iterthink.persistence import content_repo
 from iterthink.prompts import TOPIC_CHANGE
 
 from ..components import (
@@ -68,7 +68,7 @@ class _HistoryMarginAiMixin:
         if self.current_path:
             try:
                 with session_scope() as s:
-                    version_storage.persist_version_snapshot(
+                    content_repo.persist_version_snapshot(
                         s,
                         self.current_path.resolve(),
                         buf,
@@ -108,7 +108,7 @@ class _HistoryMarginAiMixin:
         if self.current_path:
             try:
                 with session_scope() as s:
-                    version_storage.persist_version_snapshot(
+                    content_repo.persist_version_snapshot(
                         s,
                         self.current_path.resolve(),
                         buf,
@@ -149,7 +149,7 @@ class _HistoryMarginAiMixin:
         if self.current_path:
             try:
                 with session_scope() as s:
-                    new_vid = version_storage.persist_version_snapshot(
+                    new_vid = content_repo.persist_version_snapshot(
                         s,
                         self.current_path.resolve(),
                         cand_body,
@@ -166,7 +166,7 @@ class _HistoryMarginAiMixin:
         if new_vid is not None:
             self._ai_proposal_action_ids[new_vid] = action_id
             self._latest_ai_proposal_vid = new_vid
-        self._loaded_proposal_sha = version_storage.content_sha256(self._compare_editor.value or "")
+        self._loaded_proposal_sha = content_repo.content_sha256(self._compare_editor.value or "")
         self._hide_prompt_footer(footer)
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)
@@ -464,7 +464,7 @@ class _HistoryMarginAiMixin:
         if self.current_path:
             try:
                 with session_scope() as s:
-                    new_vid = version_storage.persist_version_snapshot(
+                    new_vid = content_repo.persist_version_snapshot(
                         s,
                         self.current_path.resolve(),
                         cand_body,
@@ -481,7 +481,7 @@ class _HistoryMarginAiMixin:
         if new_vid is not None:
             self._ai_proposal_action_ids[new_vid] = action_id
             self._latest_ai_proposal_vid = new_vid
-        self._loaded_proposal_sha = version_storage.content_sha256(self._compare_editor.value or "")
+        self._loaded_proposal_sha = content_repo.content_sha256(self._compare_editor.value or "")
         self._hide_prompt_footer(footer)
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)

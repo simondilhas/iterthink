@@ -23,7 +23,6 @@ class StoredComment:
 
 
 def alignment_old_to_new_paragraph_index(old_text: str, new_text: str) -> dict[int, int]:
-    """Map parent snapshot paragraph indices to new-body indices (best-effort)."""
     diffs = compute_alignment(old_text, new_text)
     out: dict[int, int] = {}
     for d in diffs:
@@ -56,13 +55,6 @@ def resolve_comments_for_body(
     display_body: str,
     stored: Iterable[StoredComment],
 ) -> dict[int, str]:
-    """
-    Map stored comments onto ``display_body`` paragraph indices.
-
-    1. Exact ``content_hash`` match on display paragraphs (tie-break by index distance).
-    2. Alignment fallback: ``anchor_body`` index → display index.
-    3. Orphans merge into paragraph index 0.
-    """
     comments = [
         StoredComment(
             paragraph_index=int(c.paragraph_index),
@@ -111,11 +103,10 @@ def resolve_comments_for_body(
     return out
 
 
-def list_stored_for_version(session: Session, *, document_id: int, version_id: int) -> list[StoredComment]:
+def list_stored_for_version(session: Session, *, content_version_id: int) -> list[StoredComment]:
     rows = session.execute(
         select(ParagraphUserComment).where(
-            ParagraphUserComment.document_id == document_id,
-            ParagraphUserComment.version_id == version_id,
+            ParagraphUserComment.content_version_id == content_version_id,
             ParagraphUserComment.annotation_kind == "paragraph",
         )
     ).scalars()
@@ -129,11 +120,10 @@ def list_stored_for_version(session: Session, *, document_id: int, version_id: i
     ]
 
 
-def map_for_version(session: Session, *, document_id: int, version_id: int) -> dict[int, str]:
+def map_for_version(session: Session, *, content_version_id: int) -> dict[int, str]:
     rows = session.execute(
         select(ParagraphUserComment).where(
-            ParagraphUserComment.document_id == document_id,
-            ParagraphUserComment.version_id == version_id,
+            ParagraphUserComment.content_version_id == content_version_id,
             ParagraphUserComment.annotation_kind == "paragraph",
         )
     ).scalars()
@@ -143,21 +133,19 @@ def map_for_version(session: Session, *, document_id: int, version_id: int) -> d
 def map_resolved_for_display(
     session: Session,
     *,
-    document_id: int,
-    version_id: int,
+    content_version_id: int,
     anchor_body: str,
     display_body: str,
 ) -> dict[int, str]:
-    stored = list_stored_for_version(session, document_id=document_id, version_id=version_id)
+    stored = list_stored_for_version(session, content_version_id=content_version_id)
     return resolve_comments_for_body(anchor_body, display_body, stored)
 
 
-def get_one(session: Session, *, document_id: int, version_id: int, paragraph_index: int) -> str | None:
+def get_one(session: Session, *, content_version_id: int, paragraph_index: int) -> str | None:
     row = (
         session.execute(
             select(ParagraphUserComment).where(
-                ParagraphUserComment.document_id == document_id,
-                ParagraphUserComment.version_id == version_id,
+                ParagraphUserComment.content_version_id == content_version_id,
                 ParagraphUserComment.paragraph_index == int(paragraph_index),
                 ParagraphUserComment.annotation_kind == "paragraph",
             )
@@ -174,16 +162,14 @@ def get_one(session: Session, *, document_id: int, version_id: int, paragraph_in
 def get_resolved_one(
     session: Session,
     *,
-    document_id: int,
-    version_id: int,
+    content_version_id: int,
     anchor_body: str,
     display_body: str,
     paragraph_index: int,
 ) -> str | None:
     resolved = map_resolved_for_display(
         session,
-        document_id=document_id,
-        version_id=version_id,
+        content_version_id=content_version_id,
         anchor_body=anchor_body,
         display_body=display_body,
     )
@@ -194,8 +180,7 @@ def get_resolved_one(
 def upsert(
     session: Session,
     *,
-    document_id: int,
-    version_id: int,
+    content_version_id: int,
     paragraph_index: int,
     body: str,
     content_hash: str | None = None,
@@ -208,8 +193,7 @@ def upsert(
     row = (
         session.execute(
             select(ParagraphUserComment).where(
-                ParagraphUserComment.document_id == document_id,
-                ParagraphUserComment.version_id == version_id,
+                ParagraphUserComment.content_version_id == content_version_id,
                 ParagraphUserComment.paragraph_index == int(paragraph_index),
                 ParagraphUserComment.annotation_kind == "paragraph",
             )
@@ -224,8 +208,7 @@ def upsert(
     if row is None:
         session.add(
             ParagraphUserComment(
-                document_id=document_id,
-                version_id=version_id,
+                content_version_id=content_version_id,
                 paragraph_index=int(paragraph_index),
                 annotation_kind="paragraph",
                 content_hash=content_hash,
@@ -242,11 +225,10 @@ def upsert(
     session.flush()
 
 
-def delete_at(session: Session, *, document_id: int, version_id: int, paragraph_index: int) -> None:
+def delete_at(session: Session, *, content_version_id: int, paragraph_index: int) -> None:
     session.execute(
         delete(ParagraphUserComment).where(
-            ParagraphUserComment.document_id == document_id,
-            ParagraphUserComment.version_id == version_id,
+            ParagraphUserComment.content_version_id == content_version_id,
             ParagraphUserComment.paragraph_index == int(paragraph_index),
             ParagraphUserComment.annotation_kind == "paragraph",
         )
@@ -256,22 +238,19 @@ def delete_at(session: Session, *, document_id: int, version_id: int, paragraph_
 def migrate_comments_to_new_version(
     session: Session,
     *,
-    document_id: int,
     parent_version_id: int,
     new_version_id: int,
     old_body: str,
     new_body: str,
 ) -> None:
-    """Copy user comments from parent snapshot to ``new_version_id`` using hash + alignment."""
-    stored = list_stored_for_version(session, document_id=document_id, version_id=parent_version_id)
+    stored = list_stored_for_version(session, content_version_id=parent_version_id)
     if not stored:
         return
     resolved = resolve_comments_for_body(old_body, new_body, stored)
     for new_i, text in resolved.items():
         upsert(
             session,
-            document_id=document_id,
-            version_id=new_version_id,
+            content_version_id=new_version_id,
             paragraph_index=int(new_i),
             body=text,
             paragraph_body=new_body,
@@ -283,7 +262,6 @@ def merge_with_impact_for_export(
     impact_by_idx: dict[int, str],
     user_by_idx: dict[int, str],
 ) -> dict[int, str]:
-    """Combine Impact export strings with user notes for Word comment export."""
     keys = sorted(set(impact_by_idx) | set(user_by_idx))
     out: dict[int, str] = {}
     for i in keys:

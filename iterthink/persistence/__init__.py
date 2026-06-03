@@ -1,7 +1,7 @@
-"""SQLite store, encrypted vault, crypto helpers, and on-disk version snapshots."""
+"""SQLite store, encrypted vault, crypto helpers, and PBS content repository."""
 
 from __future__ import annotations
 
-from . import crypto_vault, store_db, vault_store, version_storage
+from . import content_repo, crypto_vault, entity_settings, store_db, vault_store
 
-__all__ = ("crypto_vault", "store_db", "vault_store", "version_storage")
+__all__ = ("content_repo", "crypto_vault", "entity_settings", "store_db", "vault_store")

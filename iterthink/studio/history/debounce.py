@@ -6,6 +6,9 @@ import asyncio
 
 from iterthink.compare import paragraph_compare
 from iterthink.compare.margin import split_paragraphs
+from iterthink.compare.paragraph_semantics import classify_paragraph_slots_batch, text_hash
+from iterthink.db.session import session_scope
+from iterthink.persistence import content_changes, content_repo
 
 from ..constants import TAB_FUTURE, TAB_HISTORY
 from ..util import ctrl_on_page as _ctrl_on_page
@@ -128,6 +131,73 @@ class _HistoryDebounceMixin:
                     right_t.spans = self._compare_new_side_spans(left_txt, right_txt)
                     if _ctrl_on_page(right_t):
                         right_t.update()
+        await self._persist_compare_semantic_changes(
+            gen,
+            aligned_lefts=aligned_lefts,
+            candidate_text=buffers.candidate,
+        )
+
+    async def _persist_compare_semantic_changes(
+        self,
+        gen: int,
+        *,
+        aligned_lefts: list[str],
+        candidate_text: str,
+    ) -> None:
+        """Write STABLE/NEW paragraph semantics to entity ``content_changes`` when versions are known."""
+        if gen != self._compare_refine_gen:
+            return
+        if self._main_tab_index != TAB_HISTORY:
+            return
+        newer_vid = self._compare_newer_version_id
+        if newer_vid is None or not self.current_path:
+            return
+        resolved = self.current_path.resolve()
+        lineage_id: str | None = None
+        with session_scope() as s:
+            lineage_id = content_repo.lineage_id_for_resolved_path(s, resolved)
+        if not lineage_id:
+            return
+        new_paras = split_paragraphs(candidate_text)
+        items: list[tuple[int, str, str]] = []
+        for i, new_t in enumerate(new_paras):
+            old_t = aligned_lefts[i] if i < len(aligned_lefts) else ""
+            if text_hash(old_t) != text_hash(new_t):
+                items.append((i, old_t, new_t))
+        if not items:
+            return
+        try:
+            kinds = await classify_paragraph_slots_batch(
+                self._db,
+                self._make_llm_backend(),
+                chat_model=self.chat_model_for_requests(),
+                lineage_id=lineage_id,
+                doc_path=str(resolved),
+                items=items,
+            )
+        except BaseException:
+            return
+        if gen != self._compare_refine_gen:
+            return
+        by_slot = {i: (o, p) for i, o, p in items}
+        pairs: list[tuple[int, str, str, content_changes.SemanticKind]] = []
+        for slot_i, kind in kinds:
+            if slot_i in by_slot:
+                o, p = by_slot[slot_i]
+                pairs.append((slot_i, o, p, kind))
+        if not pairs:
+            return
+        try:
+            with session_scope() as s:
+                content_changes.record_semantic_compare_batch(
+                    s,
+                    newer_content_version_id=int(newer_vid),
+                    baseline_content_version_id=self._compare_snapshot_version_id,
+                    pairs=pairs,
+                )
+                s.commit()
+        except BaseException:
+            pass
 
     def _on_compare_para_field_change(self, index: int) -> None:
         self._sync_compare_buffer_from_fields()

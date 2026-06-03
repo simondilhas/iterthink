@@ -119,6 +119,21 @@ async def main(page: ft.Page) -> None:
                 "Compare-tab embeddings need this download the first time."
             )
 
+    async def _reranker_model_warmup() -> None:
+        if page.web or not config.RAG_RERANKER_ENABLED:
+            return
+        try:
+            from iterthink.ai.local_reranker import prepare_runtime_reranker_sync
+
+            await asyncio.to_thread(prepare_runtime_reranker_sync)
+        except BaseException:
+            pass
+
+    async def _rag_index_startup() -> None:
+        await _embedding_model_warmup()
+        await _reranker_model_warmup()
+        await studio._rag_startup_index_async()
+
     async def _privacy_shield_model_warmup() -> None:
         if page.web or not config.PRIVACY_SHIELD_ENABLED:
             return
@@ -147,7 +162,7 @@ async def main(page: ft.Page) -> None:
         except BaseException as ex:
             studio._snack(str(ex))
 
-    page.run_task(_embedding_model_warmup)
+    page.run_task(_rag_index_startup)
     page.run_task(_privacy_shield_model_warmup)
     page.run_task(studio._refresh_ki_chat_model_dropdown)
     if not page.web:

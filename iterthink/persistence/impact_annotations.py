@@ -74,8 +74,7 @@ def format_details_for_export(details: dict | None) -> str:
 def upsert_model_result(
     session: Session,
     *,
-    document_id: int,
-    version_id: int,
+    content_version_id: int,
     paragraph_index: int,
     prompt_id: str,
     status: str,
@@ -86,8 +85,7 @@ def upsert_model_result(
     row = (
         session.execute(
             select(ImpactAnnotation).where(
-                ImpactAnnotation.document_id == document_id,
-                ImpactAnnotation.version_id == version_id,
+                ImpactAnnotation.content_version_id == content_version_id,
                 ImpactAnnotation.paragraph_index == paragraph_index,
                 ImpactAnnotation.prompt_id == prompt_id,
             )
@@ -99,8 +97,7 @@ def upsert_model_result(
     if row is None:
         session.add(
             ImpactAnnotation(
-                document_id=document_id,
-                version_id=version_id,
+                content_version_id=content_version_id,
                 paragraph_index=paragraph_index,
                 prompt_id=prompt_id,
                 status=status,
@@ -122,8 +119,7 @@ def upsert_model_result(
 def set_override(
     session: Session,
     *,
-    document_id: int,
-    version_id: int,
+    content_version_id: int,
     paragraph_index: int,
     prompt_id: str,
     override_comment: str,
@@ -132,8 +128,7 @@ def set_override(
     row = (
         session.execute(
             select(ImpactAnnotation).where(
-                ImpactAnnotation.document_id == document_id,
-                ImpactAnnotation.version_id == version_id,
+                ImpactAnnotation.content_version_id == content_version_id,
                 ImpactAnnotation.paragraph_index == paragraph_index,
                 ImpactAnnotation.prompt_id == prompt_id,
             )
@@ -144,8 +139,7 @@ def set_override(
     if row is None:
         session.add(
             ImpactAnnotation(
-                document_id=document_id,
-                version_id=version_id,
+                content_version_id=content_version_id,
                 paragraph_index=paragraph_index,
                 prompt_id=prompt_id,
                 status="stable",
@@ -164,12 +158,11 @@ def set_override(
 
 
 def list_for_version(
-    session: Session, *, document_id: int, version_id: int, prompt_id: str
+    session: Session, *, content_version_id: int, prompt_id: str
 ) -> dict[int, ImpactAnnotation]:
     rows = session.execute(
         select(ImpactAnnotation).where(
-            ImpactAnnotation.document_id == document_id,
-            ImpactAnnotation.version_id == version_id,
+            ImpactAnnotation.content_version_id == content_version_id,
             ImpactAnnotation.prompt_id == prompt_id,
         )
     ).scalars()
@@ -177,16 +170,12 @@ def list_for_version(
 
 
 def paragraph_comments_map_for_export(
-    session: Session, *, document_id: int, version_id: int
+    session: Session, *, content_version_id: int
 ) -> dict[int, str]:
-    """Merge annotations for Word export: index → combined text (multiple prompts)."""
     rows = list(
         session.execute(
             select(ImpactAnnotation)
-            .where(
-                ImpactAnnotation.document_id == document_id,
-                ImpactAnnotation.version_id == version_id,
-            )
+            .where(ImpactAnnotation.content_version_id == content_version_id)
             .order_by(ImpactAnnotation.paragraph_index, ImpactAnnotation.prompt_id)
         ).scalars()
     )
@@ -204,15 +193,12 @@ def paragraph_comments_map_for_export(
     return {i: "\n".join(parts) for i, parts in sorted(by_idx.items())}
 
 
-def list_all_prompts_for_version(
-    session: Session, *, document_id: int, version_id: int
-) -> list[ImpactAnnotation]:
+def list_all_prompts_for_version(session: Session, *, content_version_id: int) -> list[ImpactAnnotation]:
     return list(
         session.execute(
-            select(ImpactAnnotation).where(
-                ImpactAnnotation.document_id == document_id,
-                ImpactAnnotation.version_id == version_id,
-            ).order_by(ImpactAnnotation.paragraph_index, ImpactAnnotation.prompt_id)
+            select(ImpactAnnotation)
+            .where(ImpactAnnotation.content_version_id == content_version_id)
+            .order_by(ImpactAnnotation.paragraph_index, ImpactAnnotation.prompt_id)
         ).scalars()
     )
 
@@ -224,13 +210,11 @@ def effective_comment(row: ImpactAnnotation) -> str:
 
 
 def snapshot_row_ui(row: ImpactAnnotation) -> dict[str, Any]:
-    """Copy ORM fields while *row* is session-bound; safe to use after the session closes."""
     return {
         "status": str(row.status),
         "effective_comment": effective_comment(row),
         "details": parse_details_dict(row),
-        "document_id": int(row.document_id),
-        "version_id": int(row.version_id),
+        "content_version_id": int(row.content_version_id),
         "paragraph_index": int(row.paragraph_index),
         "prompt_id": str(row.prompt_id),
     }

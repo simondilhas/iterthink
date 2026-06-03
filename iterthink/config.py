@@ -35,6 +35,7 @@ APP_CONFIG_PATH = app_config_dir() / "config.yaml"
 DOCUMENTS: Path = Path.home() / "Documents"
 STORE_DIR: Path = DOCUMENTS / ".iterthink"
 STORE_DB_PATH: Path = STORE_DIR / "store.sqlite3"
+RAG_DB_PATH: Path = STORE_DIR / "store.rag.sqlite3"
 IMPORT_ASSETS_DIR: Path = DOCUMENTS / "iterthink_import_assets"
 DEFAULT_OLLAMA_MODEL: str = "llama3:8B"
 OLLAMA_HOST: str | None = None
@@ -61,6 +62,10 @@ SELECTION_OVERLAY: str = "#88B8A8D4"
 STARTUP_DAILY_LOG: bool = True
 NEW_NOTE_NAME_TEMPLATE: str = "unnamed-{n}.md"
 RAG_SYSTEM: bool = False
+RAG_INDEX_ON_STARTUP: bool = True
+RAG_OVERLAP_CHARS: int = 200
+RAG_RERANKER_ENABLED: bool = True
+RAG_RERANKER_MODEL: str = "Xenova/ms-marco-MiniLM-L-6-v2"
 PRIVACY_SHIELD_ENABLED: bool = True
 PRIVACY_SHIELD_HF_REPO: str = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
 PRIVACY_SHIELD_HF_FILE: str = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
@@ -159,13 +164,14 @@ def _legacy_dark_palette_overrides(merged: dict[str, Any]) -> dict[str, str]:
 
 def refresh() -> None:
     """Reload bootstrap YAML into module-level settings (paths, colors, defaults)."""
-    global DOCUMENTS, STORE_DIR, STORE_DB_PATH, IMPORT_ASSETS_DIR
+    global DOCUMENTS, STORE_DIR, STORE_DB_PATH, RAG_DB_PATH, IMPORT_ASSETS_DIR
     global DEFAULT_OLLAMA_MODEL, OLLAMA_HOST
     global APPEARANCE, IS_LIGHT
     global PAGE_BG, PRIMARY_COLOR, HIGHLIGHT, ON_PRIMARY, ON_SURFACE, ON_SURFACE_SOFT
     global ON_SURFACE_VARIANT, OUTLINE, SUCCESS
     global SURFACE, SURFACE_VARIANT, SIDEBAR_SURFACE, CHAT_SYSTEM, SELECTION_OVERLAY
     global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE, RAG_SYSTEM
+    global RAG_INDEX_ON_STARTUP, RAG_OVERLAP_CHARS, RAG_RERANKER_ENABLED, RAG_RERANKER_MODEL
     global PRIVACY_SHIELD_ENABLED, PRIVACY_SHIELD_HF_REPO, PRIVACY_SHIELD_HF_FILE
     global PRIVACY_SHIELD_CACHE_NAME, PRIVACY_SHIELD_REINJECT, PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT
     global PRIVACY_SHIELD_CHUNK_MAX_CHARS, PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS
@@ -174,6 +180,7 @@ def refresh() -> None:
     DOCUMENTS = _as_path("documents_root", merged)
     STORE_DIR = _as_path("store_dir", merged)
     STORE_DB_PATH = STORE_DIR / "store.sqlite3"
+    RAG_DB_PATH = STORE_DIR / "store.rag.sqlite3"
     IMPORT_ASSETS_DIR = DOCUMENTS / "iterthink_import_assets"
 
     dm = merged.get("default_ollama_model")
@@ -239,6 +246,25 @@ def refresh() -> None:
     if rs is None:
         rs = _bundled_rag
     RAG_SYSTEM = _coerce_rag_system_value(rs)
+
+    rio = merged.get("rag_index_on_startup", _bd_rag.get("rag_index_on_startup", True))
+    RAG_INDEX_ON_STARTUP = bool(rio) if isinstance(rio, bool) else True
+
+    roc = merged.get("rag_overlap_chars", _bd_rag.get("rag_overlap_chars", 200))
+    try:
+        RAG_OVERLAP_CHARS = max(0, int(roc))
+    except (TypeError, ValueError):
+        RAG_OVERLAP_CHARS = 200
+
+    rre = merged.get("rag_reranker_enabled", _bd_rag.get("rag_reranker_enabled", True))
+    RAG_RERANKER_ENABLED = bool(rre) if isinstance(rre, bool) else True
+
+    rrm = merged.get("rag_reranker_model", _bd_rag.get("rag_reranker_model", "Xenova/ms-marco-MiniLM-L-6-v2"))
+    RAG_RERANKER_MODEL = (
+        rrm.strip()
+        if isinstance(rrm, str) and rrm.strip()
+        else "Xenova/ms-marco-MiniLM-L-6-v2"
+    )
 
     nt = merged.get("new_note_name_template")
     if isinstance(nt, str) and nt.strip() and nt.count("{n}") == 1:

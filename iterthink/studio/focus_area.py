@@ -13,7 +13,7 @@ from iterthink import config
 from iterthink import prompts
 from iterthink.db.session import session_scope
 from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS, TOPIC_EVALUATE
-from iterthink.persistence import version_storage
+from iterthink.persistence import content_repo
 from .components import (
     ACTION_RAIL_ICON_SIZE,
     SPARKLE_MENU_ICON,
@@ -958,7 +958,7 @@ class MarkdownStudioCompose:
                 return
             try:
                 with session_scope() as s:
-                    st = version_storage.update_document_path_after_rename(s, old_r, new_r)
+                    st = content_repo.update_document_path_after_rename(s, old_r, new_r)
                 if st == "collision":
                     try:
                         new_path.rename(old)
@@ -1379,7 +1379,7 @@ class MarkdownStudioCompose:
                         loc_label = f"paragraph {idx + 1}"
                     try:
                         with session_scope() as s:
-                            new_vid = version_storage.persist_version_snapshot(
+                            new_vid = content_repo.persist_version_snapshot(
                                 s,
                                 self.current_path.resolve(),
                                 cand_buf,
@@ -1548,7 +1548,7 @@ class MarkdownStudioCompose:
                     loc_label = f"paragraph {idx + 1}"
                 try:
                     with session_scope() as s:
-                        new_vid = version_storage.persist_version_snapshot(
+                        new_vid = content_repo.persist_version_snapshot(
                             s,
                             self.current_path.resolve(),
                             cand_buf,
