@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from iterthink.ai.privacy_shield import redact_messages, reinject_response
+
 # Encrypted JSON keys (must match studio.settings_ui / studio defaults)
 SECRET_COMPANY_OPENAI = "company_openai"
 SECRET_CLOUD_ANTHROPIC = "cloud_anthropic"
@@ -393,6 +395,8 @@ class LlmChatBackend:
         cloud_openai_model: str,
         cloud_google_model: str,
         secrets: dict[str, str],
+        privacy_shield_enabled: bool = False,
+        privacy_shield_reinject: bool = True,
     ) -> None:
         self._ollama = ollama
         self._tier = tier
@@ -404,6 +408,16 @@ class LlmChatBackend:
         self._cloud_openai_model = cloud_openai_model
         self._cloud_google_model = cloud_google_model
         self._secrets = secrets
+        self._privacy_shield_enabled = bool(privacy_shield_enabled)
+        self._privacy_shield_reinject = bool(privacy_shield_reinject)
+
+    def _privacy_shield_applies(self) -> bool:
+        return self._privacy_shield_enabled and self._tier in ("company", "cloud")
+
+    def _maybe_reinject(self, resp: Any, rmap: Any) -> Any:
+        if rmap and self._privacy_shield_reinject:
+            return reinject_response(resp, rmap)
+        return resp
 
     def effective_model(self, explicit: str | None) -> str:
         if explicit and explicit.strip():
@@ -433,16 +447,23 @@ class LlmChatBackend:
         messages: list[dict[str, str]] | None = None,
         stream: bool = False,
         format: str | None = None,
+        skip_privacy_redaction: bool = False,
     ) -> Any:
         messages = messages or []
         m = self.effective_model(model or None)
         json_mode = format == "json"
+        rmap = None
+        if self._privacy_shield_applies() and not skip_privacy_redaction:
+            # Coerce non-stream so reinject runs on the full assistant text.
+            stream = False
+            messages, rmap = await redact_messages(messages)
 
         if self._tier == "local":
             kwargs: dict[str, Any] = {"model": m, "messages": messages, "stream": stream}
             if format:
                 kwargs["format"] = format
-            return await self._ollama.chat(**kwargs)
+            resp = await self._ollama.chat(**kwargs)
+            return self._maybe_reinject(resp, rmap)
 
         if self._tier == "company":
             key = self._require_secret(SECRET_COMPANY_OPENAI)
@@ -451,7 +472,7 @@ class LlmChatBackend:
             # Analyse checks still get JSON via _openai_messages_json_hint + checks_runner coercion.
             strict_rf = False
             if stream:
-                return _openai_stream_full(
+                stream_iter = _openai_stream_full(
                     url=url,
                     api_key=key,
                     model=m,
@@ -459,8 +480,9 @@ class LlmChatBackend:
                     json_mode=json_mode,
                     strict_response_format=strict_rf,
                 )
+                return stream_iter
             async with httpx.AsyncClient() as client:
-                return await _openai_nonstream(
+                resp = await _openai_nonstream(
                     client,
                     url=url,
                     api_key=key,
@@ -469,6 +491,7 @@ class LlmChatBackend:
                     json_mode=json_mode,
                     strict_response_format=strict_rf,
                 )
+            return self._maybe_reinject(resp, rmap)
 
         if self._tier == "cloud":
             if self._cloud_vendor == "anthropic":
@@ -483,9 +506,10 @@ class LlmChatBackend:
                         api_key=key, model=m, messages=messages, json_mode=json_mode
                     )
                 async with httpx.AsyncClient() as client:
-                    return await _anthropic_nonstream(
+                    resp = await _anthropic_nonstream(
                         client, api_key=key, model=m, messages=messages, json_mode=json_mode
                     )
+                return self._maybe_reinject(resp, rmap)
             if self._cloud_vendor == "google":
                 if not (m or "").strip():
                     raise ValueError(
@@ -498,9 +522,10 @@ class LlmChatBackend:
                         api_key=key, model=m, messages=messages, json_mode=json_mode
                     )
                 async with httpx.AsyncClient() as client:
-                    return await _gemini_nonstream(
+                    resp = await _gemini_nonstream(
                         client, api_key=key, model=m, messages=messages, json_mode=json_mode
                     )
+                return self._maybe_reinject(resp, rmap)
             if not (m or "").strip():
                 raise ValueError(
                     "No OpenAI cloud model id. Settings → Models: enter your OpenAI key, click "
@@ -519,7 +544,7 @@ class LlmChatBackend:
                     strict_response_format=strict_rf,
                 )
             async with httpx.AsyncClient() as client:
-                return await _openai_nonstream(
+                resp = await _openai_nonstream(
                     client,
                     url=url,
                     api_key=key,
@@ -528,11 +553,13 @@ class LlmChatBackend:
                     json_mode=json_mode,
                     strict_response_format=strict_rf,
                 )
+            return self._maybe_reinject(resp, rmap)
 
         kwargs: dict[str, Any] = {"model": m, "messages": messages, "stream": stream}
         if format:
             kwargs["format"] = format
-        return await self._ollama.chat(**kwargs)
+        resp = await self._ollama.chat(**kwargs)
+        return self._maybe_reinject(resp, rmap)
 
 
 def _http_status_error_detail_safe(exc: httpx.HTTPStatusError) -> str:

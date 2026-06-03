@@ -121,14 +121,22 @@ def join_paragraphs(parts: list[str]) -> str:
 
 
 def replace_paragraph_at_index(text: str, idx: int, new_paragraph: str) -> str:
-    """Return text with paragraph at ``idx`` replaced (same rules as ``split_paragraphs``)."""
+    """Return text with paragraph at ``idx`` replaced (same rules as ``split_paragraphs``).
+
+    When ``new_paragraph`` spans multiple ``\\n\\n`` blocks, slot ``idx`` is expanded and
+    all following slots are dropped so a full-document AI reply does not leave trailing
+    original paragraphs appended.
+    """
     parts = split_paragraphs(text)
+    new_parts = split_paragraphs(new_paragraph)
     if not parts:
         parts = [""]
     if idx < 0 or idx >= len(parts):
         return text
-    parts[idx] = new_paragraph
-    return join_paragraphs(parts)
+    if len(new_parts) <= 1:
+        slot = new_parts[0] if new_parts else ""
+        return join_paragraphs(parts[:idx] + [slot] + parts[idx + 1 :])
+    return join_paragraphs(parts[:idx] + new_parts)
 
 
 def remove_paragraph_at_index(text: str, idx: int) -> str:
@@ -142,6 +150,21 @@ def remove_paragraph_at_index(text: str, idx: int) -> str:
     if not parts:
         return ""
     return join_paragraphs(parts)
+
+
+def apply_review_insert(text: str, insert_after_old: int, new_paragraph: str) -> str:
+    """Apply a Review ``insert`` row: add text unless the target slot already has content.
+
+    Mis-aligned rows (empty left diff but an existing draft paragraph at the insert
+    position) are applied as replace so the draft is not duplicated.
+    """
+    at = insert_after_old + 1
+    parts = split_paragraphs(text)
+    if not parts:
+        parts = [""]
+    if 0 <= at < len(parts) and (parts[at] or "").strip() and new_paragraph.strip():
+        return replace_paragraph_at_index(text, at, new_paragraph)
+    return insert_paragraph_after_old_index(text, insert_after_old, new_paragraph)
 
 
 def insert_paragraph_after_old_index(text: str, insert_after_old: int, new_paragraph: str) -> str:

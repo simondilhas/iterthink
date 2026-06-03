@@ -354,8 +354,9 @@ class MainWorkspaceTabsMixin:
         # Entering Present (TAB_PRESENT)
         elif new_ix == TAB_PRESENT:
             self._margin_gen += 1
-            # editor.value is authoritative; rebuild margin sparkle
             await self._debounced_compose_rebuild(self._margin_gen)
+            if not getattr(self, "_skip_compose_plan_refresh_on_tab", False):
+                await self._refresh_compose_plan_surface_async()
             if self._is_tab_switch_stale(switch_seq):
                 self._main_tab_index = prev
                 self._apply_active_tab_ui_state()

@@ -83,9 +83,40 @@ def editor_text_color() -> str:
     return on_surface_soft_ui()
 
 
+def compose_preview_table_row_border() -> ft.Border:
+    border_c = ft.Colors.with_opacity(0.35, config.OUTLINE)
+    return ft.border.only(bottom=ft.BorderSide(1, border_c))
+
+
+def compose_preview_table_cell_divider() -> ft.Border:
+    border_c = ft.Colors.with_opacity(0.35, config.OUTLINE)
+    return ft.border.only(right=ft.BorderSide(1, border_c))
+
+
+def compose_preview_table_cell_border() -> ft.Border:
+    """Legacy combined border for MarkdownStyleSheet (non-hybrid tables)."""
+    border_c = ft.Colors.with_opacity(0.35, config.OUTLINE)
+    return ft.border.only(
+        bottom=ft.BorderSide(1, border_c),
+        right=ft.BorderSide(1, border_c),
+    )
+
+
+def compose_preview_horizontal_rule_decoration() -> ft.BoxDecoration:
+    """Focus preview `---`: single hairline, muted to match table borders."""
+    line_c = outline_muted(alpha=0.22 if config.IS_LIGHT else 0.28)
+    return ft.BoxDecoration(
+        border=ft.border.only(top=ft.BorderSide(1, line_c)),
+    )
+
+
 def compose_preview_markdown_style_sheet() -> ft.MarkdownStyleSheet:
     """Focus preview / help: monospace like the editor; strong = body + weight only."""
-    from .constants import COMPARE_COL_FONT_SIZE, COMPARE_COL_LINE_HEIGHT
+    from .constants import (
+        COMPARE_COL_FONT_SIZE,
+        COMPARE_COL_LINE_HEIGHT,
+        COMPOSE_PREVIEW_BLOCK_GAP_PX,
+    )
 
     fs = int(float(COMPARE_COL_FONT_SIZE))
     lh = float(COMPARE_COL_LINE_HEIGHT)
@@ -95,12 +126,19 @@ def compose_preview_markdown_style_sheet() -> ft.MarkdownStyleSheet:
     strong = base.copy(weight=ft.FontWeight.W_700)
     em = base.copy(italic=True)
     return ft.MarkdownStyleSheet(
+        block_spacing=COMPOSE_PREVIEW_BLOCK_GAP_PX,
         p_text_style=base,
         strong_text_style=strong,
         em_text_style=em,
         # Nested lists read flat when indent is tight; match monospace column feel.
         list_indent=28,
         blockquote_padding=ft.padding.only(left=10, top=2, bottom=2, right=4),
+        table_head_text_style=strong,
+        table_body_text_style=base,
+        table_cells_padding=ft.padding.symmetric(horizontal=8, vertical=4),
+        table_padding=ft.padding.only(bottom=8),
+        table_cells_decoration=ft.BoxDecoration(border=compose_preview_table_cell_border()),
+        horizontal_rule_decoration=compose_preview_horizontal_rule_decoration(),
     )
 
 

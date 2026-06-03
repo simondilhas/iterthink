@@ -29,6 +29,8 @@ SETTINGS_EXPORT_AUTHOR = "export_author"
 SETTINGS_SPELLCHECK_DICTIONARY_PATH = "spellcheck_dictionary_path"
 SETTINGS_SPELLCHECK_LANGUAGE_MODE = "spellcheck_language_mode"
 SETTINGS_SPELLCHECK_LANGUAGE = "spellcheck_language"
+SETTINGS_PROMPTS_BUNDLED_DISMISSED = "prompts_bundled_dismissed"
+SETTINGS_PROMPTS_REMOVED_IDS = "prompts_removed_ids"
 
 
 def ensure_store_dir() -> None:

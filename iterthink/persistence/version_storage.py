@@ -351,6 +351,7 @@ def persist_version_snapshot(
         ver.pdf_asset_relpath = f"pdf_assets/{pk}/{ver.id}.pdf"
         if pdf_profile is not None:
             ver.pdf_profile = pdf_profile
+        session.flush()
     if docx_source_path is not None and docx_source_path.is_file():
         dest_dir = _docx_assets_dir_for_doc(resolved_doc)
         dest = dest_dir / f"{ver.id}.docx"
@@ -404,6 +405,14 @@ def get_version_pdf_relpath(session: Session, version_id: int) -> str | None:
     if row is None:
         return None
     return row.pdf_asset_relpath
+
+
+def get_version_pdf_profile(session: Session, version_id: int) -> str | None:
+    row = session.get(DocumentVersion, version_id)
+    if row is None:
+        return None
+    prof = (row.pdf_profile or "").strip()
+    return prof or None
 
 
 def list_pdf_version_options(session: Session, resolved_doc: Path) -> list[tuple[int, str]]:
@@ -548,7 +557,7 @@ def purge_document_store_dirs(resolved_doc: Path) -> None:
     """Remove snapshot / PDF / DOCX asset directories keyed by this document path."""
     pk = path_key_for(resolved_doc.resolve())
     base = config.STORE_DIR.resolve()
-    for sub in ("snapshots", "pdf_assets", "docx_assets"):
+    for sub in ("snapshots", "pdf_assets", "docx_assets", "plan_text"):
         d = (config.STORE_DIR / sub / pk).resolve()
         try:
             d.relative_to(base)

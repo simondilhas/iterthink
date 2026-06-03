@@ -27,6 +27,8 @@ from iterthink.ai.ollama_models import classify_installed_models
 from iterthink.ai.ollama_util import ollama_error_message
 from .constants import KI_TIER_TAB_ICON_PX, SIDEBAR_TOOLBAR_ROW_H_PX
 from .llm_backend import build_llm_tier_tabs, sync_llm_tier_tab_icons
+from .settings_privacy import build_privacy_settings_tab
+from .prompts_merge_ui import show_prompt_merge_dialog
 from .util import (
     CLOUD_VENDOR_ANTHROPIC,
     CLOUD_VENDOR_GOOGLE,
@@ -92,8 +94,7 @@ async def _open_settings_dialog(studio: Any) -> None:
     )
 
     status_txt = ft.Text(
-        f"{len(chat_opts)} chat model(s) on Ollama. Paragraph compare uses GTE-Multilingual-Base (ONNX): "
-        "downloaded once into your store folder from Hugging Face, then offline.",
+        f"{len(chat_opts)} chat model(s)" if chat_opts else "No chat models",
         size=12,
         color=ft.Colors.GREY_500,
     )
@@ -110,10 +111,7 @@ async def _open_settings_dialog(studio: Any) -> None:
         chat_dd.options = [ft.dropdown.Option(n) for n in chat_opts]
         if chat_dd.value not in chat_opts and chat_opts:
             chat_dd.value = chat_opts[0]
-        status_txt.value = (
-            f"{len(chat_opts)} chat model(s) on Ollama. Paragraph compare uses GTE-Multilingual-Base (ONNX): "
-            "downloaded once into your store folder from Hugging Face, then offline."
-        )
+        status_txt.value = f"{len(chat_opts)} chat model(s)" if chat_opts else "No chat models"
         if _ctrl_on_page(chat_dd):
             chat_dd.update()
             status_txt.update()
@@ -440,13 +438,6 @@ async def _open_settings_dialog(studio: Any) -> None:
         expand=True,
         dense=True,
     )
-    cfg_hint = ft.Text(
-        f"App YAML: {config.APP_CONFIG_PATH}",
-        size=11,
-        color=ft.Colors.GREY_500,
-        selectable=True,
-    )
-
     async def pick_docs(_e: ft.ControlEvent | None = None) -> None:
         if page.web:
             studio._snack("Folder picker is not available in web mode.")
@@ -707,6 +698,41 @@ async def _open_settings_dialog(studio: Any) -> None:
     margin_rows: list[dict[str, Any]] = []
     impact_rows: list[dict[str, Any]] = []
     prompts_list = ft.Column(spacing=10, expand=True, scroll=ft.ScrollMode.AUTO)
+    prompts_merge_banner = ft.Container(visible=False)
+
+    async def _open_prompt_merge_review(_e: ft.ControlEvent | None = None) -> None:
+        await show_prompt_merge_dialog(page, studio, on_done=_update_merge_banner)
+
+    def _update_merge_banner() -> None:
+        pending = prompts.pending_conflicts()
+        if not pending:
+            prompts_merge_banner.visible = False
+            prompts_merge_banner.content = None
+        else:
+            n = len(pending)
+            prompts_merge_banner.visible = True
+            prompts_merge_banner.content = ft.Container(
+                padding=10,
+                border=ft.border.all(1, config.PRIMARY_COLOR),
+                border_radius=6,
+                bgcolor=ft.Colors.with_opacity(0.06, config.PRIMARY_COLOR),
+                content=ft.Row(
+                    [
+                        ft.Text(
+                            f"{n} bundled prompt update{'s' if n != 1 else ''} pending",
+                            expand=True,
+                            size=13,
+                        ),
+                        ft.TextButton(
+                            "Review",
+                            on_click=lambda e: page.run_task(_open_prompt_merge_review, e),
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+            )
+        if _ctrl_on_page(prompts_merge_banner):
+            prompts_merge_banner.update()
 
     def _collect_margin_dicts() -> list[dict[str, str]]:
         out: list[dict[str, str]] = []
@@ -748,15 +774,12 @@ async def _open_settings_dialog(studio: Any) -> None:
         prompts_list.controls.append(
             ft.Container(
                 padding=ft.padding.only(top=8),
-                content=ft.Text(
-                    "Impact tab (Review → Impact). Templates need {text} and {context}.",
-                    weight=ft.FontWeight.W_600,
-                    size=13,
-                ),
+                content=ft.Text("Impact", weight=ft.FontWeight.W_600, size=13),
             )
         )
         for r in impact_rows:
             prompts_list.controls.append(r["card"])
+        _update_merge_banner()
         if _ctrl_on_page(prompts_list):
             prompts_list.update()
 
@@ -889,7 +912,7 @@ async def _open_settings_dialog(studio: Any) -> None:
         if rebuild:
             _rebuild_prompts_list()
 
-    prompts.reload()
+    prompts.sync_with_defaults()
     for act in prompts.MARGIN_ACTIONS:
         _add_margin_row(
             aid=act.id,
@@ -911,8 +934,15 @@ async def _open_settings_dialog(studio: Any) -> None:
     _rebuild_prompts_list()
 
     async def save_margin_prompts(_e: ft.ControlEvent | None = None) -> None:
+        bundled_ids = prompts.bundled_action_ids()
+        before_ids = {a.id for a in prompts.MARGIN_ACTIONS}
+        new_dicts = _collect_margin_dicts()
+        new_ids = {d["id"] for d in new_dicts if d.get("id")}
+        for aid in before_ids - new_ids:
+            if aid in bundled_ids:
+                prompts.record_removed_action_id(aid)
         try:
-            prompts.write_margin_actions_dicts(_collect_margin_dicts())
+            prompts.write_margin_actions_dicts(new_dicts)
             impact_checks.write_impact_checks_dicts(_collect_impact_dicts())
         except (OSError, ValueError, yaml.YAMLError) as ex:
             studio._snack(f"Could not save prompts: {ex}")
@@ -927,6 +957,7 @@ async def _open_settings_dialog(studio: Any) -> None:
         except Exception as ex:
             studio._snack(f"Prompts saved, but UI refresh failed: {ex}")
             return
+        _update_merge_banner()
         studio._snack("Prompts saved.")
 
     def _on_settings_ki_tier_tabs_change(e: ft.ControlEvent) -> None:
@@ -951,13 +982,6 @@ async def _open_settings_dialog(studio: Any) -> None:
         content=ft.Column(
             [
                 ft.Text("Local (Ollama)", weight=ft.FontWeight.W_600, size=14),
-                ft.Text(
-                    "Used when Home is selected in the KI panel. "
-                    "Compare-tab paragraph embeddings run locally (GTE-Multilingual-Base ONNX, fetched once into your store folder); "
-                    "no Ollama embedding model is required.",
-                    size=11,
-                    color=ft.Colors.GREY_500,
-                ),
                 ollama_host_tf,
                 chat_dd,
                 status_txt,
@@ -977,13 +1001,6 @@ async def _open_settings_dialog(studio: Any) -> None:
         content=ft.Column(
             [
                 ft.Text("Encryption", weight=ft.FontWeight.W_600, size=14),
-                ft.Text(
-                    "API keys are stored encrypted in the database, not as plaintext. "
-                    "Enter this passphrase when saving new keys (Save office / Save cloud). "
-                    "Optionally store it in the OS keyring so the app can unlock the vault on startup.",
-                    size=11,
-                    color=ft.Colors.GREY_500,
-                ),
                 crypto_passphrase_tf,
                 ft.Row(
                     [
@@ -1012,11 +1029,6 @@ async def _open_settings_dialog(studio: Any) -> None:
         content=ft.Column(
             [
                 ft.Text("Office (OpenAI-compatible)", weight=ft.FontWeight.W_600, size=14),
-                ft.Text(
-                    "Use the full API URL from your organisation (not only the hostname).",
-                    size=11,
-                    color=ft.Colors.GREY_500,
-                ),
                 company_key_tf,
                 company_base_tf,
                 company_model_tf,
@@ -1099,7 +1111,6 @@ async def _open_settings_dialog(studio: Any) -> None:
         content=ft.Column(
             [
                 ft.Text("Cloud vendor", weight=ft.FontWeight.W_600, size=14),
-                ft.Text("", size=11, color=ft.Colors.GREY_500),
                 cloud_vendor_seg,
                 cloud_anthropic_wrap,
                 cloud_openai_wrap,
@@ -1159,11 +1170,6 @@ async def _open_settings_dialog(studio: Any) -> None:
     models_models_column = ft.Column(
         [
             ft.Text("Models", size=18, weight=ft.FontWeight.W_600),
-            ft.Text(
-                "Default KI tier matches the KI panel (Home · Office · Cloud).",
-                size=11,
-                color=ft.Colors.GREY_500,
-            ),
             settings_ki_tier_tabs,
             ft.Divider(height=12),
             wrap_home,
@@ -1188,7 +1194,6 @@ async def _open_settings_dialog(studio: Any) -> None:
         padding=8,
         content=ft.Column(
             [
-                cfg_hint,
                 docs_tf,
                 ft.Row(
                     [ft.OutlinedButton("Browse…", on_click=lambda e: page.run_task(pick_docs, e))],
@@ -1227,14 +1232,7 @@ async def _open_settings_dialog(studio: Any) -> None:
         padding=8,
         content=ft.Column(
             [
-                ft.Text("Word export", weight=ft.FontWeight.W_500, size=13),
                 export_author_tf,
-                ft.Text(
-                    "Fills the {Author} and {Name} placeholders in .docx templates (same stored value). "
-                    "{Titel} and {Date} come from the document name and export date.",
-                    size=11,
-                    color=config.ON_SURFACE_VARIANT,
-                ),
                 ft.FilledButton("Save export settings", on_click=lambda e: page.run_task(save_export_settings, e)),
             ],
             tight=True,
@@ -1254,22 +1252,9 @@ async def _open_settings_dialog(studio: Any) -> None:
                 ft.Text("Notes & startup", weight=ft.FontWeight.W_500, size=13),
                 daily_log_sw,
                 new_note_template_tf,
-                ft.Text(
-                    "When daily log is on, the app opens or creates one YYYYMMDD-n.md per day in the documents folder. "
-                    "When off, it opens the first note in the tree (same order as the sidebar) or creates the next file from the template.",
-                    size=11,
-                    color=config.ON_SURFACE_VARIANT,
-                ),
                 ft.Text("Spelling", weight=ft.FontWeight.W_500, size=13),
                 spell_mode_dd,
                 spell_manual_lang_dd,
-                ft.Text(
-                    f"Shipped dictionaries are copied to {config.STORE_DIR / 'spell_dictionaries'} on startup when missing. "
-                    "Auto: guess language from the note (very short text uses the manual language as fallback). "
-                    "Manual: always spellcheck with the selected language.",
-                    size=11,
-                    color=config.ON_SURFACE_VARIANT,
-                ),
                 spell_dict_tf,
                 ft.Row(
                     [
@@ -1280,11 +1265,6 @@ async def _open_settings_dialog(studio: Any) -> None:
                         ft.OutlinedButton("Clear", on_click=clear_spell_dictionary),
                     ],
                     spacing=8,
-                ),
-                ft.Text(
-                    "Custom file: same format as pyspellchecker language packages (e.g. en.json.gz): lowercase keys, integer counts.",
-                    size=11,
-                    color=config.ON_SURFACE_VARIANT,
                 ),
                 ft.FilledButton(
                     "Save spelling settings",
@@ -1303,14 +1283,7 @@ async def _open_settings_dialog(studio: Any) -> None:
         padding=8,
         content=ft.Column(
             [
-                ft.Text(
-                    f"Margin prompts: {config.STORE_DIR / 'prompts.yaml'}. "
-                    f"Impact tab checks: {config.STORE_DIR / 'impact_checks.yaml'}. "
-                    "Margin uses {{text}} and KI topic. Impact uses {{text}} + {{context}}.",
-                    size=12,
-                    color=ft.Colors.GREY_500,
-                    selectable=True,
-                ),
+                prompts_merge_banner,
                 ft.Container(content=prompts_list, expand=True),
                 ft.Row(
                     [
@@ -1459,6 +1432,12 @@ async def _open_settings_dialog(studio: Any) -> None:
         ),
     )
 
+    tab_privacy = build_privacy_settings_tab(
+        studio=studio,
+        bootstrap_data=_bootstrap_data,
+        on_saved=lambda: _apply_paths_and_theme(studio, store_changed=False),
+    )
+
     tab_license = ft.Container(
         padding=8,
         content=ft.Column(
@@ -1475,7 +1454,7 @@ async def _open_settings_dialog(studio: Any) -> None:
         ),
     )
 
-    panels = [tab_app, tab_paths, tab_export, tab_license, tab_models, tab_prompts]
+    panels = [tab_app, tab_paths, tab_export, tab_privacy, tab_license, tab_models, tab_prompts]
     tab_stack = ft.Stack(controls=panels, expand=True)
     for i, c in enumerate(panels):
         c.visible = i == 0
@@ -1501,6 +1480,7 @@ async def _open_settings_dialog(studio: Any) -> None:
             ft.NavigationRailDestination(icon=ft.Icons.PALETTE_OUTLINED, label="App"),
             ft.NavigationRailDestination(icon=ft.Icons.FOLDER_OUTLINED, label="Paths"),
             ft.NavigationRailDestination(icon=ft.Icons.DESCRIPTION_OUTLINED, label="Export"),
+            ft.NavigationRailDestination(icon=ft.Icons.SHIELD_OUTLINED, label="Privacy"),
             ft.NavigationRailDestination(icon=ft.Icons.KEY, label="License"),
             ft.NavigationRailDestination(icon=ft.Icons.SMART_TOY_OUTLINED, label="Models"),
             ft.NavigationRailDestination(icon=ft.Icons.FORMAT_LIST_BULLETED, label="Prompts"),

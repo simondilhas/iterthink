@@ -9,6 +9,7 @@ from typing import Any, NamedTuple
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
+from docx.enum.text import WD_BREAK
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
@@ -17,6 +18,9 @@ from docx.styles import BabelFish
 from iterthink import config
 
 from . import docx_footnotes, docx_placeholders
+
+# Vertical gap between top-level blocks (matches editor \\n\\n separation).
+BLOCK_GAP_PT = 8
 
 
 def bundled_templates_dir() -> Path:
@@ -379,6 +383,43 @@ class _Ctx:
         self.para_comment_idx = 0
         # First block in a list item shows bullet/number when the template has no native list styles.
         self.list_item_mark_pending = True
+        self.last_block_paragraph: Any = None
+        self.space_next_block = False
+
+
+def _apply_block_gap_before(ctx: _Ctx, paragraph: Any, *, list_meta: _ListRenderMeta | None) -> None:
+    if list_meta is not None or not ctx.space_next_block:
+        return
+    paragraph.paragraph_format.space_before = Pt(BLOCK_GAP_PT)
+    ctx.space_next_block = False
+
+
+def _insert_block_gap_before(ctx: _Ctx) -> None:
+    """Spacer paragraph before a table when a prior top-level block requested a gap."""
+    if not ctx.space_next_block:
+        return
+    p = ctx.doc.add_paragraph(style=ctx.styles.body)
+    p.paragraph_format.space_before = Pt(BLOCK_GAP_PT)
+    ctx.space_next_block = False
+
+
+def _note_block_paragraph(ctx: _Ctx, paragraph: Any, *, list_meta: _ListRenderMeta | None) -> None:
+    if list_meta is None:
+        ctx.last_block_paragraph = paragraph
+
+
+def _end_top_level_block(ctx: _Ctx, paragraph: Any, *, list_meta: _ListRenderMeta | None) -> None:
+    """Finish a heading, body paragraph, or fence; apply gap after top-level blocks."""
+    _note_block_paragraph(ctx, paragraph, list_meta=list_meta)
+    if list_meta is None:
+        paragraph.paragraph_format.space_after = Pt(BLOCK_GAP_PT)
+        ctx.space_next_block = True
+
+
+def _add_page_break(ctx: _Ctx) -> None:
+    p = ctx.doc.add_paragraph(style=ctx.styles.body)
+    p.add_run().add_break(WD_BREAK.PAGE)
+    _note_block_paragraph(ctx, p, list_meta=None)
 
 
 def _attach_export_paragraph_comment(ctx: _Ctx, paragraph: Any) -> None:
@@ -503,6 +544,131 @@ def _render_inline_styled(ctx: _Ctx, paragraph: Any, children: list[Any]) -> Non
             i += 1
 
 
+def _compute_proportional_widths(
+    natural: list[float],
+    avail: float,
+    *,
+    min_width: float = 1.0,
+) -> list[float]:
+    if not natural:
+        return []
+    if avail <= 0:
+        return [max(min_width, w) for w in natural]
+    widths = [max(min_width, w) for w in natural]
+    total = sum(widths)
+    if total <= 0:
+        return [avail / len(natural)] * len(natural)
+    return [w * avail / total for w in widths]
+
+
+def _usable_page_width_cm(doc: Document) -> float:
+    sec = doc.sections[0]
+    return sec.page_width.cm - sec.left_margin.cm - sec.right_margin.cm
+
+
+def _natural_table_col_widths_cm(rows: list[list[list[Any]]]) -> list[float]:
+    ncols = max((len(r) for r in rows), default=0)
+    min_col = 1.0
+    pad = 0.25
+    char_w = 0.12
+    natural = [min_col] * ncols
+    for row in rows:
+        for ci, cell_tokens in enumerate(row):
+            if ci >= ncols:
+                continue
+            plain = _plaintext_from_inline_tokens(cell_tokens)
+            w = len(plain) * char_w + 2 * pad
+            natural[ci] = max(natural[ci], w)
+    return natural
+
+
+def _set_table_column_widths(table: Any, rows: list[list[list[Any]]], doc: Document) -> None:
+    natural = _natural_table_col_widths_cm(rows)
+    if not natural:
+        return
+    usable = _usable_page_width_cm(doc)
+    widths = _compute_proportional_widths(natural, usable, min_width=1.0)
+    for j, w in enumerate(widths):
+        table.columns[j].width = Cm(w)
+
+
+def _parse_table_tokens(tokens: list[Any], start: int) -> tuple[list[list[list[Any]]], list[bool], int]:
+    """Return ``(rows of inline-token lists, header flags per row, index after table_close)``."""
+    rows: list[list[list[Any]]] = []
+    header_rows: list[bool] = []
+    i = start + 1
+    n = len(tokens)
+    in_thead = False
+    while i < n and tokens[i].type != "table_close":
+        t = tokens[i]
+        if t.type == "thead_open":
+            in_thead = True
+            i += 1
+            continue
+        if t.type == "thead_close":
+            in_thead = False
+            i += 1
+            continue
+        if t.type in ("tbody_open", "tbody_close"):
+            i += 1
+            continue
+        if t.type == "tr_open":
+            i += 1
+            row: list[list[Any]] = []
+            while i < n and tokens[i].type != "tr_close":
+                if tokens[i].type in ("th_open", "td_open"):
+                    i += 1
+                    inline: list[Any] = []
+                    if i < n and tokens[i].type == "inline":
+                        inline = tokens[i].children or []
+                        i += 1
+                    if i < n and tokens[i].type in ("th_close", "td_close"):
+                        i += 1
+                    row.append(inline)
+                else:
+                    i += 1
+            if i < n and tokens[i].type == "tr_close":
+                i += 1
+            rows.append(row)
+            header_rows.append(in_thead)
+            continue
+        i += 1
+    if i < n and tokens[i].type == "table_close":
+        i += 1
+    return rows, header_rows, i
+
+
+def _render_table(ctx: _Ctx, tokens: list[Any], start: int) -> int:
+    rows, header_rows, i = _parse_table_tokens(tokens, start)
+    if not rows:
+        return i
+    nrows = len(rows)
+    ncols = max((len(r) for r in rows), default=0)
+    if ncols == 0:
+        return i
+    _insert_block_gap_before(ctx)
+    table = ctx.doc.add_table(rows=nrows, cols=ncols)
+    try:
+        table.style = "Table Grid"
+    except Exception:
+        pass
+    for ri, row in enumerate(rows):
+        for ci in range(ncols):
+            cell = table.rows[ri].cells[ci]
+            p = cell.paragraphs[0]
+            if ci < len(row):
+                _render_inline_styled(ctx, p, row[ci])
+            if header_rows[ri]:
+                for run in p.runs:
+                    if ctx.styles.strong:
+                        run.style = ctx.styles.strong
+                    else:
+                        run.bold = True
+    _set_table_column_widths(table, rows, ctx.doc)
+    ctx.space_next_block = True
+    return i
+
+
 def _list_depth_parent(list_meta: _ListRenderMeta | None) -> int:
     return list_meta.depth if list_meta is not None else -1
 
@@ -528,11 +694,13 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: _ListRenderMeta | No
             i += 1
             style = _heading_style_name(ctx.doc, level)
             p = _add_paragraph_with_style(ctx.doc, style)
+            _apply_block_gap_before(ctx, p, list_meta=list_meta)
             if i < n and tokens[i].type == "inline":
                 _render_inline_styled(ctx, p, tokens[i].children or [])
                 i += 1
             if i < n and tokens[i].type == "heading_close":
                 i += 1
+            _end_top_level_block(ctx, p, list_meta=list_meta)
             _attach_export_paragraph_comment(ctx, p)
             continue
         if t.type == "paragraph_open":
@@ -560,17 +728,20 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: _ListRenderMeta | No
                     ctx.list_item_mark_pending = False
             else:
                 p = ctx.doc.add_paragraph(style=ctx.styles.body)
+            _apply_block_gap_before(ctx, p, list_meta=list_meta)
             if i < n and tokens[i].type == "inline":
                 _render_inline_styled(ctx, p, tokens[i].children or [])
                 i += 1
             if i < n and tokens[i].type == "paragraph_close":
                 i += 1
+            _end_top_level_block(ctx, p, list_meta=list_meta)
             if list_meta is None:
                 _attach_export_paragraph_comment(ctx, p)
             continue
         if t.type == "fence":
             body = (t.content or "").rstrip("\n")
             p = ctx.doc.add_paragraph(style=ctx.styles.code_block)
+            _apply_block_gap_before(ctx, p, list_meta=list_meta)
             if list_meta is not None:
                 ordered, depth, _idx = list_meta
                 _st, native = ctx.styles.list_paragraph_style(ctx.doc, ordered=ordered, depth=depth)
@@ -588,6 +759,7 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: _ListRenderMeta | No
                 else:
                     r.font.name = "Courier New"
                     r.font.size = Pt(10)
+            _end_top_level_block(ctx, p, list_meta=list_meta)
             _attach_export_paragraph_comment(ctx, p)
             i += 1
             continue
@@ -621,10 +793,13 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: _ListRenderMeta | No
             continue
         if t.type == "hr":
             i += 1
-            ctx.doc.add_paragraph("— — —", style=ctx.styles.body)
+            _add_page_break(ctx)
             continue
         if t.type == "html_block":
             i += 1
+            continue
+        if t.type == "table_open":
+            i = _render_table(ctx, tokens, i)
             continue
         i += 1
 
@@ -645,6 +820,7 @@ def markdown_to_docx(
     # breaks=True: single newlines in the markdown file become softbreak tokens and render as
     # Word line breaks (CommonMark otherwise treats them like spaces in one paragraph).
     md = MarkdownIt("commonmark", {"breaks": True}).use(footnote_plugin)
+    md.enable("table")
     tokens = md.parse(markdown_src)
     main_toks, fn_block = _split_footnote_block(tokens)
     defs = _collect_footnote_defs(fn_block)

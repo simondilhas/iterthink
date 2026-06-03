@@ -18,11 +18,13 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -74,7 +76,7 @@ class DocumentVersion(Base):
 
 
 class ParagraphUserComment(Base):
-    """User-authored note per markdown paragraph slot for a specific snapshot version."""
+    """User-authored note per markdown paragraph or plan-PDF pin/cloud for a snapshot version."""
 
     __tablename__ = "paragraph_user_comments"
 
@@ -86,17 +88,30 @@ class ParagraphUserComment(Base):
         ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True
     )
     paragraph_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    annotation_kind: Mapped[str] = mapped_column(String(24), nullable=False, default="paragraph")
+    plan_page_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    plan_norm_x: Mapped[float | None] = mapped_column(nullable=True)
+    plan_norm_y: Mapped[float | None] = mapped_column(nullable=True)
+    geometry_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
     updated_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
 
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_paragraph_user_comment_paragraph",
             "document_id",
             "version_id",
             "paragraph_index",
-            name="uq_paragraph_user_comment_key",
+            unique=True,
+            sqlite_where=text("annotation_kind = 'paragraph'"),
+        ),
+        Index(
+            "ix_paragraph_user_comments_plan_ver",
+            "document_id",
+            "version_id",
+            "annotation_kind",
         ),
     )
 

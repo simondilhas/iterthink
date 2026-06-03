@@ -61,6 +61,14 @@ SELECTION_OVERLAY: str = "#88B8A8D4"
 STARTUP_DAILY_LOG: bool = True
 NEW_NOTE_NAME_TEMPLATE: str = "unnamed-{n}.md"
 RAG_SYSTEM: bool = False
+PRIVACY_SHIELD_ENABLED: bool = True
+PRIVACY_SHIELD_HF_REPO: str = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+PRIVACY_SHIELD_HF_FILE: str = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+PRIVACY_SHIELD_CACHE_NAME: str = "qwen-2.5-1.5b.gguf"
+PRIVACY_SHIELD_REINJECT: bool = True
+PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT: bool = False
+PRIVACY_SHIELD_CHUNK_MAX_CHARS: int = 2800
+PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS: int = 1
 
 
 def _bundled_defaults_dict() -> dict[str, Any]:
@@ -158,6 +166,9 @@ def refresh() -> None:
     global ON_SURFACE_VARIANT, OUTLINE, SUCCESS
     global SURFACE, SURFACE_VARIANT, SIDEBAR_SURFACE, CHAT_SYSTEM, SELECTION_OVERLAY
     global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE, RAG_SYSTEM
+    global PRIVACY_SHIELD_ENABLED, PRIVACY_SHIELD_HF_REPO, PRIVACY_SHIELD_HF_FILE
+    global PRIVACY_SHIELD_CACHE_NAME, PRIVACY_SHIELD_REINJECT, PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT
+    global PRIVACY_SHIELD_CHUNK_MAX_CHARS, PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS
 
     merged = _merged_config()
     DOCUMENTS = _as_path("documents_root", merged)
@@ -239,6 +250,52 @@ def refresh() -> None:
             if isinstance(fb_nt, str) and fb_nt.strip() and fb_nt.count("{n}") == 1
             else "unnamed-{n}.md"
         )
+
+    _bd = _bundled_defaults_dict()
+    pse = merged.get("privacy_shield_enabled", _bd.get("privacy_shield_enabled", True))
+    PRIVACY_SHIELD_ENABLED = bool(pse) if isinstance(pse, bool) else True
+
+    phr = merged.get("privacy_shield_hf_repo", _bd.get("privacy_shield_hf_repo", "Qwen/Qwen2.5-1.5B-Instruct-GGUF"))
+    PRIVACY_SHIELD_HF_REPO = (
+        phr.strip()
+        if isinstance(phr, str) and phr.strip()
+        else "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+    )
+
+    phf = merged.get("privacy_shield_hf_file", _bd.get("privacy_shield_hf_file", "qwen2.5-1.5b-instruct-q4_k_m.gguf"))
+    PRIVACY_SHIELD_HF_FILE = (
+        phf.strip()
+        if isinstance(phf, str) and phf.strip()
+        else "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+    )
+
+    pcn = merged.get("privacy_shield_cache_name", _bd.get("privacy_shield_cache_name", "qwen-2.5-1.5b.gguf"))
+    PRIVACY_SHIELD_CACHE_NAME = (
+        pcn.strip()
+        if isinstance(pcn, str) and pcn.strip()
+        else "qwen-2.5-1.5b.gguf"
+    )
+
+    psr = merged.get("privacy_shield_reinject", _bd.get("privacy_shield_reinject", True))
+    PRIVACY_SHIELD_REINJECT = bool(psr) if isinstance(psr, bool) else True
+
+    psm = merged.get("privacy_shield_show_masked_in_chat", _bd.get("privacy_shield_show_masked_in_chat", False))
+    PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT = bool(psm) if isinstance(psm, bool) else False
+
+    psc = merged.get("privacy_shield_chunk_max_chars", _bd.get("privacy_shield_chunk_max_chars", 2800))
+    try:
+        PRIVACY_SHIELD_CHUNK_MAX_CHARS = max(500, int(psc))
+    except (TypeError, ValueError):
+        PRIVACY_SHIELD_CHUNK_MAX_CHARS = 2800
+
+    pso = merged.get(
+        "privacy_shield_chunk_overlap_paragraphs",
+        _bd.get("privacy_shield_chunk_overlap_paragraphs", 1),
+    )
+    try:
+        PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS = max(0, min(5, int(pso)))
+    except (TypeError, ValueError):
+        PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS = 1
 
 
 def read_bootstrap_yaml_text() -> str:

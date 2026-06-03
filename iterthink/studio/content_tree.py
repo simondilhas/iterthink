@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from .util import ctrl_on_page as _ctrl_on_page
 
 _ATX_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _FENCE_OPEN = re.compile(r"^\s*```")
+_CONTENT_TREE_DEBOUNCE_SEC = 0.2
 
 
 @dataclass(frozen=True)
@@ -322,6 +324,50 @@ class MarkdownStudioContentTree:
         cur = getattr(self, "current_path", None)
         return cur is not None and Path(cur).suffix.lower() == ".md"
 
+    def _is_plan_content_sidebar_mode(self) -> bool:
+        if getattr(self, "_compose_plan_load_inflight_key", None):
+            return True
+        active = getattr(self, "_compose_plan_viewer_active", None)
+        return bool(active()) if callable(active) else False
+
+    def _content_tree_plan_page_row(self, page_index: int, *, selected: bool) -> ft.Control:
+        label = ft.Text(
+            f"Page {page_index + 1}",
+            size=12,
+            color=config.ON_SURFACE,
+            weight=ft.FontWeight.W_600 if selected else None,
+        )
+        return ft.Container(
+            content=ft.GestureDetector(
+                mouse_cursor=ft.MouseCursor.CLICK,
+                on_tap=lambda _e, ix=page_index: self.page.run_task(self._on_content_plan_page_tap, ix),
+                content=ft.Container(content=label, padding=ft.Padding.symmetric(horizontal=8, vertical=4)),
+            ),
+            bgcolor=ft.Colors.with_opacity(0.12, config.PRIMARY_COLOR) if selected else None,
+            border_radius=4,
+        )
+
+    async def _on_content_plan_page_tap(self, page_index: int) -> None:
+        if self._main_tab_index != TAB_PRESENT:
+            await self._request_tab_switch_async(TAB_PRESENT)
+        strip = getattr(self, "_compose_plan_focus_viewer", None)
+        if strip is None:
+            if hasattr(self, "_refresh_compose_plan_surface_async"):
+                await self._refresh_compose_plan_surface_async()
+            strip = getattr(self, "_compose_plan_focus_viewer", None)
+        if strip is None:
+            self._snack("Plan PDF is still loading.")
+            return
+        self._compose_plan_page_index = max(0, min(page_index, max(strip.page_count - 1, 0)))
+        if hasattr(self, "_show_compose_plan_page_async"):
+            await self._show_compose_plan_page_async(self._compose_plan_page_index)
+        elif hasattr(self, "_compose_plan_go_page"):
+            self._compose_plan_go_page(self._compose_plan_page_index)
+        self._rebuild_content_tree()
+        pg = getattr(self, "page", None)
+        if pg is not None:
+            pg.update()
+
     def _build_left_sidebar_tab_button(
         self, *, icon: str, tooltip: str, idx: int
     ) -> ft.Container:
@@ -346,8 +392,6 @@ class MarkdownStudioContentTree:
         )
 
     def _select_left_sidebar_tab(self, idx: int) -> None:
-        if idx == self._left_sidebar_tab:
-            return
         self._left_sidebar_tab = idx
         self.left_panel.content = self._build_left_column()
         if idx == 1:
@@ -382,23 +426,58 @@ class MarkdownStudioContentTree:
             tooltip=heading.title,
         )
 
+    def _kick_debounced_content_tree(self) -> None:
+        if getattr(self, "_left_sidebar_tab", 0) != 1:
+            return
+        self._content_tree_gen += 1
+        gen = self._content_tree_gen
+        self.page.run_task(self._debounced_rebuild_content_tree, gen)
+
+    async def _debounced_rebuild_content_tree(self, gen: int) -> None:
+        await asyncio.sleep(_CONTENT_TREE_DEBOUNCE_SEC)
+        if gen != self._content_tree_gen:
+            return
+        if getattr(self, "_left_sidebar_tab", 0) != 1:
+            return
+        self._rebuild_content_tree()
+
     def _rebuild_content_tree(self) -> None:
         col = getattr(self, "content_tree_column", None)
         if col is None:
             return
+        find_col = getattr(self, "_content_find_replace_column", None)
         col.controls.clear()
-        if not self._is_content_tree_eligible():
-            col.controls.append(
-                self._content_tree_empty_message("Open a markdown file to see headings.")
-            )
+        if self._is_plan_content_sidebar_mode():
+            if find_col is not None:
+                find_col.visible = False
+            viewer = getattr(self, "_compose_plan_focus_viewer", None)
+            n = viewer.page_count if viewer is not None else 0
+            cur = int(getattr(self, "_compose_plan_page_index", 0) or 0)
+            if n == 0:
+                loading = bool(getattr(self, "_compose_plan_load_inflight_key", None))
+                msg = "Loading plan pages…" if loading else "No plan pages."
+                col.controls.append(self._content_tree_empty_message(msg))
+            else:
+                col.controls.extend(
+                    self._content_tree_plan_page_row(i, selected=(i == cur)) for i in range(n)
+                )
         else:
-            headings = parse_markdown_headings(self.editor.value or "")
-            if not headings:
+            if find_col is not None:
+                find_col.visible = True
+            if not self._is_content_tree_eligible():
                 col.controls.append(
-                    self._content_tree_empty_message("No headings in this document.")
+                    self._content_tree_empty_message("Open a markdown file to see headings.")
                 )
             else:
-                col.controls.extend(self._content_tree_heading_row(h) for h in headings)
+                headings = parse_markdown_headings(self.editor.value or "")
+                if not headings:
+                    col.controls.append(
+                        self._content_tree_empty_message("No headings in this document.")
+                    )
+                else:
+                    col.controls.extend(self._content_tree_heading_row(h) for h in headings)
+        if find_col is not None and _ctrl_on_page(find_col):
+            find_col.update()
         if _ctrl_on_page(col) and getattr(self, "_left_sidebar_tab", 0) == 1:
             col.update()
 

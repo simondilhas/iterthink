@@ -116,6 +116,7 @@ def list_stored_for_version(session: Session, *, document_id: int, version_id: i
         select(ParagraphUserComment).where(
             ParagraphUserComment.document_id == document_id,
             ParagraphUserComment.version_id == version_id,
+            ParagraphUserComment.annotation_kind == "paragraph",
         )
     ).scalars()
     return [
@@ -133,6 +134,7 @@ def map_for_version(session: Session, *, document_id: int, version_id: int) -> d
         select(ParagraphUserComment).where(
             ParagraphUserComment.document_id == document_id,
             ParagraphUserComment.version_id == version_id,
+            ParagraphUserComment.annotation_kind == "paragraph",
         )
     ).scalars()
     return {int(r.paragraph_index): (r.body or "").strip() for r in rows if (r.body or "").strip()}
@@ -157,6 +159,7 @@ def get_one(session: Session, *, document_id: int, version_id: int, paragraph_in
                 ParagraphUserComment.document_id == document_id,
                 ParagraphUserComment.version_id == version_id,
                 ParagraphUserComment.paragraph_index == int(paragraph_index),
+                ParagraphUserComment.annotation_kind == "paragraph",
             )
         )
         .scalars()
@@ -208,6 +211,7 @@ def upsert(
                 ParagraphUserComment.document_id == document_id,
                 ParagraphUserComment.version_id == version_id,
                 ParagraphUserComment.paragraph_index == int(paragraph_index),
+                ParagraphUserComment.annotation_kind == "paragraph",
             )
         )
         .scalars()
@@ -223,16 +227,19 @@ def upsert(
                 document_id=document_id,
                 version_id=version_id,
                 paragraph_index=int(paragraph_index),
+                annotation_kind="paragraph",
                 content_hash=content_hash,
                 body=body,
                 created_at=now,
                 updated_at=now,
             )
         )
-        return
-    row.body = body
-    row.content_hash = content_hash
-    row.updated_at = now
+    else:
+        row.body = body
+        row.content_hash = content_hash
+        row.annotation_kind = "paragraph"
+        row.updated_at = now
+    session.flush()
 
 
 def delete_at(session: Session, *, document_id: int, version_id: int, paragraph_index: int) -> None:
@@ -241,6 +248,7 @@ def delete_at(session: Session, *, document_id: int, version_id: int, paragraph_
             ParagraphUserComment.document_id == document_id,
             ParagraphUserComment.version_id == version_id,
             ParagraphUserComment.paragraph_index == int(paragraph_index),
+            ParagraphUserComment.annotation_kind == "paragraph",
         )
     )
 

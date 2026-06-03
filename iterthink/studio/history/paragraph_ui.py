@@ -99,7 +99,14 @@ class _HistoryParagraphUIMixin:
                 self._open_ki_comments_for_paragraph_async, p, se
             ),
         )
-        bottom_right_spacer = ft.Container(height=COMPARE_ACTION_GRID_CELL, expand=True)
+        act_btn = ft.IconButton(
+            ft.Icons.PRECISION_MANUFACTURING,
+            icon_size=ACTION_RAIL_ICON_SIZE,
+            icon_color=config.ON_SURFACE_VARIANT,
+            tooltip="Act",
+            style=action_rail_icon_button_style(),
+            on_click=lambda _e: self.page.run_task(self._open_ki_act_tab_async),
+        )
         actions_inner = build_action_rectangle(
             top_left=action_rail_approve_icon_button(
                 on_click=lambda _e, ix=i: self.page.run_task(self._compare_accept_paragraph_async, ix),
@@ -108,7 +115,7 @@ class _HistoryParagraphUIMixin:
                 on_click=lambda _e, ix=i: self.page.run_task(self._compare_decline_paragraph_async, ix),
             ),
             bottom_left=comment_btn,
-            bottom_right=bottom_right_spacer,
+            bottom_right=act_btn,
             row_h=COMPARE_ACTION_GRID_CELL,
         )
         inner_chrome, hover = wrap_workspace_action_chrome(actions_inner, persistent=persistent)
@@ -604,12 +611,23 @@ class _HistoryParagraphUIMixin:
             # comparison row (new-side slot)
             old_txt = row.old_text
             cur_txt = row.new_text
-            if row.slot_kind == "added" or (old_txt == "" and cur_txt):
+            if row.slot_kind == "added":
                 review_kind = "insert"
                 oi = -1
                 ia = paragraph_compare.insert_after_old_index_for_added(
                     diffs, row.new_paragraph_index
                 )
+            elif old_txt == "" and cur_txt:
+                if row.old_paragraph_index >= 0:
+                    review_kind = "replace"
+                    oi = row.old_paragraph_index
+                    ia = -1
+                else:
+                    review_kind = "insert"
+                    oi = -1
+                    ia = paragraph_compare.insert_after_old_index_for_added(
+                        diffs, row.new_paragraph_index
+                    )
             elif old_txt == cur_txt:
                 review_kind = "equal"
                 oi = row.old_paragraph_index

@@ -12,7 +12,13 @@ from iterthink.db import bootstrap
 from iterthink.db.session import reset_engine_cache
 from iterthink.ai.local_embedding import prepare_runtime_embedding_model_sync
 from iterthink.ai.ollama_util import ollama_error_message
+from iterthink.ai.privacy_shield_gguf import is_gguf_ready
+from iterthink.ai.privacy_shield_llm import require_llama_cpp_import
+from iterthink.ai.privacy_shield_model import ensure_privacy_shield_model_sync
+from iterthink.studio.privacy_shield_ui import begin_privacy_shield_download
+from iterthink.studio.prompts_merge_ui import show_prompt_merge_dialog
 from iterthink.studio import MarkdownStudio
+from iterthink import prompts
 
 
 async def main(page: ft.Page) -> None:
@@ -43,11 +49,18 @@ async def main(page: ft.Page) -> None:
     config.refresh()
     reset_engine_cache()
     bootstrap.bootstrap_database()
+    prompt_sync = prompts.sync_with_defaults()
 
     studio = MarkdownStudio(page)
     page.add(studio.build())
     await studio._startup_open_default_note()
     studio._refresh_title_bar()
+
+    if prompt_sync.added_ids:
+        n = len(prompt_sync.added_ids)
+        studio._snack(f"Added {n} prompt{'s' if n != 1 else ''} from defaults.")
+    if prompt_sync.pending:
+        await show_prompt_merge_dialog(page, studio, prompt_sync.pending)
 
     if use_native_csd:
         page.window.title_bar_hidden = True
@@ -106,7 +119,36 @@ async def main(page: ft.Page) -> None:
                 "Compare-tab embeddings need this download the first time."
             )
 
+    async def _privacy_shield_model_warmup() -> None:
+        if page.web or not config.PRIVACY_SHIELD_ENABLED:
+            return
+        if not is_gguf_ready():
+            handle = await begin_privacy_shield_download(studio)
+            loop = asyncio.get_running_loop()
+
+            def on_progress(frac: float) -> None:
+                asyncio.run_coroutine_threadsafe(
+                    handle.set_progress(frac, "Downloading privacy shield model from Hugging Face…"),
+                    loop,
+                )
+
+            try:
+                await asyncio.to_thread(ensure_privacy_shield_model_sync, on_progress)
+            except BaseException:
+                studio._snack(
+                    f"Could not download the privacy-shield model ({config.PRIVACY_SHIELD_CACHE_NAME}). "
+                    "Check your network; for restricted networks set HF_TOKEN."
+                )
+                return
+            finally:
+                await handle.close()
+        try:
+            await asyncio.to_thread(require_llama_cpp_import)
+        except BaseException as ex:
+            studio._snack(str(ex))
+
     page.run_task(_embedding_model_warmup)
+    page.run_task(_privacy_shield_model_warmup)
     page.run_task(studio._refresh_ki_chat_model_dropdown)
     if not page.web:
         page.run_task(studio._periodic_file_drift_loop)

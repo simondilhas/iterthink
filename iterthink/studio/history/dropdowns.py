@@ -411,7 +411,7 @@ class _HistoryDropdownsMixin:
         if refresh_compare_ui:
             self._refresh_compare_tab_candidate_ui()
 
-    def _select_snapshot_as_candidate(self, vid: int) -> None:
+    def _select_snapshot_as_candidate(self, vid: int, *, defer_rebuild: bool = False) -> None:
         """Pick a snapshot row (History or Import). Auto-route to the correct format renderer.
 
         Sets ``_compare_candidate_source`` based on which asset (PDF, DOCX, …)
@@ -424,6 +424,7 @@ class _HistoryDropdownsMixin:
                 body = version_storage.load_version_body(s, vid)
                 pdf_rel = version_storage.get_version_pdf_relpath(s, vid)
                 docx_rel = version_storage.get_version_docx_relpath(s, vid)
+                pdf_prof = version_storage.get_version_pdf_profile(s, vid)
         except BaseException:
             self._snack("Could not load that version.")
             return
@@ -440,10 +441,13 @@ class _HistoryDropdownsMixin:
         elif pdf_rel:
             self._compare_candidate_source = CompareCandidateSource.PDF_ORIGINAL
             self._compare_pdf_peer_snapshot_id = vid
+            if pdf_prof == "plan" and hasattr(self, "_apply_plan_import_open_state"):
+                self._apply_plan_import_open_state()
         else:
             self._compare_candidate_source = CompareCandidateSource.SNAPSHOT
             self._compare_pdf_peer_snapshot_id = None
-        self._rebuild_compare_view()
+        if not defer_rebuild:
+            self._rebuild_compare_view()
 
     def _set_compare_version_dd_focused(self, focused: bool) -> None:
         self._compare_version_dd_focused = focused

@@ -18,6 +18,8 @@ class _HistoryDispatchMixin:
         """
         source = self._compare_candidate_source
         if source == CompareCandidateSource.PDF_ORIGINAL:
+            if hasattr(self, "_refresh_plan_compare_bar"):
+                self._refresh_plan_compare_bar()
             self._rebuild_compare_pdf_panes()
             self._sync_compare_pdf_layers_visibility()
         elif source == CompareCandidateSource.DOCX_ORIGINAL:

@@ -18,7 +18,55 @@ logger = logging.getLogger(__name__)
 
 PdfProfileHeuristic = Literal["text", "plan"]
 
+PDF_RENDER_SCALE_TEXT = 1.5
+PDF_RENDER_SCALE_PLAN = 2.0
+
 ALLOWED_IMPORT_EXTENSIONS = frozenset({"docx", "pdf"})
+
+# Trailing ``_<long digits>`` from some OS file pickers (temp copy ids).
+_PICKER_TEMP_STEM_SUFFIX = re.compile(r"_\d{10,}$")
+
+
+def normalize_import_library_stem(stem: str) -> str:
+    """Sanitize and drop picker temp numeric suffixes from the library note stem."""
+    safe = "".join(c for c in stem if c.isalnum() or c in " ._-")[:200].strip()
+    if not safe:
+        return ""
+    m = _PICKER_TEMP_STEM_SUFFIX.search(safe)
+    if m and m.start() > 0:
+        trimmed = safe[: m.start()].rstrip(" ._-")
+        if trimmed:
+            return trimmed
+    return safe
+
+
+def import_dest_md_path(src: Path, base: Path) -> Path | None:
+    """Target ``.md`` path for an import, or None if the derived name is invalid."""
+    safe = normalize_import_library_stem(src.stem)
+    if not safe:
+        return None
+    return base.resolve() / f"{safe}.md"
+
+
+def import_target_display_path(dest_md: Path, documents_root: Path) -> str:
+    """Human path like ``projects/foo/Name.pdf`` (tree-style label, not on-disk ``.md``)."""
+    dest_md = dest_md.resolve()
+    root = documents_root.resolve()
+    try:
+        rel_parent = dest_md.parent.relative_to(root)
+        folder = "." if rel_parent == Path(".") else rel_parent.as_posix()
+    except ValueError:
+        folder = dest_md.parent.as_posix()
+    return f"{folder}/{dest_md.stem}.pdf"
+
+
+def import_pdf_dialog_hint(
+    dest_md: Path, documents_root: Path, *, import_into_existing: bool
+) -> str:
+    target = import_target_display_path(dest_md, documents_root)
+    if import_into_existing:
+        return f"Add version to: {target}"
+    return f"Save as: {target}"
 
 
 def validate_extension(path: Path) -> str | None:
@@ -555,6 +603,82 @@ def pdf_to_markdown(src: Path) -> str:
     return md
 
 
+def pdf_render_scale_for_profile(pdf_profile: PdfProfileHeuristic | None) -> float:
+    return PDF_RENDER_SCALE_PLAN if pdf_profile == "plan" else PDF_RENDER_SCALE_TEXT
+
+
+def extract_pdf_pages_geometry(src: Path) -> dict:
+    """
+    Plan PDFs: per-page lines with PDF-space bboxes (no markdown flattening).
+    """
+    import pdfplumber
+
+    with pdfplumber.open(str(src)) as pdf:
+        pages_data: list[tuple[float, float, list[dict]]] = []
+        for page in pdf.pages:
+            ph = float(page.height) if page.height else 792.0
+            pw = float(page.width) if page.width else 612.0
+            pages_data.append((ph, pw, _plumber_page_to_lines(page)))
+
+        strip_keys = _pdf_repeated_strip_keys_lines([(ph, lines) for ph, _pw, lines in pages_data])
+
+        pages_out: list[dict] = []
+        for pi, (ph, pw, page_lines) in enumerate(pages_data):
+            lines_out: list[dict] = []
+            for line in page_lines:
+                sk = _pdf_line_strip_key(line, ph)
+                if sk is not None and sk in strip_keys:
+                    continue
+                spans = line.get("spans") or []
+                text = "".join(sp.get("text", "") for sp in spans).strip()
+                if not text:
+                    continue
+                bbox = line.get("bbox") or [0.0, 0.0, 0.0, 0.0]
+                sizes = [float(sp.get("size") or 0) for sp in spans if (sp.get("size") or 0) > 0]
+                lines_out.append(
+                    {
+                        "text": text,
+                        "bbox": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+                        "size": max(sizes) if sizes else 11.0,
+                    }
+                )
+            pages_out.append({"page": pi + 1, "width": pw, "height": ph, "lines": lines_out})
+    return {"pages": pages_out}
+
+
+def import_pdf_with_profile_and_geometry(
+    src: Path, pdf_profile: PdfProfileHeuristic
+) -> tuple[str, dict | None]:
+    """Markdown body and optional plan geometry (one pdfplumber pass for plan imports)."""
+    if pdf_profile == "plan":
+        from iterthink.services.plan_text_extract import (
+            extract_plan_geometry,
+            plan_stub_markdown_minimal,
+        )
+
+        geometry = extract_plan_geometry(src)
+        return plan_stub_markdown_minimal(), geometry
+    return pdf_to_markdown(src), None
+
+
+def import_plan_pdf_fast_stub() -> str:
+    """Minimal markdown for plan import before geometry extraction runs in background."""
+    from iterthink.services.plan_text_extract import plan_stub_markdown_minimal
+
+    return plan_stub_markdown_minimal()
+
+
+def import_pdf_with_profile(src: Path, pdf_profile: PdfProfileHeuristic) -> str:
+    """Return markdown body for a PDF import using the chosen profile."""
+    return import_pdf_with_profile_and_geometry(src, pdf_profile)[0]
+
+
+def import_pdf_for_profile(src: Path) -> tuple[str, PdfProfileHeuristic]:
+    """Return markdown body and profile for a PDF import (auto-classified)."""
+    prof = classify_pdf_profile(src)
+    return import_pdf_with_profile(src, prof), prof
+
+
 def classify_pdf_profile(src: Path) -> PdfProfileHeuristic:
     """
     Rough split: text-heavy PDFs → ``text``; sparse extraction → ``plan`` / drawing-like.
@@ -584,16 +708,21 @@ def pdf_render_cache_dir(pdf_abs: Path) -> Path:
     return d
 
 
-def render_pdf_to_png_pages(pdf_abs: Path) -> list[Path]:
+def render_pdf_to_png_pages(
+    pdf_abs: Path,
+    *,
+    pdf_profile: PdfProfileHeuristic | None = None,
+) -> list[Path]:
     """
     Rasterize each PDF page to PNG under the render cache (pypdfium2 + Pillow).
     Returns ordered list of PNG paths.
     """
     import pypdfium2 as pdfium
 
+    scale = pdf_render_scale_for_profile(pdf_profile)
     cache = pdf_render_cache_dir(pdf_abs)
     marker = cache / ".source"
-    src_tag = f"{pdf_abs.resolve()}:{pdf_abs.stat().st_mtime_ns}"
+    src_tag = f"{pdf_abs.resolve()}:{pdf_abs.stat().st_mtime_ns}:scale={scale}"
     if marker.is_file() and marker.read_text(encoding="utf-8") == src_tag:
         existing = sorted(cache.glob("page_*.png"))
         if existing:
@@ -601,11 +730,12 @@ def render_pdf_to_png_pages(pdf_abs: Path) -> list[Path]:
 
     for old in cache.glob("page_*.png"):
         old.unlink(missing_ok=True)
+    for old in cache.glob("page_*_textov_*.png"):
+        old.unlink(missing_ok=True)
 
     pdf = pdfium.PdfDocument(str(pdf_abs))
     out: list[Path] = []
     try:
-        scale = 1.5
         for i in range(len(pdf)):
             page = pdf[i]
             bitmap = page.render(scale=scale)
@@ -630,5 +760,5 @@ def import_file_to_markdown(src: Path, md_path: Path) -> str:
         asset_dir = config.IMPORT_ASSETS_DIR / md_path.stem
         return docx_to_markdown(src, asset_dir)
 
-    return pdf_to_markdown(src)
+    return import_pdf_for_profile(src)[0]
 

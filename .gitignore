@@ -33,3 +33,6 @@ iterthink/embedded_models/
 .DS_Store
 Thumbs.db
 .idea/
+
+# Temp files
+temp/

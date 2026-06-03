@@ -126,6 +126,48 @@ def build_llm_tier_tabs(
     return outer
 
 
+def sync_privacy_shield_icon(
+    icon: ft.Icon | None,
+    *,
+    enabled: bool,
+    tier: str,
+    reinject: bool = True,
+) -> None:
+    """Update shield indicator beside KI tier tabs."""
+    if icon is None:
+        return
+    on = bool(enabled)
+    icon_name = ft.Icons.SHIELD if on else ft.Icons.GPP_BAD
+    col = config.HIGHLIGHT if on else config.ON_SURFACE_VARIANT
+    opacity = 1.0
+    if on and not reinject:
+        tip = (
+            "Privacy shield on (preview): Office/Cloud use placeholders; "
+            "replies keep tokens like {{PERSON_1}}."
+        )
+    elif on:
+        tip = "Privacy shield on: Office/Cloud requests are redacted locally; originals restored in replies."
+    else:
+        tip = "Privacy shield off."
+    if tier == KI_TIER_LOCAL and on:
+        tip += " Home tier does not send data off this machine."
+    changed = False
+    if getattr(icon, "icon", None) != icon_name:
+        icon.icon = icon_name
+        changed = True
+    if getattr(icon, "color", None) != col:
+        icon.color = col
+        changed = True
+    if getattr(icon, "opacity", None) != opacity:
+        icon.opacity = opacity
+        changed = True
+    if getattr(icon, "tooltip", None) != tip:
+        icon.tooltip = tip
+        changed = True
+    if changed and _ctrl_on_page(icon):
+        icon.update()
+
+
 def llm_tier_display_name(tier: str) -> str:
     """Short tier label for status lines (no leading symbol)."""
     return {
@@ -163,6 +205,8 @@ class MarkdownStudioLlmBackend:
             cloud_openai_model=self.cloud_openai_model,
             cloud_google_model=self.cloud_google_model,
             secrets=secrets,
+            privacy_shield_enabled=config.PRIVACY_SHIELD_ENABLED,
+            privacy_shield_reinject=config.PRIVACY_SHIELD_REINJECT,
         )
 
     def chat_model_for_requests(self) -> str:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from iterthink.compare.margin import (
-    insert_paragraph_after_old_index,
+    apply_review_insert,
     join_paragraphs,
     remove_paragraph_at_index,
     replace_paragraph_at_index,
@@ -117,9 +117,9 @@ class _HistoryBulkActionsMixin:
                 para_index_for_persist = oi
                 snack_msg = f"Paragraph {oi + 1} removed from the document."
             elif kind == "insert":
-                new_buf = insert_paragraph_after_old_index(pre_buf, ia, cand_para)
+                new_buf = apply_review_insert(pre_buf, ia, cand_para)
                 para_index_for_persist = index
-                snack_msg = "Inserted into the document."
+                snack_msg = "Applied to the document."
             elif kind in ("replace", "equal"):
                 if oi < 0 or oi >= n_paras:
                     self._snack("Could not map this row to the document.")
