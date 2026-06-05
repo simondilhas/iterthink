@@ -6,8 +6,8 @@ import flet as ft
 
 from iterthink import prompts
 from iterthink.db.session import session_scope
-from iterthink.persistence import version_storage
-from iterthink.persistence.version_storage import SnapshotInfo
+from iterthink.persistence import content_repo
+from iterthink.persistence.content_repo import SnapshotInfo
 
 from .. import ui_theme
 from ..constants import (
@@ -40,7 +40,7 @@ class _HistoryDropdownsMixin:
             snaps_all: list[SnapshotInfo] = []
             if self.current_path:
                 with session_scope() as s:
-                    snaps_all = version_storage.list_snapshots(s, self.current_path.resolve())
+                    snaps_all = content_repo.list_snapshots(s, self.current_path.resolve())
             filt = history_compare_snapshots(snaps_all)
 
             newer_opts: list[ft.dropdown.Option] = []
@@ -72,7 +72,7 @@ class _HistoryDropdownsMixin:
                         vid = int(first_snap.key)
                         self._compare_newer_version_id = vid
                         with session_scope() as s:
-                            self._compare_newer_cached_body = version_storage.load_version_body(
+                            self._compare_newer_cached_body = content_repo.load_version_body(
                                 s, vid
                             )
                     except (TypeError, ValueError, BaseException):
@@ -84,7 +84,7 @@ class _HistoryDropdownsMixin:
             if self._compare_newer_version_id is not None:
                 try:
                     with session_scope() as s:
-                        self._compare_newer_cached_body = version_storage.load_version_body(
+                        self._compare_newer_cached_body = content_repo.load_version_body(
                             s, self._compare_newer_version_id
                         )
                 except BaseException:
@@ -125,9 +125,9 @@ class _HistoryDropdownsMixin:
             snapshot_review_opts: list[ft.dropdown.Option] = []
             if self.current_path:
                 with session_scope() as s:
-                    snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+                    snaps = content_repo.list_snapshots(s, self.current_path.resolve())
                 for sn in snaps:
-                    row_text = version_storage.snapshot_dropdown_text(sn)
+                    row_text = content_repo.snapshot_dropdown_text(sn)
                     if sn.reason == "ai_proposal":
                         snapshot_review_opts.append(
                             ft.dropdown.Option(
@@ -152,7 +152,7 @@ class _HistoryDropdownsMixin:
                                 style=_st,
                             )
                         )
-                    elif version_storage.snapshot_bucket(sn) == "import":
+                    elif content_repo.snapshot_bucket(sn) == "import":
                         snapshot_review_opts.append(
                             ft.dropdown.Option(
                                 key=str(sn.version_id),
@@ -243,7 +243,7 @@ class _HistoryDropdownsMixin:
             self._compare_newer_version_id = vid
             try:
                 with session_scope() as s:
-                    self._compare_newer_cached_body = version_storage.load_version_body(s, vid)
+                    self._compare_newer_cached_body = content_repo.load_version_body(s, vid)
             except BaseException:
                 self._compare_newer_version_id = None
                 self._compare_newer_cached_body = ""
@@ -276,7 +276,7 @@ class _HistoryDropdownsMixin:
                 self._compare_editor.value = seeded
                 self._pending_ai_accept_action_id = REVIEW_MANUAL_CANDIDATE_ACTION_ID
                 self._compare_snapshot_version_id = None
-                self._loaded_proposal_sha = version_storage.content_sha256(seeded)
+                self._loaded_proposal_sha = content_repo.content_sha256(seeded)
                 if _ctrl_on_page(self._compare_editor):
                     self._compare_editor.update()
                 self._refresh_compare_tab_candidate_ui()
@@ -291,8 +291,10 @@ class _HistoryDropdownsMixin:
             # Persist edits to the currently-loaded proposal before swapping it out.
             self._flush_review_edits_if_changed()
             with session_scope() as s:
-                row = version_storage.get_version_row(s, vid)
-                row_reason = row.reason if row is not None else None
+                row = content_repo.get_version_row(s, vid)
+                row_reason = None
+                if row is not None:
+                    row_reason = content_repo.content_attrs(row).get("snapshot_reason")
             if row_reason in ("ai_proposal", "ai_staged", "review_edit"):
                 self._select_proposal_as_review_candidate(vid)
             else:
@@ -303,7 +305,7 @@ class _HistoryDropdownsMixin:
                     self._pending_ai_accept_action_id = (
                         self._pending_ai_accept_action_id or "ai_proposal"
                     )
-                    self._loaded_proposal_sha = version_storage.content_sha256(
+                    self._loaded_proposal_sha = content_repo.content_sha256(
                         self._compare_editor.value or ""
                     )
             self._rebuild_future_paragraph_ui()
@@ -345,8 +347,8 @@ class _HistoryDropdownsMixin:
         prev_vid = self._compare_snapshot_version_id
         try:
             with session_scope() as s:
-                body = version_storage.load_version_body(s, vid)
-                row = version_storage.get_version_row(s, vid)
+                body = content_repo.load_version_body(s, vid)
+                row = content_repo.get_version_row(s, vid)
                 # Read columns inside the session; ORM rows detach on scope exit.
                 fallback_label = (row.display_label or "").strip() if row is not None else ""
         except BaseException:
@@ -363,7 +365,7 @@ class _HistoryDropdownsMixin:
             or (fallback_label or None)
             or "ai_proposal"
         )
-        self._loaded_proposal_sha = version_storage.content_sha256(body)
+        self._loaded_proposal_sha = content_repo.content_sha256(body)
         if _ctrl_on_page(self._compare_editor):
             self._compare_editor.update()
 
@@ -381,7 +383,7 @@ class _HistoryDropdownsMixin:
         if self._loaded_proposal_sha is None:
             return
         body = self._compare_editor.value or ""
-        new_sha = version_storage.content_sha256(body)
+        new_sha = content_repo.content_sha256(body)
         if new_sha == self._loaded_proposal_sha:
             return
         aid = self._pending_ai_accept_action_id or ""
@@ -390,7 +392,7 @@ class _HistoryDropdownsMixin:
         label = f"{base_label} - edited"
         try:
             with session_scope() as s:
-                new_vid = version_storage.persist_version_snapshot(
+                new_vid = content_repo.persist_version_snapshot(
                     s,
                     self.current_path.resolve(),
                     body,
@@ -411,7 +413,7 @@ class _HistoryDropdownsMixin:
         if refresh_compare_ui:
             self._refresh_compare_tab_candidate_ui()
 
-    def _select_snapshot_as_candidate(self, vid: int) -> None:
+    def _select_snapshot_as_candidate(self, vid: int, *, defer_rebuild: bool = False) -> None:
         """Pick a snapshot row (History or Import). Auto-route to the correct format renderer.
 
         Sets ``_compare_candidate_source`` based on which asset (PDF, DOCX, …)
@@ -421,9 +423,10 @@ class _HistoryDropdownsMixin:
         prev_vid = self._compare_snapshot_version_id
         try:
             with session_scope() as s:
-                body = version_storage.load_version_body(s, vid)
-                pdf_rel = version_storage.get_version_pdf_relpath(s, vid)
-                docx_rel = version_storage.get_version_docx_relpath(s, vid)
+                body = content_repo.load_version_body(s, vid)
+                pdf_rel = content_repo.get_version_pdf_relpath(s, vid)
+                docx_rel = content_repo.get_version_docx_relpath(s, vid)
+                pdf_prof = content_repo.get_version_pdf_profile(s, vid)
         except BaseException:
             self._snack("Could not load that version.")
             return
@@ -440,10 +443,13 @@ class _HistoryDropdownsMixin:
         elif pdf_rel:
             self._compare_candidate_source = CompareCandidateSource.PDF_ORIGINAL
             self._compare_pdf_peer_snapshot_id = vid
+            if pdf_prof == "plan" and hasattr(self, "_apply_plan_import_open_state"):
+                self._apply_plan_import_open_state()
         else:
             self._compare_candidate_source = CompareCandidateSource.SNAPSHOT
             self._compare_pdf_peer_snapshot_id = None
-        self._rebuild_compare_view()
+        if not defer_rebuild:
+            self._rebuild_compare_view()
 
     def _set_compare_version_dd_focused(self, focused: bool) -> None:
         self._compare_version_dd_focused = focused

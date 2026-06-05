@@ -111,13 +111,18 @@ async def classify_paragraph_slots_batch(
     llm_chat: Any,
     *,
     chat_model: str,
-    doc_path: str,
+    lineage_id: str,
     items: list[tuple[int, str, str]],
+    doc_path: str | None = None,
 ) -> list[tuple[int, SemanticKind]]:
     """
     For each (slot_index, old_text, new_text), batch-embed new paragraphs, classify,
-    persist one observation per slot when embedding succeeds.
+    persist one RAG observation per slot when embedding succeeds.
+
+    ``lineage_id`` keys ``paragraph_observation``; ``doc_path`` (optional) keys the
+    embedding cache (defaults to ``lineage_id``).
     """
+    cache_key = doc_path if doc_path is not None else lineage_id
     if not items:
         return []
 
@@ -129,7 +134,7 @@ async def classify_paragraph_slots_batch(
     new_texts = [p for _, _, p in work]
 
     try:
-        new_vecs = await embed_texts_cached(conn, doc_path, new_texts)
+        new_vecs = await embed_texts_cached(conn, cache_key, new_texts)
     except BaseException:
         for i, o, p in work:
             results.append((i, await judge_semantic(llm_chat, chat_model, o, p)))
@@ -144,7 +149,7 @@ async def classify_paragraph_slots_batch(
             continue
 
         new_emb = new_vecs[j]
-        latest = store_db.latest_observation(conn, doc_path, i, embed_model)
+        latest = store_db.latest_observation(conn, lineage_id, i, embed_model)
 
         if latest is None:
             kind = await judge_semantic(llm_chat, chat_model, o, p)
@@ -166,7 +171,7 @@ async def classify_paragraph_slots_batch(
         store_db.paragraph_text_upsert(conn, hp, p)
         store_db.insert_observation(
             conn,
-            doc_path=doc_path,
+            lineage_id=lineage_id,
             slot_index=i,
             text_hash=hp,
             embed_model=embed_model,

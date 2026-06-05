@@ -19,7 +19,7 @@ from iterthink.persistence import (
     spell_resources,
     store_db,
     vault_store,
-    version_storage,
+    content_repo,
 )
 from iterthink.services import markdown_docx_export
 
@@ -56,11 +56,14 @@ from .constants import (
     TAB_FUTURE,
 )
 from .explorer import MarkdownStudioExplorer, first_markdown_in_tree
+from .search_results_ui import MarkdownStudioSearchResults
 from .focus_area import MarkdownStudioCompose
 from .history import CompareCandidateSource, MarkdownStudioCompareText
-from .ki_comments import paragraph_comment_label, sorted_comment_rows
+from .ki_comments import paragraph_comment_label, plan_comment_list_label, sorted_comment_rows
 from .ki_sidebar import KI_TOPIC_STRIP_DISCUSS_ICON, MarkdownStudioKiSidebar
-from .llm_backend import MarkdownStudioLlmBackend, build_llm_tier_tabs
+from .llm_backend import MarkdownStudioLlmBackend, build_llm_tier_tabs, sync_privacy_shield_icon
+from .token_cost_ui import build_token_cost_label
+from .llm_generation_control import MarkdownStudioLlmGenerationControl
 from .main_workspace_tabs import MainWorkspaceTabsMixin
 from .shell import MarkdownStudioShell
 from .content_tree import MarkdownStudioContentTree
@@ -70,9 +73,13 @@ from .util import (
     ctrl_on_page as _ctrl_on_page,
     normalize_cloud_vendor,
     normalize_ki_tier,
+    normalize_save_file_path,
 )
 # Autosave: disk idle vs snapshot idle (see constants). Compare: left = latest Compose; right = draft / snapshot / AI.
 # Layout literals: iterthink.studio.constants
+
+# GTK/Linux: native save dialog after closing a Flet modal needs a short yield.
+_EXPORT_SAVE_DIALOG_DELAY_SEC = 0.12
 
 
 class MarkdownStudio(
@@ -84,11 +91,13 @@ class MarkdownStudio(
     MarkdownStudioContentTree,
     MarkdownStudioKiSidebar,
     MarkdownStudioExplorer,
+    MarkdownStudioSearchResults,
     MarkdownStudioImpactMixin,
     MarkdownStudioChecksUi,
     MarkdownStudioAssetCompare,   # PDF / DOCX compare rendering
     MarkdownStudioIfcFormat,      # IFC compare rendering (placeholder)
     MarkdownStudioLlmBackend,
+    MarkdownStudioLlmGenerationControl,
 ):
     def __init__(self, page: ft.Page) -> None:
         self.page = page
@@ -136,7 +145,10 @@ class MarkdownStudio(
         # List continuation on Enter: previous buffer + re-entrancy guard while rewriting value.
         self._editor_prev_for_list_continue: str = ""
         self._editor_list_continue_applying: bool = False
+        self._editor_pending_caret: int | None = None
         self._compose_toolbar_applying: bool = False
+        self._compose_toolbar_snap_range: tuple[int, int] | None = None
+        self._compose_editor_focused: bool = False
         self._compose_editor_stack_width: float = 400.0
         self._compose_editor_stack_height: float = 320.0
         # Right-click context menu wrapping the editor; items rebuilt when prompts.yaml reloads.
@@ -209,8 +221,19 @@ class MarkdownStudio(
         self._compare_pdf_right_max_scroll: float = 1.0
         self._plan_overlay_mode: bool = False
         self._plan_overlay_gen: int = 0
+        self._plan_overlay_confidences: list[float] = []
+        self._plan_side_by_side_mode: bool = False
+        self._plan_overlay_defaults_set: bool = False
+        self._compose_plan_editor_collapsed: bool = False
+        self._compose_plan_show_labels: bool = True
+        self._skip_compose_plan_refresh_on_tab: bool = False
+        self._compose_plan_page_index: int = 0
+        self._compose_plan_focus_viewer = None
+        self._compose_plan_document_id: int | None = None
+        self._compose_plan_version_id: int | None = None
         self._fp_import = ft.FilePicker()
         self._fp_export_docx = ft.FilePicker()
+        self._fp_export_plan_pdf = ft.FilePicker()
         self._fp_spell_dict = ft.FilePicker()
         self._import_kind: str | None = None
         self._import_flow: str | None = None
@@ -249,6 +272,8 @@ class MarkdownStudio(
             enable_interactive_selection=True,
             on_change=self._on_editor_change,
             on_selection_change=self._on_selection_change,
+            on_focus=lambda _e: self._set_compose_editor_focused(True),
+            on_blur=lambda _e: self._set_compose_editor_focused(False),
         )
         self._compare_editor = ft.TextField(
             multiline=True,
@@ -288,6 +313,10 @@ class MarkdownStudio(
         )
 
         self._compose_plan_host = ft.Container(expand=True, visible=False)
+        self._init_search_results_ui()
+        self._compose_plan_load_gen = 0
+        self._compose_plan_surface_key: tuple[int, bool, str] | None = None
+        self._compose_plan_load_inflight_key: tuple[int, bool, str] | None = None
         self._compose_editor_area_gesture = ft.GestureDetector(
             content=self._editor_shell,
             on_secondary_tap_down=self._on_compose_editor_area_secondary_down,
@@ -323,7 +352,6 @@ class MarkdownStudio(
         )
         self._compose_preview_host = ft.Container(
             expand=True,
-            visible=False,
             padding=ft.padding.only(
                 left=COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX,
                 right=COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX,
@@ -336,11 +364,15 @@ class MarkdownStudio(
                 expand=True,
             ),
         )
+        self._compose_writing_slot = ft.Container(
+            expand=True,
+            content=self._compose_editor_shell_wrapped,
+        )
         self._compose_reading_inner = ft.Column(
             [
                 self._compose_plan_host,
-                self._compose_editor_shell_wrapped,
-                self._compose_preview_host,
+                self._search_results_host,
+                self._compose_writing_slot,
             ],
             expand=True,
             spacing=8,
@@ -392,6 +424,24 @@ class MarkdownStudio(
             on_baseline=lambda e: self.page.run_task(self._on_plan_pdf_baseline_async, e),
             on_candidate=lambda e: self.page.run_task(self._on_plan_pdf_candidate_async, e),
             on_overlay=self._on_plan_overlay_changed,
+            on_side_by_side=self._on_plan_side_by_side_changed,
+            on_hover_baseline=self._on_plan_baseline_dropdown_hover,
+            on_hover_candidate=self._on_plan_candidate_dropdown_hover,
+            on_baseline_focus=lambda _e: self._set_plan_compare_dropdown_focused(True),
+            on_baseline_blur=lambda _e: self._set_plan_compare_dropdown_focused(False),
+            on_candidate_focus=lambda _e: self._set_plan_compare_dropdown_focused(True),
+            on_candidate_blur=lambda _e: self._set_plan_compare_dropdown_focused(False),
+            dropdown_text_style=_tb_dd_text_style,
+            menu_style=_dd_menu_style,
+            option_button_style=_dd_opt_st,
+            label_text_style=_tb_label_style,
+            border_radius=float(SIDEBAR_INNER_BORDER_RADIUS_PX),
+        )
+        self._plan_compare_future = plan_compare_panel.build_plan_compare_panel(
+            on_baseline=lambda e: self.page.run_task(self._on_plan_pdf_baseline_async, e),
+            on_candidate=lambda e: self.page.run_task(self._on_plan_pdf_candidate_async, e),
+            on_overlay=self._on_plan_overlay_changed,
+            on_side_by_side=self._on_plan_side_by_side_changed,
             on_hover_baseline=self._on_plan_baseline_dropdown_hover,
             on_hover_candidate=self._on_plan_candidate_dropdown_hover,
             on_baseline_focus=lambda _e: self._set_plan_compare_dropdown_focused(True),
@@ -535,9 +585,14 @@ class MarkdownStudio(
         self._plan_compare.overlay_list.visible = False
         self._plan_compare.overlay_list.on_scroll = self._on_compare_pdf_scroll_right
         self._compare_pdf_right_column = ft.Column(
-            [self._compare_pdf_right_lv, self._plan_compare.overlay_list],
+            [self._compare_pdf_right_lv],
             expand=True,
             spacing=0,
+        )
+        self._compare_pdf_overlay_host = ft.Container(
+            content=self._plan_compare.overlay_list,
+            expand=True,
+            visible=False,
         )
         self._compare_pdf_split_row = ft.Row(
             [
@@ -557,7 +612,15 @@ class MarkdownStudio(
             expand=True,
             spacing=8,
         )
-        self._compare_pdf_layer = ft.Container(content=self._compare_pdf_split_row, expand=True, visible=False)
+        self._compare_pdf_layer = ft.Container(
+            content=ft.Column(
+                [self._compare_pdf_split_row, self._compare_pdf_overlay_host],
+                expand=True,
+                spacing=8,
+            ),
+            expand=True,
+            visible=False,
+        )
         self._compare_editor_holder = ft.Container(content=self._compare_editor, visible=False, height=0)
         def _make_result_card_overlay() -> ft.Container:
             return ft.Container(
@@ -640,6 +703,18 @@ class MarkdownStudio(
             padding=ft.padding.all(8),
             on_scroll=self._on_future_pdf_scroll_right,
         )
+        self._future_plan_overlay_list = ft.ListView(
+            expand=True,
+            spacing=8,
+            padding=ft.padding.all(8),
+            visible=False,
+            on_scroll=self._on_compare_pdf_scroll_right,
+        )
+        self._future_plan_overlay_host = ft.Container(
+            content=self._future_plan_overlay_list,
+            expand=True,
+            visible=False,
+        )
         self._future_pdf_split_row = ft.Row(
             [
                 ft.Container(
@@ -659,7 +734,15 @@ class MarkdownStudio(
             spacing=8,
         )
         self._future_pdf_layer = ft.Container(
-            content=self._future_pdf_split_row,
+            content=ft.Column(
+                [
+                    self._plan_compare_future.host,
+                    self._future_pdf_split_row,
+                    self._future_plan_overlay_host,
+                ],
+                expand=True,
+                spacing=4,
+            ),
             expand=True,
             visible=False,
         )
@@ -834,6 +917,21 @@ class MarkdownStudio(
             visible=False,
             on_click=lambda _e: self._toggle_focus_preview_mode(),
         )
+        self._compose_current_file_menu_btn = ft.PopupMenuButton(
+            icon=ft.Icons.MORE_VERT,
+            icon_size=18,
+            icon_color=config.ON_SURFACE_VARIANT,
+            tooltip="File actions",
+            style=ft.ButtonStyle(padding=ft.padding.all(2)),
+            visible=False,
+            menu_position=ft.PopupMenuPosition.UNDER,
+            items=[
+                ft.PopupMenuItem(
+                    content=ft.Text("Export…", size=13),
+                    on_click=lambda _e: self.page.run_task(self.begin_export_to_word, None),
+                ),
+            ],
+        )
         # Stable height: preview IconButton is taller than the filename text; toggling
         # it must not resize this row or the label shifts when changing main tabs.
         self._compose_tab_filename_row = ft.Container(
@@ -844,6 +942,7 @@ class MarkdownStudio(
                     self._compose_tab_filename_hit,
                     self._compose_tab_filename_field,
                     self._compose_tab_filename_suffix_text,
+                    self._compose_current_file_menu_btn,
                     self._focus_preview_toggle_btn,
                 ],
                 tight=True,
@@ -997,6 +1096,7 @@ class MarkdownStudio(
                 self._review_subpanels_column,
             ]
         )
+        self._plan_compare_future.set_bar_visible(False)
         self._future_tab_body = ft.Container(
             expand=True,
             content=ft.Column(
@@ -1114,6 +1214,8 @@ class MarkdownStudio(
         )
         self._disk_autosave_gen: int = 0
         self._snapshot_autosave_gen: int = 0
+        self._content_tree_gen: int = 0
+        self._compose_preview_gen: int = 0
 
         self.tree_column = ft.Column(spacing=0, tight=True, scroll=ft.ScrollMode.AUTO, expand=True)
         self.content_tree_column = ft.Column(
@@ -1167,7 +1269,7 @@ class MarkdownStudio(
         )
 
         self.tree_search_field = ft.TextField(
-            hint_text="Search files…",
+            hint_text="Search… (/f for filenames)",
             dense=True,
             filled=True,
             fill_color=config.SURFACE,
@@ -1203,6 +1305,7 @@ class MarkdownStudio(
 
         self.tree_search_field.on_focus = lambda _e: _tree_search_rim(True)
         self.tree_search_field.on_blur = lambda _e: _tree_search_rim(False)
+        self._sync_rag_search_ui()
 
         self._init_content_find_replace_ui(_hint_style)
 
@@ -1223,6 +1326,7 @@ class MarkdownStudio(
         self._comment_para_index: int | None = None
         self._comment_edit_mode: bool = False
         self._chat_api_messages: list[dict[str, str]] = []
+        self._init_sidebar_llm_control()
 
         # ----- Per-paragraph Analyse checks (KI Analyse tab) -----
         # Active check id whose symbols populate the Compare row eval cells.
@@ -1258,14 +1362,9 @@ class MarkdownStudio(
         )
         self._ki_act_panel = ft.Column(
             [
+                
                 ft.Text(
-                    "Ready to act on this change?",
-                    size=13,
-                    weight=ft.FontWeight.W_600,
-                    color=config.PRIMARY_COLOR,
-                ),
-                ft.Text(
-                    "Connect {yourcompany}os to turn document changes into structured workflows — automatically routed to the right people.",
+                    "Connect {yourcompany}os to turn document changes into automated workflows and decisions.",
                     size=12,
                     color=config.ON_SURFACE_VARIANT,
                     selectable=True,
@@ -1530,7 +1629,7 @@ class MarkdownStudio(
             focused_border_color=config.PRIMARY_COLOR,
             cursor_color=config.PRIMARY_COLOR,
             content_padding=ft.padding.symmetric(horizontal=8, vertical=6),
-            on_submit=lambda e: self.page.run_task(self._send_chat_message, e),
+            on_submit=lambda e: self.page.run_task(self._on_chat_send_click, e),
         )
         self._chat_send_btn = ft.IconButton(
             icon=ft.Icons.SEND,
@@ -1538,7 +1637,7 @@ class MarkdownStudio(
             tooltip="Send",
             icon_color=config.PRIMARY_COLOR,
             style=ft.ButtonStyle(padding=ft.padding.all(4)),
-            on_click=lambda e: self.page.run_task(self._send_chat_message, e),
+            on_click=lambda e: self.page.run_task(self._on_chat_send_click, e),
         )
         _tier_ix = KI_TIERS.index(normalize_ki_tier(self.ki_tier))
         self._ki_tier_tabs = build_llm_tier_tabs(
@@ -1546,6 +1645,29 @@ class MarkdownStudio(
             on_change=self._on_ki_tier_tabs_change,
             icon_size=KI_TIER_TAB_ICON_PX,
             tab_bar_height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
+        )
+        self._ensure_ki_tier_tabs_enabled()
+        self._privacy_shield_icon = ft.Icon(
+            ft.Icons.SHIELD,
+            size=KI_TIER_TAB_ICON_PX,
+            color=config.HIGHLIGHT,
+        )
+        sync_privacy_shield_icon(
+            self._privacy_shield_icon,
+            enabled=config.PRIVACY_SHIELD_ENABLED,
+            tier=self.ki_tier,
+            reinject=config.PRIVACY_SHIELD_REINJECT,
+        )
+        self._token_cost_label = build_token_cost_label(size=11)
+        self._sync_token_cost_display()
+        self._ki_tier_row = ft.Row(
+            [
+                ft.Container(content=self._ki_tier_tabs, expand=True),
+                self._token_cost_label,
+                self._privacy_shield_icon,
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         self._chat_model_options: list[str] = []
         self._chat_input_row = ft.Row(
@@ -1568,7 +1690,7 @@ class MarkdownStudio(
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
             content=ft.Column(
                 [
-                    self._ki_tier_tabs,
+                    self._ki_tier_row,
                     self._chat_input_row,
                     self._impact_run_dock,
                 ],
@@ -1669,6 +1791,15 @@ class MarkdownStudio(
 
         self.page.on_keyboard_event = self._on_page_keyboard
 
+    def _refresh_dirty_state_ui(self) -> None:
+        """Lightweight dirty indicator for the keystroke hot path (no tab/preview relayout)."""
+        visible = bool(self.current_path) and self._is_dirty()
+        if self.dirty_dot.visible == visible:
+            return
+        self.dirty_dot.visible = visible
+        if _ctrl_on_page(self.dirty_dot):
+            self.dirty_dot.update()
+
     def _refresh_title_bar(self) -> None:
         if not self.current_path:
             self.filename_text.value = "iterthink - No file"
@@ -1681,7 +1812,7 @@ class MarkdownStudio(
             self.filename_text.update()
             self.dirty_dot.update()
             self.title_hit.update()
-        self._refresh_compose_tab_label()
+        self._refresh_compose_tab_label(apply_preview_mode=False)
         self._refresh_compare_bulk_buttons()
 
 
@@ -1698,6 +1829,7 @@ class MarkdownStudio(
             self.page.services.append(self._fp_store)
             self.page.services.append(self._fp_import)
             self.page.services.append(self._fp_export_docx)
+            self.page.services.append(self._fp_export_plan_pdf)
             self.page.services.append(self._fp_spell_dict)
             self.page.update()
 
@@ -1723,6 +1855,7 @@ class MarkdownStudio(
         if _ctrl_on_page(tier_bar):
             tier_bar.update()
         self._sync_ki_tier_tab_icons()
+        self._sync_token_cost_display()
 
     def apply_config_theme(self) -> None:
         self.page.theme_mode = ft.ThemeMode.LIGHT if config.IS_LIGHT else ft.ThemeMode.DARK
@@ -1809,6 +1942,7 @@ class MarkdownStudio(
         self._chat_input.focused_bgcolor = config.SURFACE
         self._chat_input.border_color = ui_theme.outline_muted()
         self._tree_search_bar.bgcolor = config.SURFACE
+        self._sync_rag_search_ui()
         self._sync_content_find_replace_field_theme(_hs)
         self._apply_main_workspace_tab_chrome_theme()
         self._apply_ki_tier_tab_bar_theme()
@@ -1855,9 +1989,10 @@ class MarkdownStudio(
             self._chat_input.update()
         if self._header_shell and _ctrl_on_page(self._header_shell):
             self._header_shell.update()
-        self._compose_preview_md.md_style_sheet = ui_theme.compose_preview_markdown_style_sheet()
-        if _ctrl_on_page(self._compose_preview_md):
-            self._compose_preview_md.update()
+        if getattr(self, "_focus_view_mode", "edit") == "preview" and hasattr(
+            self, "_sync_compose_preview_md"
+        ):
+            self._sync_compose_preview_md()
         self._refresh_compare_tab_candidate_ui()
         self._refresh_compose_tab_label()
         self.page.update()
@@ -1969,24 +2104,100 @@ class MarkdownStudio(
         if not self.current_path:
             return {}
         try:
+            if hasattr(self, "_compose_plan_viewer_active") and self._compose_plan_viewer_active():
+                from iterthink.persistence import plan_pdf_annotations
+
+                doc_id = getattr(self, "_compose_plan_document_id", None)
+                vid = getattr(self, "_compose_plan_version_id", None)
+                if doc_id is None or vid is None:
+                    ctx = self._compose_plan_version_context()
+                    if ctx is None:
+                        return {}
+                    doc_id, vid, _pdf = ctx
+                with session_scope() as s:
+                    return plan_pdf_annotations.plan_comments_map_for_ki(
+                        s, content_version_id=int(vid)
+                    )
             with session_scope() as s:
-                doc = version_storage.get_document_by_resolved_path(s, self.current_path.resolve())
+                doc = content_repo.get_document_by_resolved_path(s, self.current_path.resolve())
                 if doc is None:
                     return {}
-                snaps = version_storage.list_snapshots(s, self.current_path.resolve())
+                snaps = content_repo.list_snapshots(s, self.current_path.resolve())
                 if not snaps:
                     return {}
-                anchor_body = version_storage.load_version_body(s, int(snaps[0].version_id))
+                anchor_body = content_repo.load_version_body(s, int(snaps[0].version_id))
                 display_body = self._editor_buffer() or ""
                 return paragraph_user_comments.map_resolved_for_display(
                     s,
-                    document_id=int(doc.id),
-                    version_id=int(snaps[0].version_id),
+                    content_version_id=int(snaps[0].version_id),
                     anchor_body=anchor_body,
                     display_body=display_body,
                 )
         except BaseException:
             return {}
+
+    def _ki_comments_use_plan_labels(self) -> bool:
+        return hasattr(self, "_compose_plan_viewer_active") and self._compose_plan_viewer_active()
+
+    def _ki_plan_comment_meta(self, paragraph_index: int) -> tuple[int, str] | None:
+        """``(plan_page_index, annotation_kind)`` for a plan comment slot."""
+        from iterthink.persistence import plan_pdf_annotations
+
+        doc_id = getattr(self, "_compose_plan_document_id", None)
+        vid = getattr(self, "_compose_plan_version_id", None)
+        if doc_id is None or vid is None:
+            ctx = self._compose_plan_version_context()
+            if ctx is None:
+                return None
+            doc_id, vid, _pdf = ctx
+        with session_scope() as s:
+            ann = plan_pdf_annotations.get_by_paragraph_index(
+                s,
+                content_version_id=int(vid),
+                paragraph_index=int(paragraph_index),
+            )
+        if ann is None:
+            return None
+        return int(ann.plan_page_index), str(ann.annotation_kind)
+
+    def _ki_plan_comment_rows_for_list(self) -> list[tuple[int, str]]:
+        from iterthink.persistence import plan_pdf_annotations
+
+        doc_id = getattr(self, "_compose_plan_document_id", None)
+        vid = getattr(self, "_compose_plan_version_id", None)
+        if doc_id is None or vid is None:
+            ctx = self._compose_plan_version_context()
+            if ctx is None:
+                return []
+            doc_id, vid, _pdf = ctx
+        with session_scope() as s:
+            anns = plan_pdf_annotations.list_for_plan_version(
+                s, content_version_id=int(vid)
+            )
+        rows: list[tuple[int, str]] = []
+        for a in anns:
+            body = (a.body or "").strip()
+            if a.annotation_kind == plan_pdf_annotations.KIND_PIN or body:
+                rows.append((int(a.paragraph_index), body))
+        return sorted(rows, key=lambda r: r[0])
+
+    def _ki_plan_comment_raw_body(self, paragraph_index: int) -> str:
+        from iterthink.persistence import plan_pdf_annotations
+
+        doc_id = getattr(self, "_compose_plan_document_id", None)
+        vid = getattr(self, "_compose_plan_version_id", None)
+        if doc_id is None or vid is None:
+            ctx = self._compose_plan_version_context()
+            if ctx is None:
+                return ""
+            doc_id, vid, _pdf = ctx
+        with session_scope() as s:
+            ann = plan_pdf_annotations.get_by_paragraph_index(
+                s,
+                content_version_id=int(vid),
+                paragraph_index=int(paragraph_index),
+            )
+        return (ann.body or "").strip() if ann is not None else ""
 
     def _sync_ki_comments_detail_visibility(self) -> None:
         show = self._comment_para_index is not None
@@ -2001,7 +2212,10 @@ class MarkdownStudio(
         if lv is None:
             return
         selected = self._comment_para_index
-        rows = sorted_comment_rows(self._ki_comments_for_current_version())
+        if self._ki_comments_use_plan_labels():
+            rows = self._ki_plan_comment_rows_for_list()
+        else:
+            rows = sorted_comment_rows(self._ki_comments_for_current_version())
         controls: list[ft.Control] = []
         if not rows:
             controls.append(
@@ -2013,23 +2227,34 @@ class MarkdownStudio(
                 )
             )
         else:
+            plan_labels = self._ki_comments_use_plan_labels()
             for pi, body in rows:
                 highlight = selected is not None and int(pi) == int(selected)
+                if plan_labels:
+                    meta = self._ki_plan_comment_meta(int(pi))
+                    title = (
+                        plan_comment_list_label(meta[0], meta[1])
+                        if meta is not None
+                        else paragraph_comment_label(pi)
+                    )
+                else:
+                    title = paragraph_comment_label(pi)
                 card = ft.Container(
                     key=f"ki_comment_{pi}",
                     content=ft.Column(
                         [
                             ft.Text(
-                                paragraph_comment_label(pi),
+                                title,
                                 size=13,
                                 weight=ft.FontWeight.W_600,
                                 color=config.ON_SURFACE,
                             ),
                             ft.Text(
-                                body,
+                                body or "(no comment text)",
                                 size=12,
                                 selectable=True,
                                 color=config.ON_SURFACE,
+                                italic=not bool(body),
                             ),
                         ],
                         tight=True,
@@ -2097,12 +2322,21 @@ class MarkdownStudio(
     def _sync_ki_comment_tab_from_store(self) -> None:
         """Load comment body for ``_comment_para_index`` from the latest snapshot."""
         pi = self._comment_para_index
-        self._comment_heading.value = (
-            paragraph_comment_label(pi) if pi is not None else "No paragraph selected"
-        )
-        body = ""
-        if pi is not None:
-            body = self._ki_comments_for_current_version().get(int(pi), "")
+        if pi is not None and self._ki_comments_use_plan_labels():
+            meta = self._ki_plan_comment_meta(int(pi))
+            self._comment_heading.value = (
+                plan_comment_list_label(meta[0], meta[1])
+                if meta is not None
+                else paragraph_comment_label(pi)
+            )
+            body = self._ki_plan_comment_raw_body(int(pi))
+        else:
+            self._comment_heading.value = (
+                paragraph_comment_label(pi) if pi is not None else "No paragraph selected"
+            )
+            body = ""
+            if pi is not None:
+                body = self._ki_comments_for_current_version().get(int(pi), "")
         self._comment_body_display.value = body
         if not self._comment_edit_mode:
             self._comment_body_edit.value = body
@@ -2172,27 +2406,50 @@ class MarkdownStudio(
             return
         raw = (self._comment_body_edit.value or "").strip()
         try:
-            with session_scope() as s:
-                doc = version_storage.get_document_by_resolved_path(s, self.current_path.resolve())
-                if doc is None:
-                    self._snack("Document is not indexed yet.")
-                    return
-                snaps = version_storage.list_snapshots(s, self.current_path.resolve())
-                if not snaps:
-                    self._snack("Save the note once so a version exists for comments.")
-                    return
-                display_body = self._editor_buffer() or ""
-                paragraph_user_comments.upsert(
-                    s,
-                    document_id=int(doc.id),
-                    version_id=int(snaps[0].version_id),
-                    paragraph_index=int(self._comment_para_index),
-                    body=raw,
-                    paragraph_body=display_body,
-                )
+            if self._ki_comments_use_plan_labels():
+                from iterthink.persistence import plan_pdf_annotations
+
+                doc_id = getattr(self, "_compose_plan_document_id", None)
+                vid = getattr(self, "_compose_plan_version_id", None)
+                if doc_id is None or vid is None:
+                    ctx = self._compose_plan_version_context()
+                    if ctx is None:
+                        self._snack("Plan PDF is not loaded.")
+                        return
+                    doc_id, vid, _pdf = ctx
+                with session_scope() as s:
+                    ann = plan_pdf_annotations.get_by_paragraph_index(
+                        s,
+                        content_version_id=int(vid),
+                        paragraph_index=int(self._comment_para_index),
+                    )
+                    if ann is None:
+                        self._snack("Plan comment not found.")
+                        return
+                    plan_pdf_annotations.update_body(s, annotation_id=int(ann.id), body=raw)
+            else:
+                with session_scope() as s:
+                    doc = content_repo.get_document_by_resolved_path(s, self.current_path.resolve())
+                    if doc is None:
+                        self._snack("Document is not indexed yet.")
+                        return
+                    snaps = content_repo.list_snapshots(s, self.current_path.resolve())
+                    if not snaps:
+                        self._snack("Save the note once so a version exists for comments.")
+                        return
+                    display_body = self._editor_buffer() or ""
+                    paragraph_user_comments.upsert(
+                        s,
+                        content_version_id=int(snaps[0].version_id),
+                        paragraph_index=int(self._comment_para_index),
+                        body=raw,
+                        paragraph_body=display_body,
+                    )
         except BaseException as ex:
             self._snack(f"Could not save comment: {ex}")
             return
+        if hasattr(self, "_refresh_compose_plan_annotations_overlay"):
+            self._refresh_compose_plan_annotations_overlay()
         self._comment_edit_mode = False
         self._sync_ki_comment_tab_from_store()
         self._rebuild_ki_comments_list()
@@ -2217,7 +2474,7 @@ class MarkdownStudio(
         _e: ft.ControlEvent | None = None,
         *,
         silent: bool = False,
-        snapshot_reason: version_storage.SnapshotReason | None = None,
+        snapshot_reason: content_repo.SnapshotReason | None = None,
         version_display_label: str | None = None,
         persist_snapshot: bool = True,
         for_shutdown: bool = False,
@@ -2228,7 +2485,7 @@ class MarkdownStudio(
             return
         self._flush_review_edits_if_changed(refresh_compare_ui=not for_shutdown)
         buf = self._working_document_text()
-        reason: version_storage.SnapshotReason = snapshot_reason or ("autosave" if silent else "manual")
+        reason: content_repo.SnapshotReason = snapshot_reason or ("autosave" if silent else "manual")
         try:
             self.current_path.write_text(buf, encoding="utf-8")
         except OSError as ex:
@@ -2237,14 +2494,14 @@ class MarkdownStudio(
         self.last_saved_text = buf
         try:
             with session_scope() as s:
-                version_storage.update_document_last_disk_state(s, self.current_path.resolve(), body=buf)
+                content_repo.update_document_last_disk_state(s, self.current_path.resolve(), body=buf)
         except BaseException:
             pass
         if persist_snapshot:
             try:
                 with session_scope() as s:
                     if version_display_label:
-                        version_storage.persist_version_snapshot(
+                        content_repo.persist_version_snapshot(
                             s,
                             self.current_path.resolve(),
                             buf,
@@ -2252,9 +2509,10 @@ class MarkdownStudio(
                             display_label=version_display_label,
                         )
                     else:
-                        version_storage.persist_version_snapshot(s, self.current_path.resolve(), buf, reason)
+                        content_repo.persist_version_snapshot(s, self.current_path.resolve(), buf, reason)
             except BaseException:
                 pass
+            self.schedule_rag_reindex(self.current_path.resolve())
         if not for_shutdown:
             self._refresh_compare_tab_candidate_ui()
             self._margin_gen += 1
@@ -2265,6 +2523,94 @@ class MarkdownStudio(
             self._refresh_title_bar()
         if not silent:
             self._snack("Saved.")
+
+    def _export_paragraph_comments_for_doc(self, md_path: Path) -> dict[int, str]:
+        try:
+            with session_scope() as s:
+                doc = content_repo.get_document_by_resolved_path(s, md_path)
+                if doc is None:
+                    return {}
+                snaps = content_repo.list_snapshots(s, md_path)
+                if not snaps:
+                    return {}
+                vid = snaps[0].version_id
+                return impact_annotations.paragraph_comments_map_for_export(
+                    s, content_version_id=int(vid)
+                )
+        except BaseException:
+            return {}
+
+    async def _complete_export_to_word_async(
+        self,
+        *,
+        md_path: Path,
+        markdown_src: str,
+        template_path: Path,
+        author: str,
+    ) -> None:
+        """Pick save path and write DOCX (call after the template dialog is closed)."""
+        self.ensure_file_pickers()
+        if _ctrl_on_page(self.page):
+            self.page.update()
+        await asyncio.sleep(_EXPORT_SAVE_DIALOG_DELAY_SEC)
+
+        initial_dir: str | None = None
+        if md_path.parent.is_dir():
+            initial_dir = str(md_path.parent)
+        elif config.DOCUMENTS.is_dir():
+            initial_dir = str(config.DOCUMENTS)
+
+        default_name = f"{md_path.stem}.docx"
+        try:
+            dest = await self._fp_export_docx.save_file(
+                dialog_title="Export Word document",
+                file_name=default_name,
+                initial_directory=initial_dir,
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["docx"],
+            )
+        except BaseException as ex:
+            self._snack(f"Save dialog failed: {ex}")
+            return
+        if not dest:
+            self._snack("Export cancelled.")
+            return
+
+        try:
+            out = normalize_save_file_path(
+                dest, default_file_name=default_name, expected_suffix=".docx"
+            )
+        except ValueError:
+            self._snack("Export cancelled.")
+            return
+
+        meta = markdown_docx_export.ExportMeta(
+            title_stem=md_path.stem,
+            author=author,
+            date_iso=date.today().isoformat(),
+            comment_author=author,
+        )
+        para_comments = self._export_paragraph_comments_for_doc(md_path)
+
+        def _run() -> None:
+            markdown_docx_export.markdown_to_docx(
+                markdown_src=markdown_src,
+                md_path=md_path,
+                template_path=template_path,
+                output_path=out,
+                meta=meta,
+                paragraph_comments=para_comments or None,
+            )
+
+        try:
+            await asyncio.to_thread(_run)
+        except BaseException as ex:
+            self._snack(f"Export failed: {ex}")
+            return
+        if not out.is_file() or out.stat().st_size == 0:
+            self._snack("Export failed: output file was not written.")
+            return
+        self._snack(f"Exported to {out.name}")
 
     async def begin_export_to_word(self, tree_path: Path | None = None) -> None:
         self.ensure_file_pickers()
@@ -2306,65 +2652,21 @@ class MarkdownStudio(
         )
 
         async def on_export(_e: ft.ControlEvent | None = None) -> None:
-            sel = (tpl_dd.value or "").strip()
-            tpl = paths_by_label.get(sel)
-            if tpl is None or not tpl.is_file():
-                self._snack("Choose a template.")
-                return
-            self.page.pop_dialog()
-            # Let the modal dismiss before opening the native save dialog (Linux/GTK).
-            await asyncio.sleep(0)
-            stem = md_path.stem
             try:
-                dest = await self._fp_export_docx.save_file(
-                    dialog_title="Export Word document",
-                    file_name=f"{stem}.docx",
-                    initial_directory=str(config.DOCUMENTS) if config.DOCUMENTS.is_dir() else None,
-                    file_type=ft.FilePickerFileType.CUSTOM,
-                    allowed_extensions=["docx"],
-                )
-            except BaseException as ex:
-                self._snack(f"Save dialog failed: {ex}")
-                return
-            if not dest:
-                return
-            out = Path(dest)
-            meta = markdown_docx_export.ExportMeta(
-                title_stem=md_path.stem,
-                author=author,
-                date_iso=date.today().isoformat(),
-                comment_author=author,
-            )
-
-            def _run() -> None:
-                para_comments: dict[int, str] = {}
-                try:
-                    with session_scope() as s:
-                        doc = version_storage.get_document_by_resolved_path(s, md_path)
-                        if doc is not None:
-                            snaps = version_storage.list_snapshots(s, md_path)
-                            if snaps:
-                                vid = snaps[0].version_id
-                                para_comments = impact_annotations.paragraph_comments_map_for_export(
-                                    s, document_id=int(doc.id), version_id=int(vid)
-                                )
-                except BaseException:
-                    para_comments = {}
-                markdown_docx_export.markdown_to_docx(
-                    markdown_src=markdown_src,
+                sel = (tpl_dd.value or "").strip()
+                tpl = paths_by_label.get(sel)
+                if tpl is None or not tpl.is_file():
+                    self._snack("Choose a template.")
+                    return
+                self.page.pop_dialog()
+                await self._complete_export_to_word_async(
                     md_path=md_path,
+                    markdown_src=markdown_src,
                     template_path=tpl,
-                    output_path=out,
-                    meta=meta,
-                    paragraph_comments=para_comments or None,
+                    author=author,
                 )
-
-            try:
-                await asyncio.to_thread(_run)
             except BaseException as ex:
                 self._snack(f"Export failed: {ex}")
-                return
-            self._snack(f"Exported to {out.name}")
 
         # Yield so the File menu / Material menu overlay can finish closing before we
         # stack a modal dialog; opening both in the same frame often shows nothing (Flet desktop).
@@ -2420,7 +2722,7 @@ class MarkdownStudio(
             return
         try:
             with session_scope() as s:
-                stale = version_storage.is_document_disk_stale(s, path)
+                stale = content_repo.is_document_disk_stale(s, path)
         except BaseException:
             return
         if not stale:
@@ -2450,7 +2752,7 @@ class MarkdownStudio(
             if c:
                 try:
                     with session_scope() as s:
-                        version_storage.refresh_document_last_disk_state_from_disk(s, c)
+                        content_repo.refresh_document_last_disk_state_from_disk(s, c)
                 except BaseException:
                     pass
             self._snack("Keeping your edits. Saving will overwrite the file on disk.")

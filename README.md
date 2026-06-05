@@ -156,6 +156,8 @@ Per-paragraph AI actions are defined in `prompts.yaml` in your store folder.
 | **In the app** | **File → Settings → Prompts** — add rows, edit system prompt and user template (`{text}` is replaced with the paragraph) |
 | **By hand** | Valid YAML with a top-level `margin_actions:` list. Each entry needs `id`, `label`, `topic` (`discuss`, `change`, or `evaluate`), `system_prompt`, and `user_template` |
 
+**App upgrades:** On startup, new bundled margin actions are added to your store file automatically. If a bundled action you already have changes in a new release, Iterthink shows a review dialog (yours vs new default) — nothing is overwritten until you choose **Use new default**. Removed bundled actions stay removed.
+
 ---
 
 ## Why local
@@ -168,12 +170,13 @@ Using a cloud API key (OpenAI, Anthropic, Gemini) sends your text to that provid
 
 ## Roadmap (not in order)
 
--[ ] Refracture MarkdownStudio. Code is too complicated.
+-[x] Refracture MarkdownStudio. Code is too complicated.
 -[ ] Evaluate not only change, but consistency against other files (RAG functionality)
 -[ ] Compare Excel sheets
 -[ ] Compare PDF Plans (Floorplans, Sections)
 -[ ] IFC model comparison — see what changed between two BIM model versions
--[ ] Linux, Windows and macOS installers (started, signing of installers and testing)
+-[x] Linux, Windows and macOS installers (started, signing of installers and testing)[]
+-[ ] signing of macOS und windows installer
 -[ ] Sync and version history across devices
 -[ ] Team review features for collaborative workflows
 -[ ] Deeper [{yourcompany}os](https://yourcompanyos.io) integration — from change detection to closed decisions
@@ -227,4 +230,4 @@ Source available under [BUSL-1.1](https://mariadb.com/bsl11/).
 
 ---
 
-*iterthink — the review layer for documents and models.*
+*iterthink — the review layer*

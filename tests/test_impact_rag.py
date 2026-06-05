@@ -36,7 +36,7 @@ def test_retrieve_context_ranks_by_cosine_similarity() -> None:
         emb_other[1] = 1.0
         store_db.embedding_cache_put(conn, "dk", "h1", "mid", emb_match)
         row1 = conn.execute(
-            "SELECT vec_rowid FROM paragraph_embedding_cache WHERE doc_path = ? AND input_hash = ?",
+            "SELECT vec_rowid FROM paragraph_embedding_cache WHERE lineage_id = ? AND input_hash = ?",
             ("dk", "h1"),
         ).fetchone()
         assert row1 is not None
@@ -44,7 +44,7 @@ def test_retrieve_context_ranks_by_cosine_similarity() -> None:
 
         store_db.embedding_cache_put(conn, "dk", "h2", "mid", emb_other)
         row2 = conn.execute(
-            "SELECT vec_rowid FROM paragraph_embedding_cache WHERE doc_path = ? AND input_hash = ?",
+            "SELECT vec_rowid FROM paragraph_embedding_cache WHERE lineage_id = ? AND input_hash = ?",
             ("dk", "h2"),
         ).fetchone()
         assert row2 is not None

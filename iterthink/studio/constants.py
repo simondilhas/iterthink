@@ -46,6 +46,8 @@ REVIEW_ALIGN_PARAGRAPH_CAP = 320
 COMPARE_COL_LINE_HEIGHT = 1.6
 # Compose main editor: line height for rail Y math (must match TextField text_style size × height).
 COMPOSE_EDITOR_LINE_HEIGHT_PX = float(COMPARE_COL_FONT_SIZE * COMPARE_COL_LINE_HEIGHT)
+# Focus/help markdown preview: gap between paragraphs and table-adjacent blocks (2× one editor line).
+COMPOSE_PREVIEW_BLOCK_GAP_PX = max(8, int(COMPOSE_EDITOR_LINE_HEIGHT_PX)) * 2
 # Compose main editor content insets (keep in sync with studio/__init__.py TextField content_padding).
 COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX = 4
 COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX = 4

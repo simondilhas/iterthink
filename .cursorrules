@@ -29,6 +29,7 @@
   3. [Right] Context/Diff: `ft.Column` showing paragraph-level changes and chat.
 
 ## Minimalistic UI Style
+- **Settings dialogs:** No explanatory or helper paragraphs (no file-path blurbs, mode descriptions, or “how it works” copy). Use section headings, control labels, `hint_text` on fields, and tooltips only. Exceptions: the Privacy tab **About the Privacy Shield** disclaimer (required legal notice); the RAG tab **About RAG** disclaimer (indexing, chunking, and cost notice).
 - **Theme:** `appearance` in `iterthink/defaults/config.yaml` selects dark vs light (`appearance: dark` default). Map to `page.theme_mode` and `theme.dark` / `theme.light` tokens (not hardcoded Fedora blue).
 - **Colors (seed / `defaults/config.yaml`):**
   - **Dark:** page `#1A1A1A`, surface `#230F33`, sidebar `#1A0A26`, primary & highlight `#B38FC1`, on-surface `#FFFFFF`, on-surface soft `#B8CEE8`, sidebar/on-outline `#959799`, success `#C8E4C4`, selection overlay `#88B38FC1`.

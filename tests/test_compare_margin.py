@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from iterthink.compare.margin import (
+    apply_review_insert,
     distribute_heights,
     insert_paragraph_after_old_index,
     join_paragraphs,
@@ -48,6 +49,27 @@ def test_join_split_roundtrip_for_plain_blocks() -> None:
 def test_replace_paragraph_at_index_updates_slot() -> None:
     text = "a\n\nb\n\nc"
     assert replace_paragraph_at_index(text, 1, "B") == "a\n\nB\n\nc"
+
+
+def test_replace_paragraph_at_index_multi_block_replaces_tail() -> None:
+    text = "old1\n\nold2\n\nold3"
+    corrected = "new1\n\nnew2\n\nnew3"
+    assert replace_paragraph_at_index(text, 0, corrected) == corrected
+
+
+def test_replace_paragraph_at_index_multi_block_from_middle() -> None:
+    text = "keep\n\nold2\n\nold3"
+    assert replace_paragraph_at_index(text, 1, "mid\n\nend") == "keep\n\nmid\n\nend"
+
+
+def test_apply_review_insert_uses_replace_when_target_slot_filled() -> None:
+    text = "draft one\n\ndraft two"
+    assert apply_review_insert(text, 0, "corrected two") == "draft one\n\ncorrected two"
+
+
+def test_apply_review_insert_pure_add_at_end() -> None:
+    text = "only"
+    assert apply_review_insert(text, 0, "appended") == "only\n\nappended"
 
 
 def test_replace_paragraph_at_index_out_of_bounds_unchanged() -> None:

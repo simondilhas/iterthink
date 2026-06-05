@@ -15,7 +15,7 @@ from iterthink import config
 from iterthink.compare.layout import aligned_compare_pairs
 from iterthink.ai.ollama_util import ollama_error_message
 from iterthink.compare.paragraph_align import compute_hash
-from iterthink.persistence.version_storage import path_key_for
+from iterthink.persistence.content_repo import path_key_for
 from .constants import (
     COMPARE_EVAL_COL_W,
     KI_PILL_TEXT_SIZE,

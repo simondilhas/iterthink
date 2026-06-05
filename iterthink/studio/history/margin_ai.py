@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import flet as ft
 import httpx
 
@@ -9,9 +11,16 @@ from iterthink import config
 from iterthink import prompts
 from iterthink.ai.llm_router import remote_http_error_message
 from iterthink.ai.ollama_util import chat_response_text, chat_stream_delta, ollama_error_message
+from iterthink.ai.privacy_shield import (
+    last_user_message_content,
+    privacy_shield_applies_to_tier,
+    redact_messages_for_tier,
+    reinject_text,
+)
+from ..privacy_shield_chat_ui import append_privacy_turn_to_history, build_privacy_turn_bubble
 from iterthink.compare.margin import replace_paragraph_at_index, split_paragraphs
 from iterthink.db.session import session_scope
-from iterthink.persistence import version_storage
+from iterthink.persistence import content_repo
 from iterthink.prompts import TOPIC_CHANGE
 
 from ..components import (
@@ -59,7 +68,7 @@ class _HistoryMarginAiMixin:
         if self.current_path:
             try:
                 with session_scope() as s:
-                    version_storage.persist_version_snapshot(
+                    content_repo.persist_version_snapshot(
                         s,
                         self.current_path.resolve(),
                         buf,
@@ -99,7 +108,7 @@ class _HistoryMarginAiMixin:
         if self.current_path:
             try:
                 with session_scope() as s:
-                    version_storage.persist_version_snapshot(
+                    content_repo.persist_version_snapshot(
                         s,
                         self.current_path.resolve(),
                         buf,
@@ -140,7 +149,7 @@ class _HistoryMarginAiMixin:
         if self.current_path:
             try:
                 with session_scope() as s:
-                    new_vid = version_storage.persist_version_snapshot(
+                    new_vid = content_repo.persist_version_snapshot(
                         s,
                         self.current_path.resolve(),
                         cand_body,
@@ -157,7 +166,7 @@ class _HistoryMarginAiMixin:
         if new_vid is not None:
             self._ai_proposal_action_ids[new_vid] = action_id
             self._latest_ai_proposal_vid = new_vid
-        self._loaded_proposal_sha = version_storage.content_sha256(self._compare_editor.value or "")
+        self._loaded_proposal_sha = content_repo.content_sha256(self._compare_editor.value or "")
         self._hide_prompt_footer(footer)
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)
@@ -180,12 +189,106 @@ class _HistoryMarginAiMixin:
 
         self._set_ki_topic(_ki_topic_index_for_prompt_topic(act.topic))
 
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": act.system_prompt},
+            {"role": "user", "content": act.user_template.format(text=para)},
+        ]
+        reply = ft.Text("", size=12, selectable=True, color=config.ON_SURFACE)
+        footer = ft.Row(spacing=8, visible=False)
+
+        if privacy_shield_applies_to_tier(self.ki_tier):
+            llm_gen = self.begin_sidebar_llm()
+            try:
+                try:
+                    api_messages, rmap = await redact_messages_for_tier(messages, self.ki_tier)
+                except ValueError as ex:
+                    self._snack(str(ex))
+                    return
+                redacted_input = last_user_message_content(api_messages)
+                backend = self._make_llm_backend()
+                cm = self.chat_model_for_requests()
+                try:
+                    resp = await backend.chat(
+                        model=cm,
+                        messages=api_messages,
+                        stream=False,
+                        skip_privacy_redaction=True,
+                    )
+                    if self.is_sidebar_llm_cancelled():
+                        return
+                    acc = chat_response_text(resp) or ""
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as ex_final:
+                    if isinstance(ex_final, httpx.HTTPStatusError):
+                        detail = remote_http_error_message(ex_final)
+                    elif isinstance(ex_final, ValueError):
+                        detail = str(ex_final)
+                    else:
+                        detail = ollama_error_message(ex_final)
+                    self._append_chat_line("assistant", f"(Error) {detail}")
+                    return
+                if self.is_sidebar_llm_cancelled():
+                    return
+                acc = (acc or "").strip()
+                if act.topic == TOPIC_CHANGE:
+                    acc = _strip_change_topic_preamble(acc)
+                if rmap and config.PRIVACY_SHIELD_REINJECT:
+                    acc = reinject_text(acc, rmap)
+                if not acc:
+                    self._snack("Reply is empty.")
+                    return
+                reply.value = acc
+                if act.topic == TOPIC_CHANGE:
+                    footer.controls = [
+                        ft.IconButton(
+                            ft.Icons.VISIBILITY_OUTLINED,
+                            icon_size=ACTION_RAIL_ICON_SIZE,
+                            icon_color=config.ON_SURFACE_VARIANT,
+                            tooltip="Accept: stage as Compare candidate",
+                            style=action_rail_icon_button_style(),
+                            on_click=lambda _e, i=idx, r=reply, f=footer, aid=action_id: self.page.run_task(
+                                self._stage_compare_margin_review_async, i, r, f, aid
+                            ),
+                        ),
+                        ft.IconButton(
+                            ft.Icons.CLOSE_ROUNDED,
+                            icon_size=ACTION_RAIL_ICON_SIZE,
+                            icon_color=config.ON_SURFACE_VARIANT,
+                            tooltip="Reject",
+                            style=action_rail_icon_button_style(),
+                            on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
+                        ),
+                    ]
+                else:
+                    footer.controls = [
+                        ft.IconButton(
+                            ft.Icons.CLOSE_ROUNDED,
+                            icon_size=ACTION_RAIL_ICON_SIZE,
+                            icon_color=config.ON_SURFACE_VARIANT,
+                            tooltip="Dismiss",
+                            style=action_rail_icon_button_style(),
+                            on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
+                        ),
+                    ]
+                footer.visible = True
+                bubble = build_privacy_turn_bubble(
+                    input_text=para,
+                    redacted_text=redacted_input,
+                    output_text=acc,
+                    footer=footer,
+                )
+                append_privacy_turn_to_history(self._chat_history, bubble)
+            except asyncio.CancelledError:
+                raise
+            finally:
+                self.end_sidebar_llm(llm_gen)
+            return
+
         self._append_chat_line(
             "user", f"Compare · paragraph {idx + 1}: {act.label}", quote=para
         )
 
-        reply = ft.Text("", size=12, selectable=True, color=config.ON_SURFACE)
-        footer = ft.Row(spacing=8, visible=False)
         bubble = ft.Column([reply, footer], tight=True, spacing=8)
         wrap = ft.Container(
             content=bubble,
@@ -198,105 +301,154 @@ class _HistoryMarginAiMixin:
         if _ctrl_on_page(self._chat_history):
             self._chat_history.update()
 
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": act.system_prompt},
-            {"role": "user", "content": act.user_template.format(text=para)},
-        ]
         acc = ""
         backend = self._make_llm_backend()
         cm = self.chat_model_for_requests()
+        llm_gen = self.begin_sidebar_llm()
         try:
-            stream = await backend.chat(model=cm, messages=messages, stream=True)
-            async for part in stream:
-                acc += chat_stream_delta(part)
-                live = _strip_change_topic_preamble(acc) if act.topic == TOPIC_CHANGE else acc
-                reply.value = live.strip() or "…"
-                if _ctrl_on_page(reply):
-                    reply.update()
-        except BaseException:
             try:
-                resp = await backend.chat(model=cm, messages=messages, stream=False)
-                acc = chat_response_text(resp) or ""
-            except BaseException as ex_final:
-                if isinstance(ex_final, httpx.HTTPStatusError):
-                    detail = remote_http_error_message(ex_final)
-                elif isinstance(ex_final, ValueError):
-                    detail = str(ex_final)
-                else:
-                    detail = ollama_error_message(ex_final)
-                reply.value = f"(Error) {detail}"
+                stream = await backend.chat(model=cm, messages=messages, stream=True)
+                async for part in stream:
+                    if self.is_sidebar_llm_cancelled():
+                        break
+                    acc += chat_stream_delta(part)
+                    live = _strip_change_topic_preamble(acc) if act.topic == TOPIC_CHANGE else acc
+                    reply.value = live.strip() or "…"
+                    if _ctrl_on_page(reply):
+                        reply.update()
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                if self.is_sidebar_llm_cancelled():
+                    live = _strip_change_topic_preamble(acc) if act.topic == TOPIC_CHANGE else acc
+                    reply.value = self.sidebar_llm_display_text(live, empty_fallback="(Stopped)")
+                    if _ctrl_on_page(reply):
+                        reply.update()
+                    footer.controls = [
+                        ft.IconButton(
+                            ft.Icons.CLOSE_ROUNDED,
+                            icon_size=ACTION_RAIL_ICON_SIZE,
+                            icon_color=config.ON_SURFACE_VARIANT,
+                            tooltip="Dismiss",
+                            style=action_rail_icon_button_style(),
+                            on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
+                        ),
+                    ]
+                    footer.visible = True
+                    if _ctrl_on_page(footer):
+                        footer.update()
+                    return
+                try:
+                    resp = await backend.chat(model=cm, messages=messages, stream=False)
+                    if self.is_sidebar_llm_cancelled():
+                        return
+                    acc = chat_response_text(resp) or ""
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as ex_final:
+                    if isinstance(ex_final, httpx.HTTPStatusError):
+                        detail = remote_http_error_message(ex_final)
+                    elif isinstance(ex_final, ValueError):
+                        detail = str(ex_final)
+                    else:
+                        detail = ollama_error_message(ex_final)
+                    reply.value = f"(Error) {detail}"
+                    if _ctrl_on_page(reply):
+                        reply.update()
+                    if _ctrl_on_page(self._chat_history):
+                        self._chat_history.update()
+                    return
+
+            if self.is_sidebar_llm_cancelled():
+                live = _strip_change_topic_preamble(acc) if act.topic == TOPIC_CHANGE else acc
+                reply.value = self.sidebar_llm_display_text(live, empty_fallback="(Stopped)")
                 if _ctrl_on_page(reply):
                     reply.update()
-                if _ctrl_on_page(self._chat_history):
-                    self._chat_history.update()
+                footer.controls = [
+                    ft.IconButton(
+                        ft.Icons.CLOSE_ROUNDED,
+                        icon_size=ACTION_RAIL_ICON_SIZE,
+                        icon_color=config.ON_SURFACE_VARIANT,
+                        tooltip="Dismiss",
+                        style=action_rail_icon_button_style(),
+                        on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
+                    ),
+                ]
+                footer.visible = True
+                if _ctrl_on_page(footer):
+                    footer.update()
                 return
 
-        acc = (acc or "").strip()
-        if act.topic == TOPIC_CHANGE:
-            acc = _strip_change_topic_preamble(acc)
-        if not acc:
-            reply.value = "(Empty reply from model.)"
+            acc = (acc or "").strip()
+            if act.topic == TOPIC_CHANGE:
+                acc = _strip_change_topic_preamble(acc)
+            if not acc:
+                reply.value = "(Empty reply from model.)"
+                if _ctrl_on_page(reply):
+                    reply.update()
+                footer.controls = [
+                    ft.IconButton(
+                        ft.Icons.CLOSE_ROUNDED,
+                        icon_size=ACTION_RAIL_ICON_SIZE,
+                        icon_color=config.ON_SURFACE_VARIANT,
+                        tooltip="Dismiss",
+                        style=action_rail_icon_button_style(),
+                        on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
+                    ),
+                ]
+                footer.visible = True
+                if _ctrl_on_page(footer):
+                    footer.update()
+                return
+
+            reply.value = acc
             if _ctrl_on_page(reply):
                 reply.update()
-            footer.controls = [
-                ft.IconButton(
-                    ft.Icons.CLOSE_ROUNDED,
-                    icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=config.ON_SURFACE_VARIANT,
-                    tooltip="Dismiss",
-                    style=action_rail_icon_button_style(),
-                    on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
-                ),
-            ]
+
+            if act.topic == TOPIC_CHANGE:
+                # Future/review + KI "Change" tab: candidate is already in context — stage immediately, no eye/dismiss row.
+                if self._main_tab_index == TAB_FUTURE and int(getattr(self, "_ki_topic_index", 0)) == 2:
+                    await self._stage_compare_margin_review_async(idx, reply, footer, action_id)
+                    return
+
+                footer.controls = [
+                    ft.IconButton(
+                        ft.Icons.VISIBILITY_OUTLINED,
+                        icon_size=ACTION_RAIL_ICON_SIZE,
+                        icon_color=config.ON_SURFACE_VARIANT,
+                        tooltip="Review: stage this text as the Compare candidate for this paragraph",
+                        style=action_rail_icon_button_style(),
+                        on_click=lambda _e, i=idx, r=reply, f=footer, aid=action_id: self.page.run_task(
+                            self._stage_compare_margin_review_async, i, r, f, aid
+                        ),
+                    ),
+                    ft.IconButton(
+                        ft.Icons.CLOSE_ROUNDED,
+                        icon_size=ACTION_RAIL_ICON_SIZE,
+                        icon_color=config.ON_SURFACE_VARIANT,
+                        tooltip="Dismiss",
+                        style=action_rail_icon_button_style(),
+                        on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
+                    ),
+                ]
+            else:
+                footer.controls = [
+                    ft.IconButton(
+                        ft.Icons.CLOSE_ROUNDED,
+                        icon_size=ACTION_RAIL_ICON_SIZE,
+                        icon_color=config.ON_SURFACE_VARIANT,
+                        tooltip="Dismiss",
+                        style=action_rail_icon_button_style(),
+                        on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
+                    ),
+                ]
             footer.visible = True
             if _ctrl_on_page(footer):
                 footer.update()
-            return
-
-        reply.value = acc
-        if _ctrl_on_page(reply):
-            reply.update()
-
-        if act.topic == TOPIC_CHANGE:
-            # Future/review + KI "Change" tab: candidate is already in context — stage immediately, no eye/dismiss row.
-            if self._main_tab_index == TAB_FUTURE and int(getattr(self, "_ki_topic_index", 0)) == 2:
-                await self._stage_compare_margin_review_async(idx, reply, footer, action_id)
-                return
-
-            footer.controls = [
-                ft.IconButton(
-                    ft.Icons.VISIBILITY_OUTLINED,
-                    icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=config.ON_SURFACE_VARIANT,
-                    tooltip="Review: stage this text as the Compare candidate for this paragraph",
-                    style=action_rail_icon_button_style(),
-                    on_click=lambda _e, i=idx, r=reply, f=footer, aid=action_id: self.page.run_task(
-                        self._stage_compare_margin_review_async, i, r, f, aid
-                    ),
-                ),
-                ft.IconButton(
-                    ft.Icons.CLOSE_ROUNDED,
-                    icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=config.ON_SURFACE_VARIANT,
-                    tooltip="Dismiss",
-                    style=action_rail_icon_button_style(),
-                    on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
-                ),
-            ]
-        else:
-            footer.controls = [
-                ft.IconButton(
-                    ft.Icons.CLOSE_ROUNDED,
-                    icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=config.ON_SURFACE_VARIANT,
-                    tooltip="Dismiss",
-                    style=action_rail_icon_button_style(),
-                    on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
-                ),
-            ]
-        footer.visible = True
-        if _ctrl_on_page(footer):
-            footer.update()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self.end_sidebar_llm(llm_gen)
 
     async def _stage_ai_candidate_async(self, idx: int, reply: ft.Text, footer: ft.Row, action_id: str) -> None:
         text = _strip_change_topic_preamble(reply.value or "")
@@ -312,7 +464,7 @@ class _HistoryMarginAiMixin:
         if self.current_path:
             try:
                 with session_scope() as s:
-                    new_vid = version_storage.persist_version_snapshot(
+                    new_vid = content_repo.persist_version_snapshot(
                         s,
                         self.current_path.resolve(),
                         cand_body,
@@ -329,7 +481,7 @@ class _HistoryMarginAiMixin:
         if new_vid is not None:
             self._ai_proposal_action_ids[new_vid] = action_id
             self._latest_ai_proposal_vid = new_vid
-        self._loaded_proposal_sha = version_storage.content_sha256(self._compare_editor.value or "")
+        self._loaded_proposal_sha = content_repo.content_sha256(self._compare_editor.value or "")
         self._hide_prompt_footer(footer)
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)

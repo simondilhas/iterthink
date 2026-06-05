@@ -41,11 +41,13 @@ dependencies = [
     "opencv-python-headless>=4.9.0",
     "fastembed>=0.8.0",
     "huggingface-hub>=0.26.0",
+    "llama-cpp-python>=0.3.4",
     "sqlite-vec>=0.1.9",
-    "markdown-it-py>=3.0.0",
+    "markdown-it-py>=4.1.0",
     "mdit-py-plugins>=0.4.0",
     "pyspellchecker>=0.8.0",
     "langdetect>=1.0.9",
+    "rapidocr>=3.8.0",
 ]
 
 [project.optional-dependencies]
@@ -71,6 +73,7 @@ iterthink = [
     "help.md",
     "THIRD_PARTY_NOTICES.md",
     "defaults/*.yaml",
+    "defaults/privacy_shield.yaml",
     "LICENSE",
     "embedded_models/**/*",
     "templates/*.docx",
@@ -87,6 +90,9 @@ product = "Iterthink"
 org = "dev.iterthink.local"
 company = "Iterthink"
 copyright = "Copyright (c) 2026"
+
+[tool.flet.macos]
+bundle_id = "dev.iterthink.local.app"
 
 [tool.flet.app]
 path = "."

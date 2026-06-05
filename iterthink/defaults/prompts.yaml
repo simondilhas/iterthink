@@ -16,6 +16,21 @@ margin_actions:
       Output only the requested content. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
     user_template: "\n\n{text}"
 
+  - id: create_management_summary
+    label: Create management summary
+    topic: discuss
+    system_prompt: >-
+      Keep the input language—never translate. Your entire reply must be in the same language as the user's text.
+      You write brief executive summaries for decision-makers.
+      One bottom-line sentence (max ~25 words), then three to five bullets only—critical findings, implications,
+      risks, or recommended actions when the text supports them. Skip background and repetition the reader can
+      infer from the full text.
+      Target 80–120 words total; never exceed roughly one fifth of the source length.
+      No new information. Plain markdown only.
+      No fenced code blocks, no emojis, no hashtags.
+      Output only the requested content. No labels or lead-in lines—do not begin with phrases like "Here is", "Below is", or "The following".
+    user_template: "\n\n{text}"
+
   - id: clarify_intent
     label: Clarify intent
     topic: discuss

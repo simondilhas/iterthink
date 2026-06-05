@@ -14,7 +14,7 @@ from iterthink.db.session import reset_engine_cache
 
 # When adding a new Alembic revision, set this to the new head (only used if
 # migration scripts are missing from the install — see _ensure_orm_schema).
-ALEMBIC_HEAD_REVISION = "20260511_0012"
+ALEMBIC_HEAD_REVISION = "20260604_0018"
 
 
 def _alembic_script_dir() -> Path:
@@ -50,7 +50,7 @@ def _ensure_orm_schema() -> None:
 
     engine = get_engine()
     insp = inspect(engine)
-    if insp.has_table("credential_vault"):
+    if insp.has_table("content"):
         return
 
     warnings.warn(

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
 import flet as ft
 
 # ---------------------------------------------------------------------------
@@ -51,12 +54,52 @@ CLOUD_VENDOR_GOOGLE = "google"
 CLOUD_VENDORS: tuple[str, ...] = (CLOUD_VENDOR_ANTHROPIC, CLOUD_VENDOR_OPENAI, CLOUD_VENDOR_GOOGLE)
 
 
+def normalize_save_file_path(
+    dest: str,
+    *,
+    default_file_name: str,
+    expected_suffix: str,
+) -> Path:
+    """Normalize native save-dialog paths (file:// URI, folder-only picks, missing suffix)."""
+    raw = (dest or "").strip()
+    if not raw:
+        raise ValueError("empty path")
+    if raw.startswith("file://"):
+        raw = unquote(urlparse(raw).path)
+    suffix = expected_suffix if expected_suffix.startswith(".") else f".{expected_suffix}"
+    name = default_file_name.strip() or f"export{suffix}"
+    if not name.lower().endswith(suffix.lower()):
+        name = f"{Path(name).stem}{suffix}"
+
+    p = Path(raw).expanduser()
+    if p.is_dir():
+        p = p / name
+    elif p.suffix.lower() != suffix.lower():
+        p = p.with_suffix(suffix) if p.name else p / name
+    return p.resolve()
+
+
 def ctrl_on_page(ctrl: ft.Control) -> bool:
     """Flet raises RuntimeError when reading .page before the control is mounted."""
     try:
         return ctrl.page is not None
     except RuntimeError:
         return False
+
+
+async def safe_list_scroll(
+    lv: ft.ListView | None,
+    offset: float,
+    *,
+    duration: int = 0,
+) -> None:
+    """scroll_to on a mounted, visible ListView; ignore Flet timeouts."""
+    if lv is None or not ctrl_on_page(lv) or not bool(getattr(lv, "visible", True)):
+        return
+    try:
+        await lv.scroll_to(offset=offset, duration=duration)
+    except (RuntimeError, TimeoutError, TypeError, AttributeError, ValueError):
+        pass
 
 
 def normalize_ki_tier(raw: str | None) -> str:

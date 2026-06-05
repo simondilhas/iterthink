@@ -1,0 +1,107 @@
+# Per-category redaction (seeded to store_dir/privacy_shield.yaml).
+# Placeholders: {{EMAIL_1}}, {{PHONE_2}}, …
+
+categories:
+  # Priority 1 — Direct contact information
+  email:
+    label: Email addresses
+    priority: 1
+    placeholder: EMAIL
+    mode: regex
+    enabled: true
+  phone:
+    label: Phone numbers
+    priority: 1
+    placeholder: PHONE
+    mode: regex
+    enabled: true
+  address:
+    label: Physical addresses
+    priority: 1
+    placeholder: ADDRESS
+    mode: llm
+    enabled: true
+  person:
+    label: Person names
+    priority: 1
+    placeholder: PERSON
+    mode: llm
+    enabled: true
+  org:
+    label: Company / organisation names
+    priority: 1
+    placeholder: ORG
+    mode: llm
+    enabled: true
+
+  # Priority 2 — Credentials & access tokens
+  password:
+    label: Passwords / passphrases
+    priority: 2
+    placeholder: PASSWORD
+    mode: both
+    enabled: true
+  crypto_wallet:
+    label: Private crypto keys / wallets
+    priority: 2
+    placeholder: CRYPTO_WALLET
+    mode: regex
+    enabled: true
+  ip_address:
+    label: IP addresses
+    priority: 2
+    placeholder: IP_ADDRESS
+    mode: regex
+    enabled: true
+  url:
+    label: URLs
+    priority: 2
+    placeholder: URL
+    mode: regex
+    enabled: true
+  api_key:
+    label: API keys & access tokens
+    priority: 2
+    placeholder: API_KEY
+    mode: regex
+    enabled: true
+
+  # Priority 3 — Financial & legal identifiers
+  credit_card:
+    label: Credit card numbers
+    priority: 3
+    placeholder: CREDIT_CARD
+    mode: regex
+    enabled: true
+  bank_account:
+    label: Bank account numbers / IBANs
+    priority: 3
+    placeholder: BANK_ACCOUNT
+    mode: regex
+    enabled: true
+  govt_id:
+    label: Tax IDs / SSNs / government IDs
+    priority: 3
+    placeholder: GOVT_ID
+    mode: regex
+    enabled: true
+
+  # Priority 4 — Corporate & project specifics
+  project_name:
+    label: Product / project codenames
+    priority: 4
+    placeholder: PROJECT_NAME
+    mode: llm
+    enabled: true
+  money:
+    label: Financial figures & budgets
+    priority: 4
+    placeholder: MONEY
+    mode: both
+    enabled: true
+  date:
+    label: Specific dates
+    priority: 4
+    placeholder: DATE
+    mode: both
+    enabled: true

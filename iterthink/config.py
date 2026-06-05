@@ -35,6 +35,7 @@ APP_CONFIG_PATH = app_config_dir() / "config.yaml"
 DOCUMENTS: Path = Path.home() / "Documents"
 STORE_DIR: Path = DOCUMENTS / ".iterthink"
 STORE_DB_PATH: Path = STORE_DIR / "store.sqlite3"
+RAG_DB_PATH: Path = STORE_DIR / "store.rag.sqlite3"
 IMPORT_ASSETS_DIR: Path = DOCUMENTS / "iterthink_import_assets"
 DEFAULT_OLLAMA_MODEL: str = "llama3:8B"
 OLLAMA_HOST: str | None = None
@@ -61,6 +62,26 @@ SELECTION_OVERLAY: str = "#88B8A8D4"
 STARTUP_DAILY_LOG: bool = True
 NEW_NOTE_NAME_TEMPLATE: str = "unnamed-{n}.md"
 RAG_SYSTEM: bool = False
+RAG_SEARCH_ENABLED: bool = False
+RAG_INDEX_ON_STARTUP: bool = False
+RAG_OVERLAP_CHARS: int = 200
+RAG_RERANKER_ENABLED: bool = False
+RAG_RERANKER_MODEL: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+RAG_CONTEXT_MAX_CHARS: int = 2400
+PRIVACY_SHIELD_ENABLED: bool = True
+PRIVACY_SHIELD_HF_REPO: str = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+PRIVACY_SHIELD_HF_FILE: str = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+PRIVACY_SHIELD_CACHE_NAME: str = "qwen-2.5-1.5b.gguf"
+PRIVACY_SHIELD_REINJECT: bool = True
+PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT: bool = False
+PRIVACY_SHIELD_CHUNK_MAX_CHARS: int = 2800
+PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS: int = 1
+TOKEN_COST_PERIOD: str = "year"
+PLAN_PDF_IMPORT_ENABLED: bool = False
+FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED: bool = False
+OCR_ENABLED: bool = False
+OCR_ENGINE: str = "rapidocr"
+OCR_MODEL: str = "ppocrv4_latin_mobile"
 
 
 def _bundled_defaults_dict() -> dict[str, Any]:
@@ -151,18 +172,27 @@ def _legacy_dark_palette_overrides(merged: dict[str, Any]) -> dict[str, str]:
 
 def refresh() -> None:
     """Reload bootstrap YAML into module-level settings (paths, colors, defaults)."""
-    global DOCUMENTS, STORE_DIR, STORE_DB_PATH, IMPORT_ASSETS_DIR
+    global DOCUMENTS, STORE_DIR, STORE_DB_PATH, RAG_DB_PATH, IMPORT_ASSETS_DIR
     global DEFAULT_OLLAMA_MODEL, OLLAMA_HOST
     global APPEARANCE, IS_LIGHT
     global PAGE_BG, PRIMARY_COLOR, HIGHLIGHT, ON_PRIMARY, ON_SURFACE, ON_SURFACE_SOFT
     global ON_SURFACE_VARIANT, OUTLINE, SUCCESS
     global SURFACE, SURFACE_VARIANT, SIDEBAR_SURFACE, CHAT_SYSTEM, SELECTION_OVERLAY
-    global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE, RAG_SYSTEM
+    global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE, RAG_SYSTEM, RAG_SEARCH_ENABLED
+    global RAG_INDEX_ON_STARTUP, RAG_OVERLAP_CHARS, RAG_RERANKER_ENABLED, RAG_RERANKER_MODEL
+    global RAG_CONTEXT_MAX_CHARS
+    global PRIVACY_SHIELD_ENABLED, PRIVACY_SHIELD_HF_REPO, PRIVACY_SHIELD_HF_FILE
+    global PRIVACY_SHIELD_CACHE_NAME, PRIVACY_SHIELD_REINJECT, PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT
+    global PRIVACY_SHIELD_CHUNK_MAX_CHARS, PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS
+    global TOKEN_COST_PERIOD
+    global PLAN_PDF_IMPORT_ENABLED, FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED
+    global OCR_ENABLED, OCR_ENGINE, OCR_MODEL
 
     merged = _merged_config()
     DOCUMENTS = _as_path("documents_root", merged)
     STORE_DIR = _as_path("store_dir", merged)
     STORE_DB_PATH = STORE_DIR / "store.sqlite3"
+    RAG_DB_PATH = STORE_DIR / "store.rag.sqlite3"
     IMPORT_ASSETS_DIR = DOCUMENTS / "iterthink_import_assets"
 
     dm = merged.get("default_ollama_model")
@@ -229,6 +259,34 @@ def refresh() -> None:
         rs = _bundled_rag
     RAG_SYSTEM = _coerce_rag_system_value(rs)
 
+    rse = merged.get("rag_search_enabled", _bd_rag.get("rag_search_enabled", False))
+    RAG_SEARCH_ENABLED = bool(rse) if isinstance(rse, bool) else False
+
+    rio = merged.get("rag_index_on_startup", _bd_rag.get("rag_index_on_startup", True))
+    RAG_INDEX_ON_STARTUP = bool(rio) if isinstance(rio, bool) else True
+
+    roc = merged.get("rag_overlap_chars", _bd_rag.get("rag_overlap_chars", 200))
+    try:
+        RAG_OVERLAP_CHARS = max(0, int(roc))
+    except (TypeError, ValueError):
+        RAG_OVERLAP_CHARS = 200
+
+    rre = merged.get("rag_reranker_enabled", _bd_rag.get("rag_reranker_enabled", True))
+    RAG_RERANKER_ENABLED = bool(rre) if isinstance(rre, bool) else True
+
+    rrm = merged.get("rag_reranker_model", _bd_rag.get("rag_reranker_model", "Xenova/ms-marco-MiniLM-L-6-v2"))
+    RAG_RERANKER_MODEL = (
+        rrm.strip()
+        if isinstance(rrm, str) and rrm.strip()
+        else "Xenova/ms-marco-MiniLM-L-6-v2"
+    )
+
+    rcm = merged.get("rag_context_max_chars", _bd_rag.get("rag_context_max_chars", 2400))
+    try:
+        RAG_CONTEXT_MAX_CHARS = max(200, int(rcm))
+    except (TypeError, ValueError):
+        RAG_CONTEXT_MAX_CHARS = 2400
+
     nt = merged.get("new_note_name_template")
     if isinstance(nt, str) and nt.strip() and nt.count("{n}") == 1:
         NEW_NOTE_NAME_TEMPLATE = nt.strip()
@@ -239,6 +297,79 @@ def refresh() -> None:
             if isinstance(fb_nt, str) and fb_nt.strip() and fb_nt.count("{n}") == 1
             else "unnamed-{n}.md"
         )
+
+    _bd = _bundled_defaults_dict()
+    pse = merged.get("privacy_shield_enabled", _bd.get("privacy_shield_enabled", True))
+    PRIVACY_SHIELD_ENABLED = bool(pse) if isinstance(pse, bool) else True
+
+    phr = merged.get("privacy_shield_hf_repo", _bd.get("privacy_shield_hf_repo", "Qwen/Qwen2.5-1.5B-Instruct-GGUF"))
+    PRIVACY_SHIELD_HF_REPO = (
+        phr.strip()
+        if isinstance(phr, str) and phr.strip()
+        else "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+    )
+
+    phf = merged.get("privacy_shield_hf_file", _bd.get("privacy_shield_hf_file", "qwen2.5-1.5b-instruct-q4_k_m.gguf"))
+    PRIVACY_SHIELD_HF_FILE = (
+        phf.strip()
+        if isinstance(phf, str) and phf.strip()
+        else "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+    )
+
+    pcn = merged.get("privacy_shield_cache_name", _bd.get("privacy_shield_cache_name", "qwen-2.5-1.5b.gguf"))
+    PRIVACY_SHIELD_CACHE_NAME = (
+        pcn.strip()
+        if isinstance(pcn, str) and pcn.strip()
+        else "qwen-2.5-1.5b.gguf"
+    )
+
+    psr = merged.get("privacy_shield_reinject", _bd.get("privacy_shield_reinject", True))
+    PRIVACY_SHIELD_REINJECT = bool(psr) if isinstance(psr, bool) else True
+
+    psm = merged.get("privacy_shield_show_masked_in_chat", _bd.get("privacy_shield_show_masked_in_chat", False))
+    PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT = bool(psm) if isinstance(psm, bool) else False
+
+    psc = merged.get("privacy_shield_chunk_max_chars", _bd.get("privacy_shield_chunk_max_chars", 2800))
+    try:
+        PRIVACY_SHIELD_CHUNK_MAX_CHARS = max(500, int(psc))
+    except (TypeError, ValueError):
+        PRIVACY_SHIELD_CHUNK_MAX_CHARS = 2800
+
+    pso = merged.get(
+        "privacy_shield_chunk_overlap_paragraphs",
+        _bd.get("privacy_shield_chunk_overlap_paragraphs", 1),
+    )
+    try:
+        PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS = max(0, min(5, int(pso)))
+    except (TypeError, ValueError):
+        PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS = 1
+
+    tcp = merged.get("token_cost_period", _bd.get("token_cost_period", "year"))
+    if isinstance(tcp, str) and tcp.strip().lower() in ("day", "month", "year"):
+        TOKEN_COST_PERIOD = tcp.strip().lower()
+    else:
+        TOKEN_COST_PERIOD = "year"
+
+    from iterthink.ocr_settings import normalize_ocr_engine, normalize_ocr_model
+
+    ppie = merged.get("plan_pdf_import_enabled", _bd.get("plan_pdf_import_enabled", False))
+    PLAN_PDF_IMPORT_ENABLED = bool(ppie) if isinstance(ppie, bool) else False
+
+    fsra = merged.get(
+        "focus_selection_review_actions_enabled",
+        _bd.get("focus_selection_review_actions_enabled", False),
+    )
+    FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED = bool(fsra) if isinstance(fsra, bool) else False
+
+    oce = merged.get("ocr_enabled", _bd.get("ocr_enabled", False))
+    OCR_ENABLED = bool(oce) if isinstance(oce, bool) else False
+
+    oeng = merged.get("ocr_engine", _bd.get("ocr_engine", "rapidocr"))
+    engine = normalize_ocr_engine(oeng if isinstance(oeng, str) else None)
+    OCR_ENGINE = engine
+
+    om = merged.get("ocr_model", _bd.get("ocr_model", "ppocrv4_latin_mobile"))
+    OCR_MODEL = normalize_ocr_model(engine, om if isinstance(om, str) else None)
 
 
 def read_bootstrap_yaml_text() -> str:

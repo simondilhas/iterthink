@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import flet as ft
 import httpx
 
@@ -12,6 +14,16 @@ from iterthink.persistence import store_db
 from iterthink.ai.ollama_models import classify_installed_models
 from iterthink.ai.llm_router import remote_http_error_message
 from iterthink.ai.ollama_util import chat_response_text, chat_stream_delta, ollama_error_message
+from iterthink.ai.privacy_shield import (
+    RedactionMap,
+    last_user_message_content,
+    privacy_shield_applies_to_tier,
+    redact_messages_for_tier,
+    redact_text_via_local_llm,
+    reinject_text,
+    should_show_masked_in_chat,
+)
+from .privacy_shield_chat_ui import append_privacy_turn_to_history, build_privacy_turn_bubble
 from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS
 from .constants import (
     KI_PILL_TEXT_SIZE,
@@ -26,7 +38,8 @@ from .constants import (
     KI_TOPIC_COMMENTS,
     KI_TOPIC_DISCUSS,
 )
-from .llm_backend import sync_llm_tier_tab_icons
+from .discuss_context import discuss_llm_uses_selection
+from .llm_backend import sync_llm_tier_tab_icons, sync_privacy_shield_icon
 from .util import KI_TIERS, ctrl_on_page as _ctrl_on_page, normalize_ki_tier
 
 # KI strip icon tooltips (must match markdown_studio.py topic mode row order).
@@ -98,6 +111,17 @@ class MarkdownStudioKiSidebar:
             if _ctrl_on_page(c):
                 c.update()
 
+    async def _open_ki_act_tab_async(self) -> None:
+        if not self.current_path:
+            self._snack("Open a note first.")
+            return
+        if int(getattr(self, "_main_tab_index", TAB_PRESENT)) != TAB_FUTURE:
+            self._snack("Switch to Review to use Act.")
+            return
+        if not self.right_open:
+            self.toggle_right()
+        self._set_ki_topic(KI_TOPIC_ACT)
+
     def _set_ki_topic(self, index: int) -> None:
         pages = getattr(self, "_ki_tab_pages", None) or []
         max_index = max(0, len(pages) - 1)
@@ -166,14 +190,82 @@ class MarkdownStudioKiSidebar:
 
     def _on_page_keyboard(self, e: ft.KeyboardEvent) -> None:
         key = (e.key or "").lower()
+        if (e.ctrl or e.meta) and key == "s":
+            self.page.run_task(self.save_file, None)
+            return
         if key == "escape" and self._compose_tab_inline_rename_active:
             self.page.run_task(self._compose_tab_cancel_inline_rename)
+            return
+        if key == "tab" and not (e.ctrl or e.meta or e.alt):
+            if (
+                getattr(self, "_compose_editor_focused", False)
+                and int(getattr(self, "_main_tab_index", -1)) == TAB_PRESENT
+                and getattr(self, "_focus_view_mode", "edit") == "edit"
+            ):
+                self.page.run_task(self._compose_handle_tab_key_async, shift=e.shift)
             return
         if key != "j":
             return
         if not (e.ctrl or e.meta):
             return
         self.toggle_right()
+
+    def _privacy_accept_reject_footer(
+        self,
+        *,
+        store_user: str,
+        reinjected: str,
+    ) -> ft.Row:
+        resolved: list[bool] = [False]
+        accept_btn = ft.FilledButton("Accept", height=32)
+        reject_btn = ft.TextButton("Reject", height=32)
+
+        def _finish() -> None:
+            accept_btn.disabled = True
+            reject_btn.disabled = True
+            if _ctrl_on_page(accept_btn):
+                accept_btn.update()
+            if _ctrl_on_page(reject_btn):
+                reject_btn.update()
+
+        def _accept(_e: ft.ControlEvent) -> None:
+            if resolved[0]:
+                return
+            resolved[0] = True
+            self._chat_api_messages.append({"role": "user", "content": store_user})
+            self._chat_api_messages.append({"role": "assistant", "content": reinjected})
+            _finish()
+
+        def _reject(_e: ft.ControlEvent) -> None:
+            if resolved[0]:
+                return
+            resolved[0] = True
+            self._snack("Reply discarded.")
+            _finish()
+
+        accept_btn.on_click = _accept
+        reject_btn.on_click = _reject
+        return ft.Row([accept_btn, reject_btn], spacing=8)
+
+    def _append_privacy_three_turn(
+        self,
+        *,
+        input_text: str,
+        redacted_text: str,
+        output_text: str,
+        store_user: str,
+    ) -> None:
+        footer = self._privacy_accept_reject_footer(
+            store_user=store_user,
+            reinjected=output_text,
+        )
+        bubble = build_privacy_turn_bubble(
+            input_text=input_text,
+            redacted_text=redacted_text,
+            output_text=output_text,
+            footer=footer,
+        )
+        append_privacy_turn_to_history(self._chat_history, bubble)
 
     def _append_chat_line(self, role: str, text: str, *, quote: str | None = None) -> None:
         bg = (
@@ -218,16 +310,16 @@ class MarkdownStudioKiSidebar:
             self._chat_history.update()
 
     def _on_ki_tier_tabs_change(self, e: ft.ControlEvent) -> None:
-        try:
-            idx = int(e.data)
-        except (TypeError, ValueError):
-            idx = int(getattr(e.control, "selected_index", 0))
-        if not (0 <= idx < len(KI_TIERS)):
+        from iterthink.studio.llm_backend import ki_tier_index_from_change_event
+
+        fallback = KI_TIERS.index(normalize_ki_tier(self.ki_tier))
+        idx = ki_tier_index_from_change_event(e, fallback=fallback)
+        if idx is None:
             return
         self.ki_tier = KI_TIERS[idx]
         self._persist_ki_tier()
         self._sync_chat_model_ui()
-        self._sync_ki_tier_tab_icons()
+        self._sync_ki_tier_tabs_ui()
 
     def _sync_ki_tier_tab_icons(self) -> None:
         sync_llm_tier_tab_icons(getattr(self, "_ki_tier_tabs", None))
@@ -242,6 +334,16 @@ class MarkdownStudioKiSidebar:
             if _ctrl_on_page(tabs_ctrl):
                 tabs_ctrl.update()
         self._sync_ki_tier_tab_icons()
+        self._sync_privacy_shield_icon()
+        self._sync_token_cost_display()
+
+    def _sync_privacy_shield_icon(self) -> None:
+        sync_privacy_shield_icon(
+            getattr(self, "_privacy_shield_icon", None),
+            enabled=config.PRIVACY_SHIELD_ENABLED,
+            tier=self.ki_tier,
+            reinject=config.PRIVACY_SHIELD_REINJECT,
+        )
 
     async def _send_chat_message(self, _e: ft.ControlEvent | None = None) -> None:
         raw = (self._chat_input.value or "").strip()
@@ -251,64 +353,168 @@ class MarkdownStudioKiSidebar:
         if _ctrl_on_page(self._chat_input):
             self._chat_input.update()
 
-        self._append_chat_line("user", raw)
+        shield_trace = privacy_shield_applies_to_tier(self.ki_tier)
+        user_chat_text = raw
+        rmap: RedactionMap | None = None
 
-        doc = (self._editor_buffer() or "")[:8000]
+        if int(getattr(self, "_ki_topic_index", -1)) == KI_TOPIC_DISCUSS:
+            buf = self._editor_buffer() or ""
+            rng = self._ctx_selection_range()
+            doc = self._discuss_llm_context_text()
+            has_selection = discuss_llm_uses_selection(buf, rng)
+        else:
+            doc = (self._editor_buffer() or "")[:8000]
+            has_selection = False
         messages: list[dict[str, str]] = [{"role": "system", "content": config.CHAT_SYSTEM}]
         if doc.strip() and not self._chat_api_messages:
+            doc_prefix = (
+                "Ausgewählter Auszug:"
+                if has_selection
+                else "Aktuelles Markdown-Dokument (Auszug):"
+            )
             messages.append(
                 {
                     "role": "user",
-                    "content": "Aktuelles Markdown-Dokument (Auszug):\n```markdown\n" + doc + "\n```",
+                    "content": f"{doc_prefix}\n```markdown\n{doc}\n```",
                 }
             )
         messages.extend(self._chat_api_messages)
         messages.append({"role": "user", "content": raw})
 
-        acc = ""
-        reply = ft.Text("", size=12, selectable=True, color=config.ON_SURFACE)
-        wrap = ft.Container(
-            content=reply,
-            padding=ft.padding.symmetric(horizontal=10, vertical=8),
-            bgcolor=ft.Colors.with_opacity(0.14, config.OUTLINE),
-            border_radius=10,
-            alignment=ft.Alignment.CENTER_LEFT,
-        )
-        self._chat_history.controls.append(wrap)
-        if _ctrl_on_page(self._chat_history):
-            self._chat_history.update()
+        api_messages = messages
+        redacted_user = raw
+        if shield_trace:
+            try:
+                api_messages, rmap = await redact_messages_for_tier(messages, self.ki_tier)
+            except ValueError as ex:
+                self._snack(str(ex))
+                return
+            redacted_user = last_user_message_content(api_messages)
+            cloud_user = redacted_user
+        elif should_show_masked_in_chat(self.ki_tier):
+            try:
+                user_chat_text, _ = await redact_text_via_local_llm(raw)
+            except ValueError as ex:
+                self._append_chat_line("user", raw)
+                self._snack(str(ex))
+                return
+            messages[-1] = {"role": "user", "content": user_chat_text}
+            api_messages = messages
+            cloud_user = user_chat_text
+        else:
+            cloud_user = raw
+
+        if not shield_trace:
+            self._append_chat_line("user", user_chat_text)
 
         backend = self._make_llm_backend()
         cm = self.chat_model_for_requests()
+        acc = ""
+        use_stream = not shield_trace
+        llm_gen = self.begin_sidebar_llm()
+
         try:
-            stream = await backend.chat(model=cm, messages=messages, stream=True)
-            async for part in stream:
-                acc += chat_stream_delta(part)
-                reply.value = acc.strip() or "…"
-                if _ctrl_on_page(reply):
-                    reply.update()
-        except BaseException:
-            try:
-                resp = await backend.chat(model=cm, messages=messages, stream=False)
-                acc = chat_response_text(resp) or ""
-            except BaseException as ex_final:
-                if isinstance(ex_final, httpx.HTTPStatusError):
-                    detail = remote_http_error_message(ex_final)
-                elif isinstance(ex_final, ValueError):
-                    detail = str(ex_final)
-                else:
-                    detail = ollama_error_message(ex_final)
-                reply.value = f"(Fehler) {detail}"
-                if _ctrl_on_page(reply):
-                    reply.update()
+            if shield_trace:
+                try:
+                    resp = await backend.chat(
+                        model=cm,
+                        messages=api_messages,
+                        stream=False,
+                        skip_privacy_redaction=True,
+                    )
+                    if self.is_sidebar_llm_cancelled():
+                        return
+                    acc = chat_response_text(resp) or ""
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as ex_final:
+                    if isinstance(ex_final, httpx.HTTPStatusError):
+                        detail = remote_http_error_message(ex_final)
+                    elif isinstance(ex_final, ValueError):
+                        detail = str(ex_final)
+                    else:
+                        detail = ollama_error_message(ex_final)
+                    self._append_chat_line("assistant", f"(Fehler) {detail}")
+                    return
+
+                if self.is_sidebar_llm_cancelled():
+                    return
+                cloud_reply = acc
+                if rmap and config.PRIVACY_SHIELD_REINJECT:
+                    acc = reinject_text(cloud_reply, rmap)
+                self._append_privacy_three_turn(
+                    input_text=raw,
+                    redacted_text=redacted_user,
+                    output_text=acc,
+                    store_user=cloud_user,
+                )
                 return
 
-        acc = (acc or "").strip()
-        reply.value = acc or "(Leere Antwort)"
-        if _ctrl_on_page(reply):
-            reply.update()
-        self._chat_api_messages.append({"role": "user", "content": raw})
-        self._chat_api_messages.append({"role": "assistant", "content": acc})
+            reply = ft.Text("", size=12, selectable=True, color=config.ON_SURFACE)
+            wrap = ft.Container(
+                content=reply,
+                padding=ft.padding.symmetric(horizontal=10, vertical=8),
+                bgcolor=ft.Colors.with_opacity(0.14, config.OUTLINE),
+                border_radius=10,
+                alignment=ft.Alignment.CENTER_LEFT,
+            )
+            self._chat_history.controls.append(wrap)
+            if _ctrl_on_page(self._chat_history):
+                self._chat_history.update()
+
+            try:
+                if use_stream:
+                    stream = await backend.chat(model=cm, messages=api_messages, stream=True)
+                    async for part in stream:
+                        if self.is_sidebar_llm_cancelled():
+                            break
+                        acc += chat_stream_delta(part)
+                        reply.value = acc.strip() or "…"
+                        if _ctrl_on_page(reply):
+                            reply.update()
+                else:
+                    raise RuntimeError("skip stream")
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                if self.is_sidebar_llm_cancelled():
+                    acc = (acc or "").strip()
+                    reply.value = self.sidebar_llm_display_text(acc, empty_fallback="(Leere Antwort)")
+                    if _ctrl_on_page(reply):
+                        reply.update()
+                    return
+                try:
+                    resp = await backend.chat(model=cm, messages=api_messages, stream=False)
+                    if self.is_sidebar_llm_cancelled():
+                        return
+                    acc = chat_response_text(resp) or ""
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as ex_final:
+                    if isinstance(ex_final, httpx.HTTPStatusError):
+                        detail = remote_http_error_message(ex_final)
+                    elif isinstance(ex_final, ValueError):
+                        detail = str(ex_final)
+                    else:
+                        detail = ollama_error_message(ex_final)
+                    reply.value = f"(Fehler) {detail}"
+                    if _ctrl_on_page(reply):
+                        reply.update()
+                    return
+
+            stopped = self.is_sidebar_llm_cancelled()
+            acc = self.sidebar_llm_display_text(acc, empty_fallback="(Leere Antwort)")
+            reply.value = acc
+            if _ctrl_on_page(reply):
+                reply.update()
+            if stopped:
+                return
+            self._chat_api_messages.append({"role": "user", "content": user_chat_text})
+            self._chat_api_messages.append({"role": "assistant", "content": acc})
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self.end_sidebar_llm(llm_gen)
 
     def reflow_columns(self, _e: ft.ControlEvent | None = None) -> None:
         left_w = SIDEBAR_EXPANDED_WIDTH_PX if self.left_open else COLLAPSED_RAIL_WIDTH_PX

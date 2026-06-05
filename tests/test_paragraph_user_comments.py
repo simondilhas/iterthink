@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from iterthink.compare.paragraph_align import compute_hash
 from iterthink.db.session import session_scope
-from iterthink.persistence import paragraph_user_comments, version_storage
+from iterthink.persistence import content_repo, paragraph_user_comments
 from iterthink.persistence.paragraph_user_comments import StoredComment
 
 
@@ -16,9 +14,9 @@ def _persist_doc(tmp_path: Path, body: str) -> tuple[int, int]:
     md = tmp_path / "note.md"
     md.write_text(body, encoding="utf-8")
     with session_scope() as s:
-        vid = version_storage.persist_version_snapshot(s, md.resolve(), body, "manual")
+        vid = content_repo.persist_version_snapshot(s, md.resolve(), body, "manual")
         assert vid is not None
-        doc = version_storage.get_document_by_resolved_path(s, md.resolve())
+        doc = content_repo.get_document_by_resolved_path(s, md.resolve())
         assert doc is not None
         return int(doc.id), int(vid)
 
@@ -55,26 +53,24 @@ def test_migrate_comments_to_new_version_preserves_hash_anchored_notes(
 ) -> None:
     old_body = "A\n\nB\n\nC"
     new_body = "Z\n\nA\n\nB\n\nC"
-    doc_id, parent_vid = _persist_doc(tmp_path, old_body)
+    _doc_id, parent_vid = _persist_doc(tmp_path, old_body)
     h_b = compute_hash("B")
     with session_scope() as s:
         paragraph_user_comments.upsert(
             s,
-            document_id=doc_id,
-            version_id=parent_vid,
+            content_version_id=parent_vid,
             paragraph_index=1,
             body="on B",
             content_hash=h_b,
         )
     md = tmp_path / "note.md"
     with session_scope() as s:
-        new_vid = version_storage.persist_version_snapshot(s, md.resolve(), new_body, "manual")
+        new_vid = content_repo.persist_version_snapshot(s, md.resolve(), new_body, "manual")
         assert new_vid is not None
     with session_scope() as s:
         resolved = paragraph_user_comments.map_resolved_for_display(
             s,
-            document_id=doc_id,
-            version_id=int(new_vid),
+            content_version_id=int(new_vid),
             anchor_body=new_body,
             display_body=new_body,
         )
@@ -84,26 +80,24 @@ def test_migrate_comments_to_new_version_preserves_hash_anchored_notes(
 def test_legacy_rows_without_hash_use_alignment(ephemeral_store: None, tmp_path: Path) -> None:
     old_body = "One\n\nTwo"
     new_body = "Zero\n\nOne\n\nTwo"
-    doc_id, parent_vid = _persist_doc(tmp_path, old_body)
+    _doc_id, parent_vid = _persist_doc(tmp_path, old_body)
     with session_scope() as s:
         paragraph_user_comments.upsert(
             s,
-            document_id=doc_id,
-            version_id=parent_vid,
+            content_version_id=parent_vid,
             paragraph_index=1,
             body="on two",
             content_hash=None,
         )
     md = tmp_path / "note.md"
     with session_scope() as s:
-        new_vid = version_storage.persist_version_snapshot(s, md.resolve(), new_body, "manual")
+        new_vid = content_repo.persist_version_snapshot(s, md.resolve(), new_body, "manual")
         assert new_vid is not None
     with session_scope() as s:
-        stored = paragraph_user_comments.list_stored_for_version(
-            s, document_id=doc_id, version_id=int(new_vid)
-        )
-        assert any((c.body or "").strip() == "on two" for c in stored)
-        resolved = paragraph_user_comments.resolve_comments_for_body(
-            new_body, new_body, stored
+        resolved = paragraph_user_comments.map_resolved_for_display(
+            s,
+            content_version_id=int(new_vid),
+            anchor_body=new_body,
+            display_body=new_body,
         )
     assert resolved.get(2) == "on two"

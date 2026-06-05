@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
@@ -9,7 +11,10 @@ import pytest
 from docx import Document
 
 from iterthink.services import docx_placeholders, markdown_docx_export
-from iterthink.services.markdown_docx_export import ExportMeta
+from iterthink.services.markdown_docx_export import BLOCK_GAP_PT, ExportMeta
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_BLOCK_GAP_TWIPS = str(BLOCK_GAP_PT * 20)
 
 
 def _minimal_template(tmp_path: Path) -> Path:
@@ -85,6 +90,31 @@ def test_markdown_to_docx_placeholders_include_name(tmp_path: Path) -> None:
 def _document_xml_text(docx: Path) -> str:
     with zipfile.ZipFile(docx) as z:
         return z.read("word/document.xml").decode("utf-8")
+
+
+def _paragraph_spacing_for_text(body_xml: str, needle: str) -> tuple[str | None, str | None]:
+    """Return ``(space_after, space_before)`` twips for the first ``w:p`` containing ``needle``."""
+    root = ET.fromstring(body_xml)
+    for p in root.iter(f"{{{_W_NS}}}p"):
+        texts = "".join(t.text or "" for t in p.iter(f"{{{_W_NS}}}t"))
+        if needle not in texts:
+            continue
+        sp = p.find(f".//{{{_W_NS}}}spacing")
+        if sp is None:
+            return None, None
+        return sp.get(f"{{{_W_NS}}}after"), sp.get(f"{{{_W_NS}}}before")
+    return None, None
+
+
+def _spacing_before_between_text(body_xml: str, after_needle: str, before_needle: str) -> str | None:
+    """Return ``w:before`` twips on a spacer ``w:p`` between two text needles."""
+    start = body_xml.find(after_needle)
+    end = body_xml.find(before_needle, start + len(after_needle) if start >= 0 else 0)
+    if start < 0 or end < 0 or end <= start:
+        return None
+    segment = body_xml[start:end]
+    matches = re.findall(r'w:before="(\d+)"', segment)
+    return matches[-1] if matches else None
 
 
 def test_markdown_to_docx_smoke(tmp_path: Path) -> None:
@@ -180,6 +210,133 @@ def test_markdown_to_docx_nested_list_siblings_same_depth(tmp_path: Path) -> Non
     body = _document_xml_text(out)
     assert "L2a" in body and "L2b" in body
     assert body.count('<w:ilvl w:val="1"/>') >= 2
+
+
+def test_markdown_to_docx_paragraph_gap_between_body_paragraphs(tmp_path: Path) -> None:
+    """Double-Enter between body paragraphs must yield visible gap (space_after on first block)."""
+    tpl = _minimal_template(tmp_path)
+    md = tmp_path / "note.md"
+    md.write_text("Paragraph one.\n\nParagraph two.\n", encoding="utf-8")
+    out = tmp_path / "gap.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="A", date_iso="2099-02-02"),
+    )
+    body = _document_xml_text(out)
+    after_one, _ = _paragraph_spacing_for_text(body, "Paragraph one.")
+    after_two, before_two = _paragraph_spacing_for_text(body, "Paragraph two.")
+    assert after_one == _BLOCK_GAP_TWIPS
+    assert before_two == _BLOCK_GAP_TWIPS
+    assert after_two == _BLOCK_GAP_TWIPS
+
+
+def test_markdown_to_docx_paragraph_before_table_has_gap(tmp_path: Path) -> None:
+    tpl = _minimal_template(tmp_path)
+    md = tmp_path / "note.md"
+    md.write_text(
+        "Before table.\n\n| H |\n|---|\n| x |\n\nAfter table.\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "table_gap.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="A", date_iso="2099-02-02"),
+    )
+    body = _document_xml_text(out)
+    after_before, _ = _paragraph_spacing_for_text(body, "Before table.")
+    _, before_after = _paragraph_spacing_for_text(body, "After table.")
+    assert after_before == _BLOCK_GAP_TWIPS
+    assert before_after == _BLOCK_GAP_TWIPS
+
+
+def test_markdown_to_docx_gap_between_two_tables(tmp_path: Path) -> None:
+    """Blank line between GFM tables must yield visible gap in Word (spacer paragraph)."""
+    tpl = _minimal_template(tmp_path)
+    md = tmp_path / "note.md"
+    md.write_text(
+        "| A |\n|---|\n| 1 |\n\n| B |\n|---|\n| 2 |\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "two_tables.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="A", date_iso="2099-02-02"),
+    )
+    body = _document_xml_text(out)
+    assert "A" in body and "B" in body
+    gap_before = _spacing_before_between_text(body, ">1<", ">B<")
+    assert gap_before == _BLOCK_GAP_TWIPS
+
+
+def test_markdown_to_docx_exports_gfm_table(tmp_path: Path) -> None:
+    tpl = _minimal_template(tmp_path)
+    md = tmp_path / "note.md"
+    md.write_text(
+        "| H1 | H2 |\n|---|---|\n| a | bb |\n\nAfter table.\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "table.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="A", date_iso="2099-02-02"),
+    )
+    body = _document_xml_text(out)
+    assert "<w:tbl" in body
+    assert "H1" in body
+    assert "H2" in body
+    assert "bb" in body
+    assert "After table." in body
+
+
+def test_markdown_to_docx_table_inline_bold(tmp_path: Path) -> None:
+    tpl = _minimal_template(tmp_path)
+    md = tmp_path / "note.md"
+    md.write_text("| Col |\n|-----|\n| **bold** |\n", encoding="utf-8")
+    out = tmp_path / "bold_cell.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="A", date_iso="2099-02-02"),
+    )
+    body = _document_xml_text(out)
+    assert "<w:tbl" in body
+    assert "bold" in body
+    assert "<w:b" in body or "w:val=\"true\"" in body
+
+
+def test_markdown_to_docx_hr_inserts_page_break(tmp_path: Path) -> None:
+    tpl = _minimal_template(tmp_path)
+    md = tmp_path / "note.md"
+    md.write_text("Before\n\n---\n\nAfter", encoding="utf-8")
+    out = tmp_path / "hr.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="A", date_iso="2099-02-02"),
+    )
+    body = _document_xml_text(out)
+    assert "Before" in body
+    assert "After" in body
+    assert 'w:br w:type="page"' in body
+    assert "— — —" not in body
+
+
 def test_markdown_to_docx_paragraph_comment(tmp_path: Path) -> None:
     tpl = _minimal_template(tmp_path)
     md = tmp_path / "note.md"

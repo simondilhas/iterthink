@@ -464,8 +464,7 @@ async def run_impact_analysis(
                         with session_scope() as s:
                             impact_ann.upsert_model_result(
                                 s,
-                                document_id=target_document_id,
-                                version_id=target_version_id,
+                                content_version_id=target_version_id,
                                 paragraph_index=idx,
                                 prompt_id=check.id,
                                 status=str(skipped["status"]),
@@ -504,8 +503,7 @@ async def run_impact_analysis(
                     with session_scope() as s:
                         impact_ann.upsert_model_result(
                             s,
-                            document_id=target_document_id,
-                            version_id=target_version_id,
+                            content_version_id=target_version_id,
                             paragraph_index=idx,
                             prompt_id=check.id,
                             status=str(payload["status"]),

@@ -25,7 +25,7 @@ from .constants import (
 from .markdown_preview import markdown_preview_with_task_checkboxes
 from .util import ctrl_on_page as _ctrl_on_page
 
-_HELP_MD_PATH = Path(__file__).resolve().parent / "help.md"
+_HELP_MD_PATH = Path(__file__).resolve().parent.parent / "help.md"
 _LICENSE_PATH = Path(__file__).resolve().parent / "LICENSE"
 
 
@@ -69,6 +69,9 @@ class MarkdownStudioShell:
             return
         sh.height = 0
         sh.opacity = 0.0
+        sh.ignore_interactions = True
+        sh.clip_behavior = ft.ClipBehavior.HARD_EDGE
+        self._header_menu_open = 0
         if _ctrl_on_page(sh):
             sh.update()
 
@@ -79,6 +82,9 @@ class MarkdownStudioShell:
             return
         sh.height = 50
         sh.opacity = 1.0
+        sh.ignore_interactions = False
+        # Flet default is HARD_EDGE; clipping can hide the open menu panel.
+        sh.clip_behavior = ft.ClipBehavior.NONE
         if _ctrl_on_page(sh):
             sh.update()
 
@@ -359,7 +365,7 @@ class MarkdownStudioShell:
                     "File",
                     [
                         ft.MenuItemButton(
-                            content=ft.Text("Save", color=config.ON_SURFACE, size=14),
+                            content=ft.Text("Save (Ctrl+S)", color=config.ON_SURFACE, size=14),
                             on_click=lambda e: self.page.run_task(self.save_file, e),
                         ),
                         ft.MenuItemButton(
@@ -563,8 +569,8 @@ class MarkdownStudioShell:
                 self._header_shell = ft.Container(
                     height=0,
                     opacity=0,
-                    # Do not clip: MenuBar dropdowns extend below the header strip.
-                    clip_behavior=ft.ClipBehavior.NONE,
+                    ignore_interactions=True,
+                    clip_behavior=ft.ClipBehavior.HARD_EDGE,
                     animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
                     left=0,
                     right=0,
@@ -582,7 +588,8 @@ class MarkdownStudioShell:
                 self._header_shell = ft.Container(
                     height=0,
                     opacity=0,
-                    clip_behavior=ft.ClipBehavior.NONE,
+                    ignore_interactions=True,
+                    clip_behavior=ft.ClipBehavior.HARD_EDGE,
                     animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
                     left=0,
                     right=0,

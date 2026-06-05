@@ -13,7 +13,7 @@ from iterthink import config
 from iterthink import prompts
 from iterthink.db.session import session_scope
 from iterthink.prompts import TOPIC_CHANGE, TOPIC_DISCUSS, TOPIC_EVALUATE
-from iterthink.persistence import version_storage
+from iterthink.persistence import content_repo
 from .components import (
     ACTION_RAIL_ICON_SIZE,
     SPARKLE_MENU_ICON,
@@ -28,13 +28,28 @@ from .compose_selection_markdown import (
     apply_italic_wrap,
     apply_numbered_block,
     apply_outdent_block,
+    expand_selection_to_line_bounds,
 )
 from .compose_toolbar_layout import selection_first_line_anchor_px
+from .discuss_context import discuss_llm_context_text
 from iterthink.compare.margin import paragraph_index_at_offset, replace_paragraph_at_index, split_paragraphs
-from .list_continuation import merge_if_list_continuation_after_enter
+from .list_continuation import (
+    infer_selection_after_single_enter,
+    map_index_after_normalize_newlines,
+    map_norm_index_to_raw,
+    normalize_buffer_newlines,
+    plan_list_continuation_after_enter,
+)
 from .markdown_preview import markdown_preview_with_task_checkboxes
 from iterthink.ai.llm_router import remote_http_error_message
 from iterthink.ai.ollama_util import chat_response_text, chat_stream_delta, ollama_error_message
+from iterthink.ai.privacy_shield import (
+    last_user_message_content,
+    privacy_shield_applies_to_tier,
+    redact_messages_for_tier,
+    reinject_text,
+)
+from .privacy_shield_chat_ui import append_privacy_turn_to_history, build_privacy_turn_bubble
 from .constants import (
     AUTOSAVE_DISK_IDLE_SEC,
     AUTOSAVE_SNAPSHOT_IDLE_SEC,
@@ -105,6 +120,10 @@ class MarkdownStudioCompose:
         if idx < 0 or idx >= len(parts):
             return ""
         return parts[idx]
+
+    def _discuss_llm_context_text(self, *, max_chars: int = 8000) -> str:
+        buf = self._editor_buffer() or ""
+        return discuss_llm_context_text(buf, self._ctx_selection_range(), max_chars=max_chars)
 
     async def _open_project_page(self) -> None:
         u = (_PROJECT_PAGE_URL or "").strip()
@@ -393,6 +412,9 @@ class MarkdownStudioCompose:
         host.top = top
         host.right = None
 
+    def _set_compose_editor_focused(self, focused: bool) -> None:
+        self._compose_editor_focused = focused
+
     # --- Compose floating selection toolbar (Focus editor, edit mode) ---
 
     def _init_compose_selection_toolbar(self) -> None:
@@ -429,9 +451,17 @@ class MarkdownStudioCompose:
             content=self._compose_selection_toolbar_popup,
         )
 
-        row = ft.Row(
+        toolbar_items: list[ft.Control] = []
+        if config.FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED:
+            toolbar_items.append(
+                _btn(
+                    ft.Icons.SPELLCHECK,
+                    "Spelling review (Review tab)",
+                    self._compose_toolbar_spellcheck,
+                )
+            )
+        toolbar_items.extend(
             [
-                _btn(ft.Icons.SPELLCHECK, "Spelling review (Review tab)", self._compose_toolbar_spellcheck),
                 _btn(ft.Icons.FORMAT_BOLD, "Bold **", self._compose_toolbar_bold),
                 _btn(ft.Icons.FORMAT_ITALIC, "Italic *", self._compose_toolbar_italic),
                 _btn(ft.Icons.FORMAT_LIST_BULLETED, "Bullet list", self._compose_toolbar_bullet),
@@ -439,11 +469,20 @@ class MarkdownStudioCompose:
                 _btn(ft.Icons.CHECKLIST, "Task list - [ ]", self._compose_toolbar_checklist),
                 _btn(ft.Icons.FORMAT_INDENT_INCREASE, "Indent lines", self._compose_toolbar_indent),
                 _btn(ft.Icons.FORMAT_INDENT_DECREASE, "Outdent lines", self._compose_toolbar_outdent),
-                sparkle_wrap,
-            ],
+            ]
+        )
+        if config.FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED:
+            toolbar_items.append(sparkle_wrap)
+
+        toolbar_row = ft.Row(
+            toolbar_items,
             spacing=0,
             tight=True,
             scroll=ft.ScrollMode.AUTO,
+        )
+        row = ft.GestureDetector(
+            on_tap_down=lambda _e: self._compose_snapshot_toolbar_range(),
+            content=toolbar_row,
         )
         self._compose_selection_toolbar_host = ft.Container(
             visible=False,
@@ -495,8 +534,46 @@ class MarkdownStudioCompose:
             self._compose_toolbar_applying = False
         self._compose_sync_selection_toolbar_visibility()
 
+    def _compose_snapshot_toolbar_range(self) -> None:
+        """Capture selection before toolbar buttons steal editor focus."""
+        buf = self.editor.value or ""
+        sel = self.editor.selection
+        if sel is not None and not sel.is_collapsed:
+            if sel.get_selected_text(buf).strip():
+                self._compose_toolbar_snap_range = (int(sel.start), int(sel.end))
+                return
+        span = getattr(self, "_compose_sel_span", None)
+        if span is not None:
+            a, b = span
+            if 0 <= a <= b <= len(buf) and buf[a:b].strip():
+                self._compose_toolbar_snap_range = (int(a), int(b))
+                return
+        self._compose_toolbar_snap_range = None
+
     def _compose_toolbar_range(self) -> tuple[int, int] | None:
-        return self._ctx_selection_range()
+        buf = self.editor.value or ""
+        sel = self.editor.selection
+        if sel is not None and not sel.is_collapsed:
+            if sel.get_selected_text(buf).strip():
+                return int(sel.start), int(sel.end)
+        snap = getattr(self, "_compose_toolbar_snap_range", None)
+        if snap is not None:
+            return int(snap[0]), int(snap[1])
+        span = getattr(self, "_compose_sel_span", None)
+        if span is not None:
+            return int(span[0]), int(span[1])
+        return None
+
+    def _compose_indent_key_range(self) -> tuple[int, int] | None:
+        rng = self._compose_toolbar_range()
+        if rng is not None:
+            return rng
+        buf = self.editor.value or ""
+        sel = self.editor.selection
+        if sel is None:
+            return None
+        caret = int(sel.start)
+        return expand_selection_to_line_bounds(buf, caret, caret)
 
     def _compose_toolbar_bold(self, _e: ft.ControlEvent) -> None:
         rng = self._compose_toolbar_range()
@@ -587,6 +664,56 @@ class MarkdownStudioCompose:
         self._enter_spell_review_mode()
         await self._request_tab_switch_async(TAB_FUTURE)
 
+    async def _compose_handle_tab_key_async(self, *, shift: bool) -> None:
+        if self._main_tab_index != TAB_PRESENT or self._focus_view_mode != "edit":
+            return
+        if not getattr(self, "_compose_editor_focused", False):
+            return
+        buf = self.editor.value or ""
+        sel = self.editor.selection
+        collapsed = sel is None or sel.is_collapsed
+        if not shift and collapsed:
+            caret = int(sel.start) if sel is not None else len(buf)
+            if not self._compose_caret_at_line_start(buf, caret):
+                self._compose_insert_at_caret("  ")
+                try:
+                    await self.editor.focus()
+                except BaseException:
+                    pass
+                return
+        rng = self._compose_indent_key_range()
+        if rng is None:
+            return
+        a, b = rng
+        got = apply_outdent_block(buf, a, b) if shift else apply_indent_block(buf, a, b)
+        if got is None:
+            return
+        new_t, s0, s1 = got
+        self._compose_apply_toolbar_text_mutation(new_t, s0, s1)
+        try:
+            await self.editor.focus()
+        except BaseException:
+            pass
+
+    def _compose_caret_at_line_start(self, buf: str, caret: int) -> bool:
+        line_start = buf.rfind("\n", 0, caret) + 1
+        return not buf[line_start:caret].strip()
+
+    def _compose_insert_at_caret(self, text: str) -> None:
+        raw_buf = self.editor.value or ""
+        sel = self.editor.selection
+        caret = int(sel.start) if sel is not None else len(raw_buf)
+        caret = max(0, min(caret, len(raw_buf)))
+        updated = raw_buf[:caret] + text + raw_buf[caret:]
+        c = caret + len(text)
+        self._editor_pending_caret = c
+        self.editor.value = updated
+        self.editor.selection = ft.TextSelection(c, c)
+        self._editor_prev_for_list_continue = normalize_buffer_newlines(updated)
+        if _ctrl_on_page(self.editor):
+            self.editor.update()
+        self._after_editor_programmatic_change()
+
     def _kick_debounced_compare_diff_if_main_editor_backs_buffers(self) -> None:
         """Review baseline and History newer=current draft both read from ``editor``; keep analyse in sync."""
         if self._main_tab_index == TAB_FUTURE or (
@@ -598,7 +725,10 @@ class MarkdownStudioCompose:
 
     def _after_editor_programmatic_change(self) -> None:
         """Mirror the bookkeeping _on_editor_change does after a programmatic mutation (cut/paste)."""
-        self._refresh_title_bar()
+        self._editor_prev_for_list_continue = normalize_buffer_newlines(
+            self.editor.value or ""
+        )
+        self._refresh_dirty_state_ui()
         if self._main_tab_index == TAB_PRESENT:
             self._margin_gen += 1
             gen = self._margin_gen
@@ -735,7 +865,7 @@ class MarkdownStudioCompose:
             on_menu_cancel=self._compose_clear_margin_menu_snap,
         )
 
-    def _refresh_compose_tab_label(self) -> None:
+    def _refresh_compose_tab_label(self, *, apply_preview_mode: bool = True) -> None:
         if self._compose_tab_inline_rename_active:
             return
         if not self.current_path:
@@ -744,40 +874,91 @@ class MarkdownStudioCompose:
             self._compose_tab_filename_text.style = None
             self._compose_tab_filename_hit.mouse_cursor = ft.MouseCursor.BASIC
             self._compose_tab_filename_hit.tooltip = "Open a note first"
+            self._compose_current_file_menu_btn.visible = False
         else:
-            self._compose_tab_filename_text.value = self.current_path.stem
+            suffix = (
+                self._document_ui_suffix()
+                if hasattr(self, "_document_ui_suffix")
+                else self.current_path.suffix
+            )
+            self._compose_tab_filename_text.value = f"{self.current_path.stem}{suffix}"
             self._compose_tab_filename_text.color = config.ON_SURFACE
             self._compose_tab_filename_text.style = None
             self._compose_tab_filename_hit.mouse_cursor = ft.MouseCursor.CLICK
             self._compose_tab_filename_hit.tooltip = "Click to rename"
+            self._compose_current_file_menu_btn.visible = (
+                self.current_path.suffix.lower() == ".md"
+            )
         if _ctrl_on_page(self._compose_tab_filename_text):
             self._compose_tab_filename_text.update()
         if _ctrl_on_page(self._compose_tab_filename_hit):
             self._compose_tab_filename_hit.update()
-        self._apply_focus_preview_mode()
+        if _ctrl_on_page(self._compose_current_file_menu_btn):
+            self._compose_current_file_menu_btn.update()
+        if apply_preview_mode:
+            self._apply_focus_preview_mode()
+
+    def _compose_markdown_preview_available(self) -> bool:
+        """Preview toggle applies to editable markdown notes, not plan-PDF view."""
+        cur = self.current_path
+        if cur is None or cur.suffix.lower() != ".md":
+            return False
+        if bool(getattr(self, "_compose_plan_viewer_active", lambda: False)()):
+            return False
+        if hasattr(self, "_document_pdf_profile"):
+            if (self._document_pdf_profile() or "").strip() == "plan":
+                return False
+        return True
 
     def _toggle_focus_preview_mode(self) -> None:
         if self._main_tab_index != TAB_PRESENT:
+            return
+        if not self._compose_markdown_preview_available():
             return
         self._focus_view_mode = (
             "preview" if self._focus_view_mode == "edit" else "edit"
         )
         self._apply_focus_preview_mode()
 
+    def _sync_compose_preview_md(self) -> None:
+        if getattr(self, "_focus_view_mode", "edit") != "preview":
+            return
+        self._compose_preview_md.value = markdown_preview_with_task_checkboxes(
+            self.editor.value or ""
+        )
+        if _ctrl_on_page(self._compose_preview_md):
+            self._compose_preview_md.update()
+
+    def _kick_debounced_compose_preview_sync(self) -> None:
+        if self._main_tab_index != TAB_PRESENT:
+            return
+        if getattr(self, "_focus_view_mode", "edit") != "preview":
+            return
+        self._compose_preview_gen += 1
+        gen = self._compose_preview_gen
+        self.page.run_task(self._debounced_sync_compose_preview_md, gen)
+
+    async def _debounced_sync_compose_preview_md(self, gen: int) -> None:
+        await asyncio.sleep(0.15)
+        if gen != self._compose_preview_gen:
+            return
+        if getattr(self, "_focus_view_mode", "edit") != "preview":
+            return
+        self._sync_compose_preview_md()
+
     def _apply_focus_preview_mode(self) -> None:
         on_focus = self._main_tab_index == TAB_PRESENT
-        has_file = self.current_path is not None
+        markdown_note = self._compose_markdown_preview_available()
         # Force back to edit when not on Focus so the next entry starts clean.
-        if not on_focus:
+        if not on_focus or not markdown_note:
             self._focus_view_mode = "edit"
-        in_preview = self._focus_view_mode == "preview"
-        self._focus_preview_toggle_btn.visible = on_focus and has_file
+        in_preview = self._focus_view_mode == "preview" and markdown_note
+        self._focus_preview_toggle_btn.visible = on_focus and markdown_note
         if in_preview:
-            self._compose_preview_md.value = markdown_preview_with_task_checkboxes(
-                self.editor.value or ""
-            )
-        self._compose_editor_shell_wrapped.visible = not in_preview
-        self._compose_preview_host.visible = in_preview
+            self._sync_compose_preview_md()
+            self._compose_writing_slot.content = self._compose_preview_host
+        else:
+            self._compose_writing_slot.content = self._compose_editor_shell_wrapped
         self._focus_preview_toggle_btn.icon = (
             ft.Icons.MODE_EDIT_OUTLINE if in_preview else ft.Icons.VISIBILITY_OUTLINED
         )
@@ -786,12 +967,15 @@ class MarkdownStudioCompose:
         )
         for c in (
             self._focus_preview_toggle_btn,
-            self._compose_editor_shell_wrapped,
-            self._compose_preview_host,
+            self._compose_writing_slot,
             self._compose_preview_md,
         ):
             if _ctrl_on_page(c):
                 c.update()
+        if hasattr(self, "_apply_compose_plan_editor_layout"):
+            self._apply_compose_plan_editor_layout()
+        if hasattr(self, "_apply_compose_plan_tab_scroll"):
+            self._apply_compose_plan_tab_scroll()
         self._compose_sync_selection_toolbar_visibility()
 
     def _compose_tab_exit_rename_mode(self) -> None:
@@ -823,8 +1007,14 @@ class MarkdownStudioCompose:
                 return
             self._compose_tab_inline_rename_active = True
             self._compose_tab_filename_field.value = self.current_path.stem
-            self._compose_tab_filename_suffix_text.value = self.current_path.suffix
-            self._compose_tab_filename_suffix_text.visible = bool(self.current_path.suffix)
+            self._compose_tab_filename_suffix_text.value = (
+                self._document_ui_suffix()
+                if hasattr(self, "_document_ui_suffix")
+                else self.current_path.suffix
+            )
+            self._compose_tab_filename_suffix_text.visible = bool(
+                self._compose_tab_filename_suffix_text.value
+            )
             self._compose_tab_filename_hit.visible = False
             self._compose_tab_filename_field.visible = True
             if _ctrl_on_page(self._compose_tab_filename_field):
@@ -886,7 +1076,7 @@ class MarkdownStudioCompose:
                 return
             try:
                 with session_scope() as s:
-                    st = version_storage.update_document_path_after_rename(s, old_r, new_r)
+                    st = content_repo.update_document_path_after_rename(s, old_r, new_r)
                 if st == "collision":
                     try:
                         new_path.rename(old)
@@ -916,76 +1106,142 @@ class MarkdownStudioCompose:
     def _on_compose_reading_wrap_size(self, e: ft.LayoutSizeChangeEvent) -> None:
         """Size reading card width from available compose column width."""
         avail = max(200.0, float(e.width))
-        content_w = int(
-            min(float(READING_MAX_PX), max(240.0, avail * COMPOSE_READING_WIDTH_FRAC))
-        )
-        reading_w = content_w
-        cur = int(self._compose_reading_card.width or 0)
-        if cur == reading_w:
-            return
-        self._compose_reading_card.width = reading_w
-        if _ctrl_on_page(self._compose_reading_card):
-            self._compose_reading_card.update()
-        self._margin_gen += 1
-        self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)
+        if hasattr(self, "_apply_compose_reading_card_width"):
+            self._apply_compose_reading_card_width(avail)
+        if hasattr(self, "_sync_compose_plan_viewport_width"):
+            self._sync_compose_plan_viewport_width(avail)
+        else:
+            reading_w = int(
+                min(float(READING_MAX_PX), max(240.0, avail * COMPOSE_READING_WIDTH_FRAC))
+            )
+            cur = int(self._compose_reading_card.width or 0)
+            if cur != reading_w:
+                self._compose_reading_card.width = reading_w
+                if _ctrl_on_page(self._compose_reading_card):
+                    self._compose_reading_card.update()
+        if not getattr(self, "_compose_plan_viewer_active", lambda: False)():
+            self._margin_gen += 1
+            self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)
+
+    def _compose_list_continue_selection(
+        self, old: str, new: str, raw_new: str, sel: ft.TextSelection | None
+    ) -> tuple[int, int]:
+        inferred = infer_selection_after_single_enter(old, new)
+        if sel is None:
+            return inferred
+        ss = map_index_after_normalize_newlines(raw_new, int(sel.start))
+        se = map_index_after_normalize_newlines(raw_new, int(sel.end))
+        if ss != se:
+            return ss, se
+        if ss == len(new) and inferred[0] < len(new):
+            return inferred
+        if inferred[0] != len(new) and abs(ss - inferred[0]) > 2:
+            return inferred
+        return ss, se
+
+    def _apply_list_continue_local(
+        self,
+        raw_buf: str,
+        delete_start: int,
+        delete_end: int,
+        insert_text: str,
+        caret_norm: int,
+    ) -> None:
+        raw_lo = map_norm_index_to_raw(raw_buf, delete_start)
+        raw_hi = map_norm_index_to_raw(raw_buf, delete_end)
+        updated = raw_buf[:raw_lo] + insert_text + raw_buf[raw_hi:]
+        raw_caret = map_norm_index_to_raw(updated, caret_norm)
+        self._editor_pending_caret = raw_caret
+        self._editor_list_continue_applying = True
+        try:
+            self.editor.value = updated
+            self.editor.selection = ft.TextSelection(raw_caret, raw_caret)
+            self._editor_prev_for_list_continue = normalize_buffer_newlines(updated)
+            if _ctrl_on_page(self.editor):
+                self.editor.update()
+        finally:
+            self._editor_list_continue_applying = False
+
+    def _apply_list_continue_replace(self, merged: str, caret: int) -> None:
+        c = max(0, min(int(caret), len(merged)))
+        self._editor_pending_caret = c
+        self._editor_list_continue_applying = True
+        try:
+            self.editor.value = merged
+            self.editor.selection = ft.TextSelection(c, c)
+            self._editor_prev_for_list_continue = normalize_buffer_newlines(merged)
+            if _ctrl_on_page(self.editor):
+                self.editor.update()
+        finally:
+            self._editor_list_continue_applying = False
+
+    async def _deferred_after_list_continue(self) -> None:
+        await asyncio.sleep(0)
+        self._after_editor_programmatic_change()
+        if getattr(self, "_left_sidebar_tab", 0) == 1 and hasattr(
+            self, "_kick_debounced_content_tree"
+        ):
+            self._kick_debounced_content_tree()
 
     def _on_editor_change(self, _e: ft.ControlEvent) -> None:
         if self._editor_list_continue_applying:
-            self._editor_prev_for_list_continue = self.editor.value or ""
+            self._editor_prev_for_list_continue = normalize_buffer_newlines(
+                self.editor.value or ""
+            )
             return
 
         if not getattr(self, "_compose_toolbar_applying", False):
             self._compose_sel_span = None
+            self._compose_toolbar_snap_range = None
 
         if self._main_tab_index == TAB_PRESENT and self._focus_view_mode == "edit":
-            old = self._editor_prev_for_list_continue
-            new = self.editor.value or ""
+            raw_old = self._editor_prev_for_list_continue
+            raw_new = self.editor.value or ""
+            old = normalize_buffer_newlines(raw_old)
+            new = normalize_buffer_newlines(raw_new)
             sel = self.editor.selection
-            # Do not require collapsed selection: merge_if_list_continuation_after_enter
-            # resolves the newline from the diff when unambiguous (see list_continuation).
-            if sel is not None:
-                got = merge_if_list_continuation_after_enter(
-                    old, new, int(sel.start), int(sel.end)
-                )
-                if got is not None:
-                    mval, mcaret = got
-                    self._editor_list_continue_applying = True
-                    try:
-                        self.editor.value = mval
-                        self.editor.selection = ft.TextSelection(mcaret, mcaret)
-                        if _ctrl_on_page(self.editor):
-                            self.editor.update()
-                    finally:
-                        self._editor_list_continue_applying = False
+            ss, se = self._compose_list_continue_selection(old, new, raw_new, sel)
+            plan = plan_list_continuation_after_enter(old, new, ss, se)
+            if plan is not None:
+                if plan.kind == "replace":
+                    self._apply_list_continue_replace(plan.merged, plan.caret)
+                else:
+                    self._apply_list_continue_local(
+                        raw_new,
+                        plan.delete_start,
+                        plan.delete_end,
+                        plan.insert_text,
+                        plan.caret,
+                    )
+                self.page.run_task(self._deferred_after_list_continue)
+                return
 
-        self._editor_prev_for_list_continue = self.editor.value or ""
+        self._editor_prev_for_list_continue = normalize_buffer_newlines(
+            self.editor.value or ""
+        )
 
-        self._refresh_title_bar()
+        self._refresh_dirty_state_ui()
         if self._main_tab_index == TAB_PRESENT:
+            if self._focus_view_mode == "preview":
+                self._kick_debounced_compose_preview_sync()
             self._margin_gen += 1
             gen = self._margin_gen
             self.page.run_task(self._debounced_compose_rebuild, gen)
-        if (
-            self._main_tab_index == TAB_HISTORY
-            and self._compare_candidate_source == "docx_original"
-            and self._compare_newer_version_id is None
-        ):
-            self._refresh_compare_diff_immediate()
         self._kick_debounced_compare_diff_if_main_editor_backs_buffers()
-        if getattr(self, "_left_sidebar_tab", 0) == 1 and hasattr(self, "_rebuild_content_tree"):
-            self._rebuild_content_tree()
+        if getattr(self, "_left_sidebar_tab", 0) == 1 and hasattr(self, "_kick_debounced_content_tree"):
+            self._kick_debounced_content_tree()
         if not self.current_path:
             return
         self._kick_spell_cache_from_compose_if_needed()
         self._kick_debounced_autosave()
 
     async def _debounced_compose_rebuild(self, gen: int) -> None:
+        """Debounced compose hook (margin sparkle / layout). Plan PDF render is not repeated here."""
         await asyncio.sleep(0.05)
         if gen != self._margin_gen:
             return
         if self._main_tab_index != TAB_PRESENT:
             return
-        self._refresh_compose_plan_surface()
 
     async def _disk_autosave_after_idle(self, gen: int) -> None:
         await asyncio.sleep(AUTOSAVE_DISK_IDLE_SEC)
@@ -1005,6 +1261,17 @@ class MarkdownStudioCompose:
 
     def _on_selection_change(self, e: ft.TextSelectionChangeEvent) -> None:
         sel = e.selection
+        pending = getattr(self, "_editor_pending_caret", None)
+        if pending is not None:
+            buf = self.editor.value or ""
+            pc = max(0, min(int(pending), len(buf)))
+            cur = int(sel.start) if sel is not None else -1
+            if cur != pc:
+                self.editor.selection = ft.TextSelection(pc, pc)
+                if _ctrl_on_page(self.editor):
+                    self.editor.update()
+                return
+            self._editor_pending_caret = None
         buf = self.editor.value or ""
         if sel is not None and not sel.is_collapsed:
             t = (e.selected_text or "").strip()
@@ -1144,144 +1411,15 @@ class MarkdownStudioCompose:
         if presence_host is not None and _ctrl_on_page(presence_host):
             presence_host.update()
 
-    async def _compose_restore_editor_selection(self, a: int, b: int) -> None:
-        await asyncio.sleep(0.06)
-        buf = self.editor.value or ""
-        if a < 0 or b > len(buf) or a > b:
-            return
-        await self.editor.focus()
-        self.editor.selection = ft.TextSelection(a, b)
-        if _ctrl_on_page(self.editor):
-            self.editor.update()
-
-    async def run_margin_action(
+    def _margin_action_footer_controls(
         self,
-        action_id: str,
         idx: int,
-        *,
-        text_override: str | None = None,
-        replace_span: tuple[int, int] | None = None,
+        reply: ft.Text,
+        footer: ft.Row,
+        action_id: str,
+        act: prompts.MarginAction,
+        replace_span: tuple[int, int] | None,
     ) -> None:
-        act = prompts.get_margin_action(action_id)
-        if act is None:
-            return
-        src = text_override if text_override is not None else self._paragraph_for_index(idx)
-        para = src.strip()
-        if not para:
-            self._snack("This paragraph is empty.")
-            return
-
-        self._set_ki_topic(_ki_topic_index_for_prompt_topic(act.topic))
-
-        if replace_span is not None:
-            self._append_chat_line("user", f"Selection · {act.label}", quote=para)
-        else:
-            self._append_chat_line(
-                "user", f"Paragraph {idx + 1}: {act.label}", quote=para
-            )
-
-        reply = ft.Text("", size=12, selectable=True, color=config.ON_SURFACE)
-        footer = ft.Row(spacing=8, visible=False)
-        bubble = ft.Column([reply, footer], tight=True, spacing=8)
-        wrap = ft.Container(
-            content=bubble,
-            padding=ft.padding.symmetric(horizontal=10, vertical=8),
-            bgcolor=ft.Colors.with_opacity(0.14, config.OUTLINE),
-            border_radius=10,
-            alignment=ft.Alignment.CENTER_LEFT,
-        )
-        self._chat_history.controls.append(wrap)
-        if _ctrl_on_page(self._chat_history):
-            self._chat_history.update()
-
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": act.system_prompt},
-            {"role": "user", "content": act.user_template.format(text=para)},
-        ]
-        acc = ""
-        backend = self._make_llm_backend()
-        cm = self.chat_model_for_requests()
-        try:
-            stream = await backend.chat(model=cm, messages=messages, stream=True)
-            async for part in stream:
-                acc += chat_stream_delta(part)
-                live = _strip_change_topic_preamble(acc) if act.topic == TOPIC_CHANGE else acc
-                reply.value = live.strip() or "…"
-                if _ctrl_on_page(reply):
-                    reply.update()
-        except BaseException:
-            try:
-                resp = await backend.chat(model=cm, messages=messages, stream=False)
-                acc = chat_response_text(resp) or ""
-            except BaseException as ex_final:
-                if isinstance(ex_final, httpx.HTTPStatusError):
-                    detail = remote_http_error_message(ex_final)
-                elif isinstance(ex_final, ValueError):
-                    detail = str(ex_final)
-                else:
-                    detail = ollama_error_message(ex_final)
-                reply.value = f"(Error) {detail}"
-                if _ctrl_on_page(reply):
-                    reply.update()
-                if _ctrl_on_page(self._chat_history):
-                    self._chat_history.update()
-                return
-
-        acc = (acc or "").strip()
-        if act.topic == TOPIC_CHANGE:
-            acc = _strip_change_topic_preamble(acc)
-        if not acc:
-            reply.value = "(Empty reply from model.)"
-            if _ctrl_on_page(reply):
-                reply.update()
-            footer.controls = [
-                ft.IconButton(
-                    ft.Icons.CLOSE_ROUNDED,
-                    icon_size=ACTION_RAIL_ICON_SIZE,
-                    icon_color=config.ON_SURFACE_VARIANT,
-                    tooltip="Dismiss",
-                    style=action_rail_icon_button_style(),
-                    on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
-                ),
-            ]
-            footer.visible = True
-            if _ctrl_on_page(footer):
-                footer.update()
-            return
-
-        reply.value = acc
-        if _ctrl_on_page(reply):
-            reply.update()
-
-        if act.topic == TOPIC_CHANGE and self.current_path:
-            buf = self.editor.value or ""
-            if replace_span is not None:
-                a, b = replace_span
-                cand_buf = buf[:a] + acc + buf[b:]
-                loc_label = "selection"
-            else:
-                cand_buf = replace_paragraph_at_index(buf, idx, acc)
-                loc_label = f"paragraph {idx + 1}"
-            try:
-                with session_scope() as s:
-                    new_vid = version_storage.persist_version_snapshot(
-                        s,
-                        self.current_path.resolve(),
-                        cand_buf,
-                        "ai_proposal",
-                        display_label=f"{act.label} - {loc_label}",
-                    )
-                if new_vid is not None:
-                    self._ai_proposal_action_ids[new_vid] = action_id
-                    self._latest_ai_proposal_vid = new_vid
-                    self._refresh_compare_tab_candidate_ui()
-                    if self._main_tab_index == TAB_FUTURE:
-                        self._select_proposal_as_review_candidate(new_vid)
-                        self._rebuild_future_paragraph_ui()
-                        self._refresh_compare_diff_immediate()
-            except BaseException:
-                pass
-
         if act.topic == TOPIC_CHANGE:
             if replace_span is not None:
                 apply_snippet = (self.editor.value or "")[replace_span[0] : replace_span[1]]
@@ -1289,7 +1427,7 @@ class MarkdownStudioCompose:
                     ft.Icons.CHECK_ROUNDED,
                     icon_size=ACTION_RAIL_ICON_SIZE,
                     icon_color=config.PRIMARY_COLOR,
-                    tooltip="Apply: replace the selected range with this reply",
+                    tooltip="Accept: replace the selected range with this reply",
                     style=action_rail_icon_button_style(),
                     on_click=lambda _e, r=reply, f=footer, aid=action_id, sp=replace_span, sn=apply_snippet: self.page.run_task(
                         self._apply_margin_reply_to_selection_async, r, f, aid, sp, sn
@@ -1300,7 +1438,7 @@ class MarkdownStudioCompose:
                     ft.Icons.CHECK_ROUNDED,
                     icon_size=ACTION_RAIL_ICON_SIZE,
                     icon_color=config.PRIMARY_COLOR,
-                    tooltip="Apply: replace this paragraph with the reply",
+                    tooltip="Accept: replace this paragraph with the reply",
                     style=action_rail_icon_button_style(),
                     on_click=lambda _e, i=idx, r=reply, f=footer, aid=action_id: self.page.run_task(
                         self._apply_margin_reply_to_paragraph_async, i, r, f, aid
@@ -1325,7 +1463,6 @@ class MarkdownStudioCompose:
                 on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
             )
             footer.controls = [apply_btn, review_btn, dismiss_btn]
-            footer.visible = True
         else:
             footer.controls = [
                 ft.IconButton(
@@ -1337,6 +1474,289 @@ class MarkdownStudioCompose:
                     on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
                 ),
             ]
-            footer.visible = True
-        if _ctrl_on_page(footer):
-            footer.update()
+        footer.visible = True
+
+    async def run_margin_action(
+        self,
+        action_id: str,
+        idx: int,
+        *,
+        text_override: str | None = None,
+        replace_span: tuple[int, int] | None = None,
+    ) -> None:
+        act = prompts.get_margin_action(action_id)
+        if act is None:
+            return
+        if text_override is not None:
+            src = text_override
+        elif act.topic == TOPIC_DISCUSS:
+            src = self._discuss_llm_context_text(max_chars=8000)
+        else:
+            src = self._paragraph_for_index(idx)
+        para = src.strip()
+        if not para:
+            self._snack(
+                "Document is empty." if act.topic == TOPIC_DISCUSS else "This paragraph is empty."
+            )
+            return
+
+        self._set_ki_topic(_ki_topic_index_for_prompt_topic(act.topic))
+
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": act.system_prompt},
+            {"role": "user", "content": act.user_template.format(text=para)},
+        ]
+        shield_on = privacy_shield_applies_to_tier(self.ki_tier)
+        reply = ft.Text("", size=12, selectable=True, color=config.ON_SURFACE)
+        footer = ft.Row(spacing=8, visible=False)
+
+        if shield_on:
+            llm_gen = self.begin_sidebar_llm()
+            try:
+                try:
+                    api_messages, rmap = await redact_messages_for_tier(messages, self.ki_tier)
+                except ValueError as ex:
+                    self._snack(str(ex))
+                    return
+                redacted_input = last_user_message_content(api_messages)
+                backend = self._make_llm_backend()
+                cm = self.chat_model_for_requests()
+                try:
+                    resp = await backend.chat(
+                        model=cm,
+                        messages=api_messages,
+                        stream=False,
+                        skip_privacy_redaction=True,
+                    )
+                    if self.is_sidebar_llm_cancelled():
+                        return
+                    acc = chat_response_text(resp) or ""
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as ex_final:
+                    if isinstance(ex_final, httpx.HTTPStatusError):
+                        detail = remote_http_error_message(ex_final)
+                    elif isinstance(ex_final, ValueError):
+                        detail = str(ex_final)
+                    else:
+                        detail = ollama_error_message(ex_final)
+                    self._append_chat_line("assistant", f"(Error) {detail}")
+                    return
+                if self.is_sidebar_llm_cancelled():
+                    return
+                acc = (acc or "").strip()
+                if act.topic == TOPIC_CHANGE:
+                    acc = _strip_change_topic_preamble(acc)
+                if rmap and config.PRIVACY_SHIELD_REINJECT:
+                    acc = reinject_text(acc, rmap)
+                if not acc:
+                    self._snack("Reply is empty.")
+                    return
+                reply.value = acc
+                if act.topic == TOPIC_CHANGE and self.current_path:
+                    buf = self.editor.value or ""
+                    if replace_span is not None:
+                        a, b = replace_span
+                        cand_buf = buf[:a] + acc + buf[b:]
+                        loc_label = "selection"
+                    else:
+                        cand_buf = replace_paragraph_at_index(buf, idx, acc)
+                        loc_label = f"paragraph {idx + 1}"
+                    try:
+                        with session_scope() as s:
+                            new_vid = content_repo.persist_version_snapshot(
+                                s,
+                                self.current_path.resolve(),
+                                cand_buf,
+                                "ai_proposal",
+                                display_label=f"{act.label} - {loc_label}",
+                            )
+                        if new_vid is not None:
+                            self._ai_proposal_action_ids[new_vid] = action_id
+                            self._latest_ai_proposal_vid = new_vid
+                            self._refresh_compare_tab_candidate_ui()
+                            if self._main_tab_index == TAB_FUTURE:
+                                self._select_proposal_as_review_candidate(new_vid)
+                                self._rebuild_future_paragraph_ui()
+                                self._refresh_compare_diff_immediate()
+                    except BaseException:
+                        pass
+                self._margin_action_footer_controls(
+                    idx, reply, footer, action_id, act, replace_span
+                )
+                bubble = build_privacy_turn_bubble(
+                    input_text=para,
+                    redacted_text=redacted_input,
+                    output_text=acc,
+                    footer=footer,
+                )
+                append_privacy_turn_to_history(self._chat_history, bubble)
+            except asyncio.CancelledError:
+                raise
+            finally:
+                self.end_sidebar_llm(llm_gen)
+            return
+
+        if replace_span is not None:
+            self._append_chat_line("user", f"Selection · {act.label}", quote=para)
+        elif act.topic == TOPIC_DISCUSS:
+            self._append_chat_line("user", f"Document · {act.label}", quote=para)
+        else:
+            self._append_chat_line(
+                "user", f"Paragraph {idx + 1}: {act.label}", quote=para
+            )
+
+        bubble = ft.Column([reply, footer], tight=True, spacing=8)
+        wrap = ft.Container(
+            content=bubble,
+            padding=ft.padding.symmetric(horizontal=10, vertical=8),
+            bgcolor=ft.Colors.with_opacity(0.14, config.OUTLINE),
+            border_radius=10,
+            alignment=ft.Alignment.CENTER_LEFT,
+        )
+        self._chat_history.controls.append(wrap)
+        if _ctrl_on_page(self._chat_history):
+            self._chat_history.update()
+
+        acc = ""
+        backend = self._make_llm_backend()
+        cm = self.chat_model_for_requests()
+        llm_gen = self.begin_sidebar_llm()
+        try:
+            try:
+                stream = await backend.chat(model=cm, messages=messages, stream=True)
+                async for part in stream:
+                    if self.is_sidebar_llm_cancelled():
+                        break
+                    acc += chat_stream_delta(part)
+                    live = _strip_change_topic_preamble(acc) if act.topic == TOPIC_CHANGE else acc
+                    reply.value = live.strip() or "…"
+                    if _ctrl_on_page(reply):
+                        reply.update()
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                if self.is_sidebar_llm_cancelled():
+                    live = _strip_change_topic_preamble(acc) if act.topic == TOPIC_CHANGE else acc
+                    reply.value = self.sidebar_llm_display_text(live, empty_fallback="(Stopped)")
+                    if _ctrl_on_page(reply):
+                        reply.update()
+                    footer.controls = [
+                        ft.IconButton(
+                            ft.Icons.CLOSE_ROUNDED,
+                            icon_size=ACTION_RAIL_ICON_SIZE,
+                            icon_color=config.ON_SURFACE_VARIANT,
+                            tooltip="Dismiss",
+                            style=action_rail_icon_button_style(),
+                            on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
+                        ),
+                    ]
+                    footer.visible = True
+                    if _ctrl_on_page(footer):
+                        footer.update()
+                    return
+                try:
+                    resp = await backend.chat(model=cm, messages=messages, stream=False)
+                    if self.is_sidebar_llm_cancelled():
+                        return
+                    acc = chat_response_text(resp) or ""
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as ex_final:
+                    if isinstance(ex_final, httpx.HTTPStatusError):
+                        detail = remote_http_error_message(ex_final)
+                    elif isinstance(ex_final, ValueError):
+                        detail = str(ex_final)
+                    else:
+                        detail = ollama_error_message(ex_final)
+                    reply.value = f"(Error) {detail}"
+                    if _ctrl_on_page(reply):
+                        reply.update()
+                    if _ctrl_on_page(self._chat_history):
+                        self._chat_history.update()
+                    return
+
+            if self.is_sidebar_llm_cancelled():
+                live = _strip_change_topic_preamble(acc) if act.topic == TOPIC_CHANGE else acc
+                reply.value = self.sidebar_llm_display_text(live, empty_fallback="(Stopped)")
+                if _ctrl_on_page(reply):
+                    reply.update()
+                footer.controls = [
+                    ft.IconButton(
+                        ft.Icons.CLOSE_ROUNDED,
+                        icon_size=ACTION_RAIL_ICON_SIZE,
+                        icon_color=config.ON_SURFACE_VARIANT,
+                        tooltip="Dismiss",
+                        style=action_rail_icon_button_style(),
+                        on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
+                    ),
+                ]
+                footer.visible = True
+                if _ctrl_on_page(footer):
+                    footer.update()
+                return
+
+            acc = (acc or "").strip()
+            if act.topic == TOPIC_CHANGE:
+                acc = _strip_change_topic_preamble(acc)
+            if not acc:
+                reply.value = "(Empty reply from model.)"
+                if _ctrl_on_page(reply):
+                    reply.update()
+                footer.controls = [
+                    ft.IconButton(
+                        ft.Icons.CLOSE_ROUNDED,
+                        icon_size=ACTION_RAIL_ICON_SIZE,
+                        icon_color=config.ON_SURFACE_VARIANT,
+                        tooltip="Dismiss",
+                        style=action_rail_icon_button_style(),
+                        on_click=lambda _e, f=footer: self._hide_prompt_footer(f),
+                    ),
+                ]
+                footer.visible = True
+                if _ctrl_on_page(footer):
+                    footer.update()
+                return
+
+            reply.value = acc
+            if _ctrl_on_page(reply):
+                reply.update()
+
+            if act.topic == TOPIC_CHANGE and self.current_path:
+                buf = self.editor.value or ""
+                if replace_span is not None:
+                    a, b = replace_span
+                    cand_buf = buf[:a] + acc + buf[b:]
+                    loc_label = "selection"
+                else:
+                    cand_buf = replace_paragraph_at_index(buf, idx, acc)
+                    loc_label = f"paragraph {idx + 1}"
+                try:
+                    with session_scope() as s:
+                        new_vid = content_repo.persist_version_snapshot(
+                            s,
+                            self.current_path.resolve(),
+                            cand_buf,
+                            "ai_proposal",
+                            display_label=f"{act.label} - {loc_label}",
+                        )
+                    if new_vid is not None:
+                        self._ai_proposal_action_ids[new_vid] = action_id
+                        self._latest_ai_proposal_vid = new_vid
+                        self._refresh_compare_tab_candidate_ui()
+                        if self._main_tab_index == TAB_FUTURE:
+                            self._select_proposal_as_review_candidate(new_vid)
+                            self._rebuild_future_paragraph_ui()
+                            self._refresh_compare_diff_immediate()
+                except BaseException:
+                    pass
+
+            self._margin_action_footer_controls(
+                idx, reply, footer, action_id, act, replace_span
+            )
+            if _ctrl_on_page(footer):
+                footer.update()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self.end_sidebar_llm(llm_gen)

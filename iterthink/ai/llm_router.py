@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+from iterthink.ai.privacy_shield import redact_messages, reinject_response
+from iterthink.db.session import session_scope
+from iterthink.persistence import token_usage
+from iterthink.token_cost_settings import remote_tier_applies
 
 # Encrypted JSON keys (must match studio.settings_ui / studio defaults)
 SECRET_COMPANY_OPENAI = "company_openai"
@@ -18,6 +24,84 @@ SECRET_CLOUD_GOOGLE = "cloud_google"
 DEFAULT_COMPANY_OPENAI_BASE = "https://api.openai.com/v1"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
+
+UsageRecordedCb = Callable[[], None]
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    def has_tokens(self) -> bool:
+        return self.prompt_tokens > 0 or self.completion_tokens > 0
+
+
+def _openai_parse_usage(data: dict[str, Any]) -> TokenUsage | None:
+    u = data.get("usage")
+    if not isinstance(u, dict):
+        return None
+    pt = int(u.get("prompt_tokens") or 0)
+    ct = int(u.get("completion_tokens") or 0)
+    if pt == 0 and ct == 0:
+        return None
+    return TokenUsage(prompt_tokens=pt, completion_tokens=ct)
+
+
+def _anthropic_parse_usage(data: dict[str, Any]) -> TokenUsage | None:
+    u = data.get("usage")
+    if not isinstance(u, dict):
+        return None
+    pt = int(u.get("input_tokens") or 0)
+    ct = int(u.get("output_tokens") or 0)
+    if pt == 0 and ct == 0:
+        return None
+    return TokenUsage(prompt_tokens=pt, completion_tokens=ct)
+
+
+def _gemini_parse_usage(data: dict[str, Any]) -> TokenUsage | None:
+    u = data.get("usageMetadata")
+    if not isinstance(u, dict):
+        return None
+    pt = int(u.get("promptTokenCount") or 0)
+    ct = int(u.get("candidatesTokenCount") or 0)
+    if pt == 0 and ct == 0:
+        total = int(u.get("totalTokenCount") or 0)
+        if total > 0:
+            return TokenUsage(prompt_tokens=total, completion_tokens=0)
+        return None
+    return TokenUsage(prompt_tokens=pt, completion_tokens=ct)
+
+
+def _store_usage(sink: list[TokenUsage] | None, usage: TokenUsage | None) -> None:
+    if sink is not None and usage is not None and usage.has_tokens():
+        sink[:] = [usage]
+
+
+class _StreamUsageWrapper:
+    """Wrap a streaming response; record token usage when the stream ends."""
+
+    def __init__(
+        self,
+        inner: AsyncIterator[dict[str, Any]],
+        *,
+        usage_sink: list[TokenUsage],
+        on_complete: Callable[[TokenUsage | None], None],
+    ) -> None:
+        self._inner = inner
+        self._usage_sink = usage_sink
+        self._on_complete = on_complete
+
+    def __aiter__(self) -> _StreamUsageWrapper:
+        return self
+
+    async def __anext__(self) -> dict[str, Any]:
+        try:
+            return await self._inner.__anext__()
+        except StopAsyncIteration:
+            usage = self._usage_sink[0] if self._usage_sink else None
+            self._on_complete(usage)
+            raise
 
 
 def normalize_openai_base_url(url: str) -> str:
@@ -106,7 +190,7 @@ async def _openai_nonstream(
     messages: list[dict[str, str]],
     json_mode: bool,
     strict_response_format: bool = False,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], TokenUsage | None]:
     msgs = _openai_messages_json_hint(messages) if json_mode else messages
     payload: dict[str, Any] = {"model": model, "messages": msgs}
     if json_mode and strict_response_format:
@@ -124,7 +208,7 @@ async def _openai_nonstream(
         text = (data["choices"][0]["message"].get("content")) or ""
     except (KeyError, IndexError, TypeError):
         text = ""
-    return {"message": {"content": str(text)}}
+    return {"message": {"content": str(text)}}, _openai_parse_usage(data)
 
 
 async def _openai_stream_iter(
@@ -136,9 +220,15 @@ async def _openai_stream_iter(
     messages: list[dict[str, str]],
     json_mode: bool,
     strict_response_format: bool = False,
+    usage_sink: list[TokenUsage] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     msgs = _openai_messages_json_hint(messages) if json_mode else messages
-    payload: dict[str, Any] = {"model": model, "messages": msgs, "stream": True}
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": msgs,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
     if json_mode and strict_response_format:
         payload["response_format"] = {"type": "json_object"}
     async with client.stream(
@@ -159,6 +249,7 @@ async def _openai_stream_iter(
                 data = json.loads(chunk)
             except json.JSONDecodeError:
                 continue
+            _store_usage(usage_sink, _openai_parse_usage(data))
             try:
                 delta = data["choices"][0].get("delta") or {}
                 piece = delta.get("content") or ""
@@ -176,6 +267,7 @@ async def _openai_stream_full(
     messages: list[dict[str, str]],
     json_mode: bool,
     strict_response_format: bool = False,
+    usage_sink: list[TokenUsage] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     async with httpx.AsyncClient() as client:
         async for part in _openai_stream_iter(
@@ -186,6 +278,7 @@ async def _openai_stream_full(
             messages=messages,
             json_mode=json_mode,
             strict_response_format=strict_response_format,
+            usage_sink=usage_sink,
         ):
             yield part
 
@@ -197,7 +290,7 @@ async def _anthropic_nonstream(
     model: str,
     messages: list[dict[str, str]],
     json_mode: bool,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], TokenUsage | None]:
     system_text, rest = _messages_split_system(messages)
     if json_mode and system_text:
         system_text = system_text + "\n\nReply with valid JSON only, no markdown fences."
@@ -233,7 +326,7 @@ async def _anthropic_nonstream(
     for p in parts:
         if isinstance(p, dict) and p.get("type") == "text":
             text += str(p.get("text") or "")
-    return {"message": {"content": text}}
+    return {"message": {"content": text}}, _anthropic_parse_usage(data)
 
 
 async def _anthropic_stream_iter(
@@ -243,6 +336,7 @@ async def _anthropic_stream_iter(
     model: str,
     messages: list[dict[str, str]],
     json_mode: bool,
+    usage_sink: list[TokenUsage] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     system_text, rest = _messages_split_system(messages)
     if json_mode and system_text:
@@ -263,6 +357,8 @@ async def _anthropic_stream_iter(
     }
     if system_text:
         payload["system"] = system_text
+    input_tokens = 0
+    output_tokens = 0
     async with client.stream(
         "POST",
         ANTHROPIC_API_URL,
@@ -283,12 +379,22 @@ async def _anthropic_stream_iter(
                 evt = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            if evt.get("type") == "content_block_delta":
+            evt_type = evt.get("type")
+            if evt_type == "message_start":
+                msg = evt.get("message") or {}
+                u = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
+                input_tokens = int(u.get("input_tokens") or 0)
+            elif evt_type == "message_delta":
+                u = evt.get("usage") if isinstance(evt.get("usage"), dict) else {}
+                output_tokens = int(u.get("output_tokens") or output_tokens)
+            elif evt_type == "content_block_delta":
                 delta = evt.get("delta") or {}
                 if delta.get("type") == "text_delta":
                     piece = str(delta.get("text") or "")
                     if piece:
                         yield {"message": {"content": piece}}
+    if input_tokens or output_tokens:
+        _store_usage(usage_sink, TokenUsage(prompt_tokens=input_tokens, completion_tokens=output_tokens))
 
 
 async def _anthropic_stream_full(
@@ -297,10 +403,16 @@ async def _anthropic_stream_full(
     model: str,
     messages: list[dict[str, str]],
     json_mode: bool,
+    usage_sink: list[TokenUsage] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     async with httpx.AsyncClient() as client:
         async for part in _anthropic_stream_iter(
-            client, api_key=api_key, model=model, messages=messages, json_mode=json_mode
+            client,
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            json_mode=json_mode,
+            usage_sink=usage_sink,
         ):
             yield part
 
@@ -312,7 +424,7 @@ async def _gemini_nonstream(
     model: str,
     messages: list[dict[str, str]],
     json_mode: bool,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], TokenUsage | None]:
     url = _gemini_url_fixed(model, api_key, stream=False)
     body = _build_gemini_body(messages, json_mode)
     r = await client.post(url, json=body, timeout=120.0)
@@ -323,7 +435,7 @@ async def _gemini_nonstream(
         for part in (cand.get("content") or {}).get("parts") or []:
             if "text" in part:
                 text += str(part["text"] or "")
-    return {"message": {"content": text}}
+    return {"message": {"content": text}}, _gemini_parse_usage(data)
 
 
 _sse_data = re.compile(r"^data:\s*(.+)$")
@@ -336,9 +448,11 @@ async def _gemini_stream_iter(
     model: str,
     messages: list[dict[str, str]],
     json_mode: bool,
+    usage_sink: list[TokenUsage] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     url = _gemini_url_fixed(model, api_key, stream=True)
     body = _build_gemini_body(messages, json_mode)
+    last_usage: TokenUsage | None = None
     async with client.stream("POST", url, json=body, timeout=120.0) as resp:
         resp.raise_for_status()
         async for line in resp.aiter_lines():
@@ -352,12 +466,16 @@ async def _gemini_stream_iter(
                 data = json.loads(chunk)
             except json.JSONDecodeError:
                 continue
+            u = _gemini_parse_usage(data)
+            if u is not None:
+                last_usage = u
             for cand in data.get("candidates") or []:
                 for part in (cand.get("content") or {}).get("parts") or []:
                     if "text" in part:
                         piece = str(part.get("text") or "")
                         if piece:
                             yield {"message": {"content": piece}}
+    _store_usage(usage_sink, last_usage)
 
 
 async def _gemini_stream_full(
@@ -366,10 +484,16 @@ async def _gemini_stream_full(
     model: str,
     messages: list[dict[str, str]],
     json_mode: bool,
+    usage_sink: list[TokenUsage] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     async with httpx.AsyncClient() as client:
         async for part in _gemini_stream_iter(
-            client, api_key=api_key, model=model, messages=messages, json_mode=json_mode
+            client,
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            json_mode=json_mode,
+            usage_sink=usage_sink,
         ):
             yield part
 
@@ -393,6 +517,9 @@ class LlmChatBackend:
         cloud_openai_model: str,
         cloud_google_model: str,
         secrets: dict[str, str],
+        privacy_shield_enabled: bool = False,
+        privacy_shield_reinject: bool = True,
+        on_usage_recorded: UsageRecordedCb | None = None,
     ) -> None:
         self._ollama = ollama
         self._tier = tier
@@ -404,6 +531,52 @@ class LlmChatBackend:
         self._cloud_openai_model = cloud_openai_model
         self._cloud_google_model = cloud_google_model
         self._secrets = secrets
+        self._privacy_shield_enabled = bool(privacy_shield_enabled)
+        self._privacy_shield_reinject = bool(privacy_shield_reinject)
+        self._on_usage_recorded = on_usage_recorded
+
+    def _privacy_shield_applies(self) -> bool:
+        return self._privacy_shield_enabled and self._tier in ("company", "cloud")
+
+    def _maybe_reinject(self, resp: Any, rmap: Any) -> Any:
+        if rmap and self._privacy_shield_reinject:
+            return reinject_response(resp, rmap)
+        return resp
+
+    def _usage_vendor(self) -> str:
+        if self._tier == "company":
+            return "openai"
+        if self._tier == "cloud":
+            return self._cloud_vendor
+        return ""
+
+    def _record_token_usage(self, model: str, usage: TokenUsage | None) -> None:
+        if not remote_tier_applies(self._tier) or usage is None or not usage.has_tokens():
+            return
+        with session_scope() as session:
+            token_usage.record_usage(
+                session,
+                tier=self._tier,
+                vendor=self._usage_vendor(),
+                model=model,
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+            )
+        if self._on_usage_recorded is not None:
+            self._on_usage_recorded()
+
+    def _wrap_stream(
+        self,
+        inner: AsyncIterator[dict[str, Any]],
+        *,
+        usage_sink: list[TokenUsage],
+        model: str,
+    ) -> _StreamUsageWrapper:
+        return _StreamUsageWrapper(
+            inner,
+            usage_sink=usage_sink,
+            on_complete=lambda u: self._record_token_usage(model, u),
+        )
 
     def effective_model(self, explicit: str | None) -> str:
         if explicit and explicit.strip():
@@ -433,34 +606,42 @@ class LlmChatBackend:
         messages: list[dict[str, str]] | None = None,
         stream: bool = False,
         format: str | None = None,
+        skip_privacy_redaction: bool = False,
     ) -> Any:
         messages = messages or []
         m = self.effective_model(model or None)
         json_mode = format == "json"
+        rmap = None
+        if self._privacy_shield_applies() and not skip_privacy_redaction:
+            # Coerce non-stream so reinject runs on the full assistant text.
+            stream = False
+            messages, rmap = await redact_messages(messages)
 
         if self._tier == "local":
             kwargs: dict[str, Any] = {"model": m, "messages": messages, "stream": stream}
             if format:
                 kwargs["format"] = format
-            return await self._ollama.chat(**kwargs)
+            resp = await self._ollama.chat(**kwargs)
+            return self._maybe_reinject(resp, rmap)
 
         if self._tier == "company":
             key = self._require_secret(SECRET_COMPANY_OPENAI)
             url = _openai_chat_url(self._company_base)
-            # Do not use OpenAI response_format json_object here: many Work gateways reject it;
-            # Analyse checks still get JSON via _openai_messages_json_hint + checks_runner coercion.
             strict_rf = False
             if stream:
-                return _openai_stream_full(
+                usage_sink: list[TokenUsage] = []
+                stream_iter = _openai_stream_full(
                     url=url,
                     api_key=key,
                     model=m,
                     messages=messages,
                     json_mode=json_mode,
                     strict_response_format=strict_rf,
+                    usage_sink=usage_sink,
                 )
+                return self._wrap_stream(stream_iter, usage_sink=usage_sink, model=m)
             async with httpx.AsyncClient() as client:
-                return await _openai_nonstream(
+                resp, usage = await _openai_nonstream(
                     client,
                     url=url,
                     api_key=key,
@@ -469,6 +650,8 @@ class LlmChatBackend:
                     json_mode=json_mode,
                     strict_response_format=strict_rf,
                 )
+            self._record_token_usage(m, usage)
+            return self._maybe_reinject(resp, rmap)
 
         if self._tier == "cloud":
             if self._cloud_vendor == "anthropic":
@@ -479,13 +662,21 @@ class LlmChatBackend:
                     )
                 key = self._require_secret(SECRET_CLOUD_ANTHROPIC)
                 if stream:
-                    return _anthropic_stream_full(
-                        api_key=key, model=m, messages=messages, json_mode=json_mode
+                    usage_sink = []
+                    stream_iter = _anthropic_stream_full(
+                        api_key=key,
+                        model=m,
+                        messages=messages,
+                        json_mode=json_mode,
+                        usage_sink=usage_sink,
                     )
+                    return self._wrap_stream(stream_iter, usage_sink=usage_sink, model=m)
                 async with httpx.AsyncClient() as client:
-                    return await _anthropic_nonstream(
+                    resp, usage = await _anthropic_nonstream(
                         client, api_key=key, model=m, messages=messages, json_mode=json_mode
                     )
+                self._record_token_usage(m, usage)
+                return self._maybe_reinject(resp, rmap)
             if self._cloud_vendor == "google":
                 if not (m or "").strip():
                     raise ValueError(
@@ -494,13 +685,21 @@ class LlmChatBackend:
                     )
                 key = self._require_secret(SECRET_CLOUD_GOOGLE)
                 if stream:
-                    return _gemini_stream_full(
-                        api_key=key, model=m, messages=messages, json_mode=json_mode
+                    usage_sink = []
+                    stream_iter = _gemini_stream_full(
+                        api_key=key,
+                        model=m,
+                        messages=messages,
+                        json_mode=json_mode,
+                        usage_sink=usage_sink,
                     )
+                    return self._wrap_stream(stream_iter, usage_sink=usage_sink, model=m)
                 async with httpx.AsyncClient() as client:
-                    return await _gemini_nonstream(
+                    resp, usage = await _gemini_nonstream(
                         client, api_key=key, model=m, messages=messages, json_mode=json_mode
                     )
+                self._record_token_usage(m, usage)
+                return self._maybe_reinject(resp, rmap)
             if not (m or "").strip():
                 raise ValueError(
                     "No OpenAI cloud model id. Settings → Models: enter your OpenAI key, click "
@@ -508,18 +707,21 @@ class LlmChatBackend:
                 )
             key = self._require_secret(SECRET_CLOUD_OPENAI)
             url = _openai_chat_url(DEFAULT_COMPANY_OPENAI_BASE)
-            strict_rf = False  # same rationale as company tier (OpenAI-compatible HTTP)
+            strict_rf = False
             if stream:
-                return _openai_stream_full(
+                usage_sink = []
+                stream_iter = _openai_stream_full(
                     url=url,
                     api_key=key,
                     model=m,
                     messages=messages,
                     json_mode=json_mode,
                     strict_response_format=strict_rf,
+                    usage_sink=usage_sink,
                 )
+                return self._wrap_stream(stream_iter, usage_sink=usage_sink, model=m)
             async with httpx.AsyncClient() as client:
-                return await _openai_nonstream(
+                resp, usage = await _openai_nonstream(
                     client,
                     url=url,
                     api_key=key,
@@ -528,11 +730,14 @@ class LlmChatBackend:
                     json_mode=json_mode,
                     strict_response_format=strict_rf,
                 )
+            self._record_token_usage(m, usage)
+            return self._maybe_reinject(resp, rmap)
 
-        kwargs: dict[str, Any] = {"model": m, "messages": messages, "stream": stream}
+        kwargs = {"model": m, "messages": messages, "stream": stream}
         if format:
             kwargs["format"] = format
-        return await self._ollama.chat(**kwargs)
+        resp = await self._ollama.chat(**kwargs)
+        return self._maybe_reinject(resp, rmap)
 
 
 def _http_status_error_detail_safe(exc: httpx.HTTPStatusError) -> str:

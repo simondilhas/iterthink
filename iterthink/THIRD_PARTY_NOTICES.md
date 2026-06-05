@@ -14,6 +14,7 @@ The **iterthink** application is licensed under the Business Source License 1.1 
 These were added to `pyproject.toml` after the last bulk `generate_third_party_notices` run; re-run that script before release to fold them into the table below.
 
 - **langdetect** — Apache License 2.0 — https://github.com/Mimino666/langdetect (language identification for spelling auto-detect).
+- **rapidocr** — Apache License 2.0 — https://github.com/RapidAI/RapidOCR (local ONNX OCR for scanned PDF / image import).
 
 ## Package index
 

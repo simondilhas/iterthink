@@ -14,7 +14,7 @@ from iterthink.compare.layout import aligned_compare_pairs
 from iterthink.compare.margin import split_paragraphs
 from iterthink.db.session import session_scope
 from iterthink.persistence import impact_annotations as impact_ann
-from iterthink.persistence import version_storage
+from iterthink.persistence import content_repo
 from iterthink.services import impact_analysis_runner
 from iterthink.services.impact_analysis_runner import (
     FINDINGS_PARAGRAPH_STATUSES,
@@ -406,7 +406,7 @@ class MarkdownStudioImpactMixin:
         cur = getattr(self, "current_path", None)
         if not cur:
             return None
-        snaps = version_storage.list_snapshots(session, cur.resolve())
+        snaps = content_repo.list_snapshots(session, cur.resolve())
         return snaps[0].version_id if snaps else None
 
     def _selected_impact_context_document_ids(self) -> list[int]:
@@ -416,7 +416,7 @@ class MarkdownStudioImpactMixin:
         with session_scope() as s:
             ids: list[int] = []
             for p in paths:
-                doc = version_storage.get_or_create_document(s, p)
+                doc = content_repo.get_or_create_document(s, p)
                 ids.append(int(doc.id))
             s.commit()
             return ids
@@ -466,8 +466,7 @@ class MarkdownStudioImpactMixin:
         *,
         paragraph_index: int,
         prompt_id: str,
-        document_id: int,
-        version_id: int,
+        content_version_id: int,
         status: str,
         comment: str,
         details: dict | None,
@@ -477,8 +476,7 @@ class MarkdownStudioImpactMixin:
             "status": str(status),
             "effective_comment": (comment or "").strip(),
             "details": details,
-            "document_id": int(document_id),
-            "version_id": int(version_id),
+            "content_version_id": int(content_version_id),
             "paragraph_index": int(paragraph_index),
             "prompt_id": str(prompt_id),
         }
@@ -702,14 +700,13 @@ class MarkdownStudioImpactMixin:
         snap: dict[str, Any] | None = None
         try:
             with session_scope() as s:
-                doc = version_storage.get_document_by_resolved_path(s, cur.resolve())
+                doc = content_repo.get_document_by_resolved_path(s, cur.resolve())
                 if doc is not None:
                     vid = self._resolve_impact_version_id(s)
                     if vid is not None:
                         m = impact_ann.list_for_version(
                             s,
-                            document_id=int(doc.id),
-                            version_id=int(vid),
+                            content_version_id=int(vid),
                             prompt_id=prompt_id,
                         )
                         row = m.get(idx)
@@ -973,14 +970,13 @@ class MarkdownStudioImpactMixin:
 
         ann_map: dict[int, dict[str, Any]] = {}
         with session_scope() as s:
-            doc = version_storage.get_document_by_resolved_path(s, cur.resolve())
+            doc = content_repo.get_document_by_resolved_path(s, cur.resolve())
             if doc is not None:
                 vid = self._resolve_impact_version_id(s)
                 if vid is not None:
                     raw = impact_ann.list_for_version(
                         s,
-                        document_id=int(doc.id),
-                        version_id=int(vid),
+                        content_version_id=int(vid),
                         prompt_id=prompt_id,
                     )
                     ann_map = {i: impact_ann.snapshot_row_ui(r) for i, r in raw.items()}
@@ -1025,8 +1021,7 @@ class MarkdownStudioImpactMixin:
             with session_scope() as s:
                 impact_ann.set_override(
                     s,
-                    document_id=int(snap["document_id"]),
-                    version_id=int(snap["version_id"]),
+                    content_version_id=int(snap["content_version_id"]),
                     paragraph_index=int(snap["paragraph_index"]),
                     prompt_id=str(snap["prompt_id"]),
                     override_comment=tf.value or "",
@@ -1131,7 +1126,7 @@ class MarkdownStudioImpactMixin:
 
         try:
             with session_scope() as s:
-                target_doc = version_storage.get_or_create_document(s, cur.resolve())
+                target_doc = content_repo.get_or_create_document(s, cur.resolve())
                 target_did = int(target_doc.id)
                 vid = self._resolve_impact_version_id(s)
                 if vid is None:
@@ -1161,8 +1156,7 @@ class MarkdownStudioImpactMixin:
                     ann = self._impact_progress_row_dict(
                         paragraph_index=idx,
                         prompt_id=act.id,
-                        document_id=target_did,
-                        version_id=int(vid),
+                        content_version_id=int(vid),
                         status=str(payload.get("status", "")),
                         comment=str(payload.get("comment", "")),
                         details=det,
@@ -1172,8 +1166,7 @@ class MarkdownStudioImpactMixin:
                     er = self._impact_progress_row_dict(
                         paragraph_index=idx,
                         prompt_id=act.id,
-                        document_id=target_did,
-                        version_id=int(vid),
+                        content_version_id=int(vid),
                         status="risk",
                         comment=str(err),
                         details=None,
