@@ -22,6 +22,8 @@ on:
           - windows
           - macos
         default: all
+  pull_request:
+    branches: [main]
   push:
     tags:
       - "v*"
@@ -573,6 +575,20 @@ jobs:
           name: ${{ matrix.name }}-package
           path: dist/*
           if-no-files-found: error
+
+  desktop-build-ok:
+    name: Desktop build (all platforms)
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all platform builds succeeded
+        shell: bash
+        run: |
+          if [ "${{ needs.build.result }}" != "success" ]; then
+            echo "Desktop build failed (result: ${{ needs.build.result }})"
+            exit 1
+          fi
 
   release:
     name: Publish GitHub Release
