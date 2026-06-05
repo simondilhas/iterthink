@@ -3,8 +3,6 @@ name: CI
 on:
   push:
     branches: [dev]
-  pull_request:
-    branches: [dev, main]
 
 env:
   UV_PYTHON: "3.12"

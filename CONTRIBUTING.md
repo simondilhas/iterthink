@@ -29,17 +29,34 @@ pip install -e ".[dev]"
 pytest tests/
 ```
 
-## GitHub Actions desktop builds
+## CI and releases
 
-Maintainers can produce **Linux**, **Windows**, and **macOS** desktop bundles (Flet) from CI.
+### Day-to-day on `dev`
+
+Push to **`dev`** runs **pytest** only (fast feedback).
+
+### Ship to `main`
+
+When `dev` is ready:
+
+```bash
+git tag v0.0.8
+git push origin v0.0.8
+```
+
+Pushing a **`v*`** tag starts one pipeline: **pytest → desktop build (all platforms) → GitHub Release → auto-merge `dev` into `main`**.
+
+If any step fails, **`main` is not updated**. Tag a commit on **`dev`** only.
+
+### Manual desktop build
 
 1. Open **Actions** → workflow **Desktop build** → **Run workflow**.
-2. Under **Use workflow from**, pick the **branch** (or default branch) that contains the workflow and the commit you want; that branch’s **HEAD** is checked out unless you override the next field.
-3. Optionally set **ref** to a specific commit SHA, branch name, or tag to check out instead of that HEAD.
-4. Optionally set **platforms** to build only one OS (`linux`, `windows`, or `macos`) or **all**. Pushes of version tags (`v*`) always build all three platforms for the release job.
-5. When the run finishes, download the **Artifacts** (`desktop-linux`, `desktop-windows`, `desktop-macos`; only the jobs that ran appear for partial builds).
+2. Under **Use workflow from**, pick the branch that contains the commit you want.
+3. Optionally set **ref** to a SHA, branch, or tag; leave empty for that branch’s HEAD.
+4. Optionally set **platforms** to `linux`, `windows`, `macos`, or **all**.
+5. Download **Artifacts** when the run finishes.
 
-Manual runs use zip names like `iterthink-0.0.0+<run>-<os>.zip`. Tag pushes attach the same zips to a GitHub Release. Details: [docs/PACKAGING.md](docs/PACKAGING.md).
+Tag pushes always build all three platforms and attach installers to a GitHub Release. Details: [docs/PACKAGING.md](docs/PACKAGING.md).
 
 ## Pull requests
 

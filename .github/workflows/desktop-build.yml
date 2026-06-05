@@ -22,11 +22,12 @@ on:
           - windows
           - macos
         default: all
-  pull_request:
-    branches: [main]
   push:
     tags:
       - "v*"
+
+permissions:
+  contents: write
 
 env:
   UV_PYTHON: "3.12"
@@ -38,8 +39,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - run: uv sync --extra dev
+
+      - run: uv run pytest tests/
+
   prepare:
     name: Prepare build matrix
+    needs: test
     runs-on: ubuntu-latest
     outputs:
       matrix_json: ${{ steps.matrix.outputs.matrix_json }}
@@ -592,11 +606,9 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: desktop-build-ok
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -609,3 +621,46 @@ jobs:
           name: Iterthink ${{ github.ref_name }}
           generate_release_notes: true
           files: release-assets/*
+
+  merge-dev-to-main:
+    name: Merge dev into main
+    needs: [desktop-build-ok, release]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tagged commit is on dev
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin dev main
+          if ! git merge-base --is-ancestor "${{ github.sha }}" origin/dev; then
+            echo "::error::Tagged commit is not reachable from origin/dev. Tag a commit on dev."
+            exit 1
+          fi
+
+      - name: Skip if main already contains dev
+        id: skip
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor origin/dev origin/main; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "main already contains dev; nothing to merge"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge dev into main and push
+        if: steps.skip.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout main
+          git merge origin/dev --no-edit
+          git push origin main
