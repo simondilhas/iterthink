@@ -33,6 +33,8 @@ env:
   UV_PYTHON: "3.12"
   PYTHONUTF8: "1"
   FLET_CLI_NO_RICH_OUTPUT: "1"
+  # Set to "true" when macOS signing secrets are ready and macOS should ship on tag pushes / "all".
+  MACOS_RELEASE_ENABLED: "false"
 
 concurrency:
   group: desktop-build-${{ github.ref }}
@@ -62,12 +64,14 @@ jobs:
         shell: bash
         env:
           PLATFORMS: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'all' }}
+          MACOS_RELEASE_ENABLED: ${{ env.MACOS_RELEASE_ENABLED }}
         run: |
           python3 <<'PY'
           import json
           import os
 
           platforms = os.environ["PLATFORMS"]
+          macos_enabled = os.environ.get("MACOS_RELEASE_ENABLED", "false").lower() == "true"
           all_rows = [
               {
                   "name": "linux",
@@ -90,6 +94,8 @@ jobs:
           ]
           if platforms == "all":
               rows = all_rows
+              if not macos_enabled:
+                  rows = [r for r in rows if r["name"] != "macos"]
           else:
               rows = [r for r in all_rows if r["name"] == platforms]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
@@ -536,13 +542,29 @@ jobs:
           MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
         run: |
           set -euo pipefail
+          if [[ -z "${MACOS_CERTIFICATE:-}" || -z "${MACOS_CERTIFICATE_PWD:-}" ]]; then
+            echo "::error::MACOS_CERTIFICATE and MACOS_CERTIFICATE_PWD repository secrets are required for signed macOS release builds."
+            exit 1
+          fi
           KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
           KEYCHAIN_PWD="$RUNNER_TEMP-keychain"
-          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          # Strip whitespace from base64 (common when pasting multi-line encodings into GitHub secrets).
+          printf '%s' "$MACOS_CERTIFICATE" | tr -d '[:space:]' | base64 --decode > "$CERT_PATH"
+          if [[ ! -s "$CERT_PATH" ]]; then
+            echo "::error::MACOS_CERTIFICATE decoded to an empty file. Re-export the .p12 and store a single-line base64 secret."
+            exit 1
+          fi
+          # Trim accidental trailing whitespace from secret paste.
+          MACOS_CERTIFICATE_PWD="${MACOS_CERTIFICATE_PWD%"${MACOS_CERTIFICATE_PWD##*[![:space:]]}"}"
+          if ! openssl pkcs12 -in "$CERT_PATH" -noout -passin "pass:${MACOS_CERTIFICATE_PWD}"; then
+            echo "::error::PKCS12 password verification failed. MACOS_CERTIFICATE_PWD must match the .p12 export password, and MACOS_CERTIFICATE must be the full base64 of that file."
+            exit 1
+          fi
           security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
-          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" \
+          security import "$CERT_PATH" -k "$KEYCHAIN" \
             -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
@@ -591,7 +613,7 @@ jobs:
           if-no-files-found: error
 
   desktop-build-ok:
-    name: Desktop build (all platforms)
+    name: Desktop build (release platforms)
     needs: build
     if: always()
     runs-on: ubuntu-latest
