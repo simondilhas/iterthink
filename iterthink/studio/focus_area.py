@@ -28,11 +28,16 @@ from .compose_selection_markdown import (
     apply_italic_wrap,
     apply_numbered_block,
     apply_outdent_block,
+    expand_selection_to_line_bounds,
 )
 from .compose_toolbar_layout import selection_first_line_anchor_px
 from .discuss_context import discuss_llm_context_text
 from iterthink.compare.margin import paragraph_index_at_offset, replace_paragraph_at_index, split_paragraphs
-from .list_continuation import merge_if_list_continuation_after_enter
+from .list_continuation import (
+    map_index_after_normalize_newlines,
+    merge_if_list_continuation_after_enter,
+    normalize_buffer_newlines,
+)
 from .markdown_preview import markdown_preview_with_task_checkboxes
 from iterthink.ai.llm_router import remote_http_error_message
 from iterthink.ai.ollama_util import chat_response_text, chat_stream_delta, ollama_error_message
@@ -405,6 +410,9 @@ class MarkdownStudioCompose:
         host.top = top
         host.right = None
 
+    def _set_compose_editor_focused(self, focused: bool) -> None:
+        self._compose_editor_focused = focused
+
     # --- Compose floating selection toolbar (Focus editor, edit mode) ---
 
     def _init_compose_selection_toolbar(self) -> None:
@@ -441,9 +449,17 @@ class MarkdownStudioCompose:
             content=self._compose_selection_toolbar_popup,
         )
 
-        row = ft.Row(
+        toolbar_items: list[ft.Control] = []
+        if config.FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED:
+            toolbar_items.append(
+                _btn(
+                    ft.Icons.SPELLCHECK,
+                    "Spelling review (Review tab)",
+                    self._compose_toolbar_spellcheck,
+                )
+            )
+        toolbar_items.extend(
             [
-                _btn(ft.Icons.SPELLCHECK, "Spelling review (Review tab)", self._compose_toolbar_spellcheck),
                 _btn(ft.Icons.FORMAT_BOLD, "Bold **", self._compose_toolbar_bold),
                 _btn(ft.Icons.FORMAT_ITALIC, "Italic *", self._compose_toolbar_italic),
                 _btn(ft.Icons.FORMAT_LIST_BULLETED, "Bullet list", self._compose_toolbar_bullet),
@@ -451,11 +467,20 @@ class MarkdownStudioCompose:
                 _btn(ft.Icons.CHECKLIST, "Task list - [ ]", self._compose_toolbar_checklist),
                 _btn(ft.Icons.FORMAT_INDENT_INCREASE, "Indent lines", self._compose_toolbar_indent),
                 _btn(ft.Icons.FORMAT_INDENT_DECREASE, "Outdent lines", self._compose_toolbar_outdent),
-                sparkle_wrap,
-            ],
+            ]
+        )
+        if config.FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED:
+            toolbar_items.append(sparkle_wrap)
+
+        toolbar_row = ft.Row(
+            toolbar_items,
             spacing=0,
             tight=True,
             scroll=ft.ScrollMode.AUTO,
+        )
+        row = ft.GestureDetector(
+            on_tap_down=lambda _e: self._compose_snapshot_toolbar_range(),
+            content=toolbar_row,
         )
         self._compose_selection_toolbar_host = ft.Container(
             visible=False,
@@ -507,8 +532,46 @@ class MarkdownStudioCompose:
             self._compose_toolbar_applying = False
         self._compose_sync_selection_toolbar_visibility()
 
+    def _compose_snapshot_toolbar_range(self) -> None:
+        """Capture selection before toolbar buttons steal editor focus."""
+        buf = self.editor.value or ""
+        sel = self.editor.selection
+        if sel is not None and not sel.is_collapsed:
+            if sel.get_selected_text(buf).strip():
+                self._compose_toolbar_snap_range = (int(sel.start), int(sel.end))
+                return
+        span = getattr(self, "_compose_sel_span", None)
+        if span is not None:
+            a, b = span
+            if 0 <= a <= b <= len(buf) and buf[a:b].strip():
+                self._compose_toolbar_snap_range = (int(a), int(b))
+                return
+        self._compose_toolbar_snap_range = None
+
     def _compose_toolbar_range(self) -> tuple[int, int] | None:
-        return self._ctx_selection_range()
+        buf = self.editor.value or ""
+        sel = self.editor.selection
+        if sel is not None and not sel.is_collapsed:
+            if sel.get_selected_text(buf).strip():
+                return int(sel.start), int(sel.end)
+        snap = getattr(self, "_compose_toolbar_snap_range", None)
+        if snap is not None:
+            return int(snap[0]), int(snap[1])
+        span = getattr(self, "_compose_sel_span", None)
+        if span is not None:
+            return int(span[0]), int(span[1])
+        return None
+
+    def _compose_indent_key_range(self) -> tuple[int, int] | None:
+        rng = self._compose_toolbar_range()
+        if rng is not None:
+            return rng
+        buf = self.editor.value or ""
+        sel = self.editor.selection
+        if sel is None:
+            return None
+        caret = int(sel.start)
+        return expand_selection_to_line_bounds(buf, caret, caret)
 
     def _compose_toolbar_bold(self, _e: ft.ControlEvent) -> None:
         rng = self._compose_toolbar_range()
@@ -599,6 +662,26 @@ class MarkdownStudioCompose:
         self._enter_spell_review_mode()
         await self._request_tab_switch_async(TAB_FUTURE)
 
+    async def _compose_handle_tab_key_async(self, *, shift: bool) -> None:
+        if self._main_tab_index != TAB_PRESENT or self._focus_view_mode != "edit":
+            return
+        if not getattr(self, "_compose_editor_focused", False):
+            return
+        rng = self._compose_indent_key_range()
+        if rng is None:
+            return
+        a, b = rng
+        buf = self.editor.value or ""
+        got = apply_outdent_block(buf, a, b) if shift else apply_indent_block(buf, a, b)
+        if got is None:
+            return
+        new_t, s0, s1 = got
+        self._compose_apply_toolbar_text_mutation(new_t, s0, s1)
+        try:
+            await self.editor.focus()
+        except BaseException:
+            pass
+
     def _kick_debounced_compare_diff_if_main_editor_backs_buffers(self) -> None:
         """Review baseline and History newer=current draft both read from ``editor``; keep analyse in sync."""
         if self._main_tab_index == TAB_FUTURE or (
@@ -610,6 +693,9 @@ class MarkdownStudioCompose:
 
     def _after_editor_programmatic_change(self) -> None:
         """Mirror the bookkeeping _on_editor_change does after a programmatic mutation (cut/paste)."""
+        self._editor_prev_for_list_continue = normalize_buffer_newlines(
+            self.editor.value or ""
+        )
         self._refresh_dirty_state_ui()
         if self._main_tab_index == TAB_PRESENT:
             self._margin_gen += 1
@@ -1007,34 +1093,44 @@ class MarkdownStudioCompose:
 
     def _on_editor_change(self, _e: ft.ControlEvent) -> None:
         if self._editor_list_continue_applying:
-            self._editor_prev_for_list_continue = self.editor.value or ""
+            self._editor_prev_for_list_continue = normalize_buffer_newlines(
+                self.editor.value or ""
+            )
             return
 
         if not getattr(self, "_compose_toolbar_applying", False):
             self._compose_sel_span = None
+            self._compose_toolbar_snap_range = None
 
         if self._main_tab_index == TAB_PRESENT and self._focus_view_mode == "edit":
-            old = self._editor_prev_for_list_continue
-            new = self.editor.value or ""
+            raw_old = self._editor_prev_for_list_continue
+            raw_new = self.editor.value or ""
+            old = normalize_buffer_newlines(raw_old)
+            new = normalize_buffer_newlines(raw_new)
             sel = self.editor.selection
-            # Do not require collapsed selection: merge_if_list_continuation_after_enter
-            # resolves the newline from the diff when unambiguous (see list_continuation).
             if sel is not None:
-                got = merge_if_list_continuation_after_enter(
-                    old, new, int(sel.start), int(sel.end)
-                )
-                if got is not None:
-                    mval, mcaret = got
-                    self._editor_list_continue_applying = True
-                    try:
-                        self.editor.value = mval
-                        self.editor.selection = ft.TextSelection(mcaret, mcaret)
-                        if _ctrl_on_page(self.editor):
-                            self.editor.update()
-                    finally:
-                        self._editor_list_continue_applying = False
+                ss = map_index_after_normalize_newlines(raw_new, int(sel.start))
+                se = map_index_after_normalize_newlines(raw_new, int(sel.end))
+            else:
+                ss, se = 0, 0
+            got = merge_if_list_continuation_after_enter(old, new, ss, se)
+            if got is not None:
+                mval, mcaret = got
+                self._editor_list_continue_applying = True
+                try:
+                    self.editor.value = mval
+                    self.editor.selection = ft.TextSelection(mcaret, mcaret)
+                    if _ctrl_on_page(self.editor):
+                        self.editor.update()
+                    self.page.run_task(
+                        self._compose_restore_editor_selection, mcaret, mcaret
+                    )
+                finally:
+                    self._editor_list_continue_applying = False
 
-        self._editor_prev_for_list_continue = self.editor.value or ""
+        self._editor_prev_for_list_continue = normalize_buffer_newlines(
+            self.editor.value or ""
+        )
 
         self._refresh_dirty_state_ui()
         if self._main_tab_index == TAB_PRESENT:

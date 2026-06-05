@@ -6,8 +6,10 @@ import pytest
 
 from iterthink.studio.list_continuation import (
     is_empty_list_item_line,
+    map_index_after_normalize_newlines,
     markdown_list_continuation_prefix,
     merge_if_list_continuation_after_enter,
+    normalize_buffer_newlines,
     single_newline_insert_index,
 )
 
@@ -161,6 +163,28 @@ def test_merge_empty_bullet_second_enter_exits_list() -> None:
     assert merged[caret - 1] == "\n"
 
 
+def test_merge_empty_bullet_exit_with_trailing_paragraph() -> None:
+    """Double Enter on an empty marker must not jump past later paragraphs."""
+    old = "Intro\n\n- item\n- \n\nMore text"
+    new = old[:16] + "\n" + old[16:]
+    got = merge_if_list_continuation_after_enter(old, new, len(new), len(new))
+    assert got is not None
+    merged, caret = got
+    assert merged == "Intro\n\n- item\n\nMore text"
+    assert caret == 15
+    assert merged[caret:] == "More text"
+
+
+def test_merge_empty_bullet_exit_stale_eof_caret() -> None:
+    old = "Intro\n\n- item\n- "
+    new = old + "\n"
+    got = merge_if_list_continuation_after_enter(old, new, len(old) + 5, len(old) + 5)
+    assert got is not None
+    merged, caret = got
+    assert merged == "Intro\n\n- item\n\n"
+    assert caret == 15
+
+
 def test_merge_empty_task_exits_list() -> None:
     old = "x\n- [ ] "
     new = "x\n- [ ] \n"
@@ -219,3 +243,29 @@ def test_merge_ambiguous_double_newline_buffer_returns_none() -> None:
     """When two positions look like a single inserted \\n, single_newline is None; no merge."""
     assert single_newline_insert_index("\n", "\n\n") is None
     assert merge_if_list_continuation_after_enter("\n", "\n\n", 2, 2) is None
+
+
+def test_normalize_buffer_newlines_and_index_map() -> None:
+    raw = "- a\r\n"
+    assert normalize_buffer_newlines(raw) == "- a\n"
+    assert map_index_after_normalize_newlines(raw, len(raw)) == len("- a\n")
+
+
+def test_merge_crlf_bullet_continuation() -> None:
+    """Enter after a CRLF-terminated line: normalized diff is a single inserted LF."""
+    old = normalize_buffer_newlines("- first")
+    new = normalize_buffer_newlines("- first\r\n")
+    assert new == "- first\n"
+    got = merge_if_list_continuation_after_enter(old, new, len(new), len(new))
+    assert got is not None
+    merged, caret = got
+    assert merged == "- first\n- "
+    assert caret == len(merged)
+
+
+def test_merge_with_none_selection_uses_diff_only() -> None:
+    old = "- a"
+    new = "- a\n"
+    got = merge_if_list_continuation_after_enter(old, new, 0, 0)
+    assert got is not None
+    assert got[0] == "- a\n- "

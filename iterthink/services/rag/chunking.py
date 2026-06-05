@@ -20,12 +20,15 @@ class ChildChunk:
     summary: str = ""
     questions: tuple[str, str, str] = ("", "", "")
 
-    def build_embed_text(self, *, doc_title: str) -> str:
+    def build_embed_text(self, *, doc_title: str, project_label: str | None = None) -> str:
         q1, q2, q3 = self.questions
-        parts = [
+        parts: list[str] = []
+        if project_label and project_label.strip():
+            parts.append(f"Project: {project_label.strip()}")
+        parts.extend([
             f"Title: {doc_title}",
             f"Header: {self.section_header}",
-        ]
+        ])
         if self.summary.strip():
             parts.append(f"Summary: {self.summary.strip()}")
         qs = " | ".join(q for q in (q1, q2, q3) if q.strip())

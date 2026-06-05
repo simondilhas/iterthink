@@ -80,12 +80,19 @@ async def search_workspace(
     top_k: int = 10,
     rerank: bool | None = None,
     latest_version_only: bool = True,
+    project_slug: str | None = None,
+    project_id: int | None = None,
 ) -> list[SearchHit]:
     q, filename_mode = parse_search_query(query)
     if filename_mode or not q:
         return []
 
-    rows = store_db.rag_child_fetch_latest_rows(conn, None)
+    rows = store_db.rag_child_fetch_latest_rows(
+        conn,
+        None,
+        project_slug=project_slug,
+        project_id=project_id,
+    )
     if not rows:
         return []
 

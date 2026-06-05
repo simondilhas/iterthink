@@ -12,7 +12,14 @@ from typing import Any, Literal
 import flet as ft
 
 from iterthink import config
+from iterthink.services.plan_text_diff import PlanTextChangeView
 from iterthink.studio.components import action_rail_icon_button_style
+from iterthink.studio.plan_text_change_ui import (
+    build_text_change_hover_card,
+    label_colors,
+    pin_color,
+    plan_hover_enabled,
+)
 from iterthink.studio.util import ctrl_on_page
 
 # Viewport height per page in compare/history stacked viewers.
@@ -28,7 +35,12 @@ _TOOLS_PILL_EST_H = 40.0
 _TOOLS_PILL_OFFSET = 8.0
 _TOOLS_PILL_MARGIN = 6.0
 
+_TEXT_CHANGE_TOOLTIP_EST_W = 360.0
+_TEXT_CHANGE_TOOLTIP_EST_H = 72.0
+
 _PANE_BORDER = ft.border.all(1, ft.Colors.with_opacity(0.35, ft.Colors.GREY_600))
+
+PlanTextOverlayMode = Literal["candidate", "baseline"]
 
 
 def _clamp_tools_pill_position(
@@ -186,6 +198,119 @@ def page_norm_to_viewport_px(
     return _normalized_to_viewport(float(u), float(v), rect)
 
 
+def compare_iv_layout_rect(iv: ft.InteractiveViewer) -> _ContainRect:
+    """Layout rect for a compare-column page (contain fit inside fixed viewport)."""
+    vw, vh = _viewer_viewport(iv)
+    meta = _viewer_meta(iv)
+    iw = int(meta.get("img_w", 1))
+    ih = int(meta.get("img_h", 1))
+    return _contain_rect(vw, vh, iw, ih)
+
+
+def norm_bbox_to_viewport_rect(
+    nb: tuple[float, float, float, float], rect: _ContainRect
+) -> tuple[float, float, float, float]:
+    lx0, ly0 = _normalized_to_viewport(nb[0], nb[1], rect)
+    lx1, ly1 = _normalized_to_viewport(nb[2], nb[3], rect)
+    return lx0, ly0, lx1, ly1
+
+
+def _filter_text_changes_for_overlay(
+    changes: list[PlanTextChangeView],
+    page_index: int,
+    mode: PlanTextOverlayMode,
+) -> list[PlanTextChangeView]:
+    page = [c for c in changes if int(c.page_index) == int(page_index)]
+    if mode == "baseline":
+        return [c for c in page if c.kind == "removed"]
+    return [c for c in page if c.kind != "removed"]
+
+
+def build_text_change_tooltip_host() -> ft.Container:
+    return ft.Container(
+        visible=False,
+        bgcolor=config.SURFACE,
+        border=ft.border.all(1, ft.Colors.with_opacity(0.35, config.OUTLINE)),
+        border_radius=8,
+        left=0,
+        top=0,
+        right=None,
+    )
+
+
+def build_text_change_overlay_controls(
+    changes: list[PlanTextChangeView],
+    layout_rect: _ContainRect,
+    *,
+    overlay_mode: PlanTextOverlayMode,
+    hover_enabled: bool,
+    on_pin_hover: Callable[[PlanTextChangeView, float, float], None] | None = None,
+    on_pin_hover_exit: Callable[[], None] | None = None,
+) -> list[ft.Control]:
+    controls: list[ft.Control] = []
+    for ch in changes:
+        lx0, ly0, lx1, ly1 = norm_bbox_to_viewport_rect(ch.norm_bbox, layout_rect)
+        w = max(lx1 - lx0, 4.0)
+        h = max(ly1 - ly0, 4.0)
+        show_label = ch.kind in ("stable", "modified", "added") and overlay_mode == "candidate"
+        if show_label:
+            fg, bg = label_colors(ch.kind)
+            font_size = max(6, min(int(h * 0.82), 22))
+            controls.append(
+                ft.Container(
+                    left=lx0,
+                    top=ly0,
+                    width=w,
+                    height=h,
+                    bgcolor=bg,
+                    padding=ft.padding.all(1),
+                    content=ft.Text(
+                        ch.display_text,
+                        size=font_size,
+                        color=fg,
+                        max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                        no_wrap=False,
+                    ),
+                )
+            )
+        if ch.pin_norm is not None and ch.kind in ("modified", "added", "removed"):
+            pu, pv = ch.pin_norm
+            px, py = _normalized_to_viewport(pu, pv, layout_rect)
+            icon = ft.Icon(
+                ft.Icons.FIBER_MANUAL_RECORD,
+                size=12,
+                color=pin_color(ch.kind),
+            )
+            pin_left = px - 6
+            pin_top = py - 6
+
+            def _hover(e: ft.ControlEvent, c: PlanTextChangeView = ch, ax: float = px, ay: float = py) -> None:
+                if e.data == "true":
+                    if on_pin_hover is not None:
+                        on_pin_hover(c, ax, ay)
+                elif on_pin_hover_exit is not None:
+                    on_pin_hover_exit()
+
+            pin_wrap: ft.Control = ft.Container(
+                left=pin_left,
+                top=pin_top,
+                width=14,
+                height=14,
+                content=icon,
+                on_hover=_hover if hover_enabled else None,
+            )
+            controls.append(pin_wrap)
+    return controls
+
+
+@dataclass
+class ComparePageTextOverlay:
+    page_index: int
+    labels_stack: ft.Stack
+    tooltip_host: ft.Container
+
+
 @dataclass(frozen=True)
 class PlanMarkerView:
     """Lightweight marker for on-screen overlay (no DB dependency)."""
@@ -253,6 +378,8 @@ class PlanFocusViewer:
     _draw_cloud_btn: ft.IconButton = field(repr=False)
     _export_btn: ft.IconButton = field(repr=False)
     _viewport_stack: ft.Stack = field(repr=False)
+    _text_labels_overlay: ft.Stack = field(repr=False)
+    _text_change_tooltip_host: ft.Container = field(repr=False)
     _annotations_overlay: ft.Stack = field(repr=False)
     _draw_rubber_band: ft.Container = field(repr=False)
     _tools_pill_host: ft.Container = field(repr=False)
@@ -269,6 +396,10 @@ class PlanFocusViewer:
     _layout_mode: str = field(default="width", repr=False)
     interaction_mode: InteractionMode = field(default="idle", repr=False)
     _markers: list[PlanMarkerView] = field(default_factory=list, repr=False)
+    _text_changes: list[PlanTextChangeView] = field(default_factory=list, repr=False)
+    _text_overlay_mode: PlanTextOverlayMode = field(default="candidate", repr=False)
+    _text_overlay_visible: bool = field(default=True, repr=False)
+    _hover_enabled: bool = field(default=True, repr=False)
     _draw_start: tuple[float, float] | None = field(default=None, repr=False)
 
     def _point_in_tools_pill(self, local_x: float, local_y: float) -> bool:
@@ -316,6 +447,83 @@ class PlanFocusViewer:
     def set_markers(self, markers: list[PlanMarkerView]) -> None:
         self._markers = list(markers)
         self.refresh_annotations_overlay()
+
+    def set_text_changes(
+        self,
+        changes: list[PlanTextChangeView] | None,
+        *,
+        overlay_mode: PlanTextOverlayMode = "candidate",
+        visible: bool = True,
+        hover_enabled: bool | None = None,
+    ) -> None:
+        self._text_changes = list(changes or [])
+        self._text_overlay_mode = overlay_mode
+        self._text_overlay_visible = visible
+        if hover_enabled is not None:
+            self._hover_enabled = hover_enabled
+        self.hide_text_change_tooltip()
+        self.refresh_text_change_overlay()
+
+    def hide_text_change_tooltip(self) -> None:
+        host = self._text_change_tooltip_host
+        if not bool(getattr(host, "visible", False)):
+            return
+        host.visible = False
+        if ctrl_on_page(host):
+            host.update()
+
+    def show_text_change_tooltip(
+        self, change: PlanTextChangeView, anchor_x: float, anchor_y: float
+    ) -> None:
+        if not self._hover_enabled:
+            return
+        host = self._text_change_tooltip_host
+        host.content = build_text_change_hover_card(
+            change.old_text,
+            change.new_text,
+            kind=change.kind,
+        )
+        sw = max(self._stack_w, self._viewport_w, 1.0)
+        sh = max(self._stack_h, self._viewport_h, _FOCUS_MIN_VIEWPORT_H)
+        left, top = _clamp_tools_pill_position(
+            anchor_x,
+            anchor_y,
+            stack_w=sw,
+            stack_h=sh,
+            pill_w=_TEXT_CHANGE_TOOLTIP_EST_W,
+            pill_h=_TEXT_CHANGE_TOOLTIP_EST_H,
+        )
+        host.left = left
+        host.top = top
+        host.right = None
+        host.visible = True
+        if ctrl_on_page(host):
+            host.update()
+
+    def refresh_text_change_overlay(self) -> None:
+        if not self._text_overlay_visible or not self._text_changes:
+            self._text_labels_overlay.controls = []
+            if ctrl_on_page(self._text_labels_overlay):
+                self._text_labels_overlay.update()
+            return
+        rect = _focus_image_layout_rect(self)
+        page_changes = _filter_text_changes_for_overlay(
+            self._text_changes, self.current_index, self._text_overlay_mode
+        )
+
+        def _on_hover(ch: PlanTextChangeView, ax: float, ay: float) -> None:
+            self.show_text_change_tooltip(ch, ax, ay)
+
+        self._text_labels_overlay.controls = build_text_change_overlay_controls(
+            page_changes,
+            rect,
+            overlay_mode=self._text_overlay_mode,
+            hover_enabled=self._hover_enabled,
+            on_pin_hover=_on_hover,
+            on_pin_hover_exit=self.hide_text_change_tooltip,
+        )
+        if ctrl_on_page(self._text_labels_overlay):
+            self._text_labels_overlay.update()
 
     def refresh_annotations_overlay(self) -> None:
         from iterthink.services.plan_pdf_annotations_render import revision_cloud_png
@@ -454,11 +662,13 @@ class PlanFocusViewer:
         self._viewport_w = vw
         self._viewport_h = vh
         self.hide_tools_pill()
+        self.hide_text_change_tooltip()
         frame = self._page_frame
         frame.width = vw
         frame.height = vh
         if self.page_count > 0:
             self._apply_image_layout()
+        self.refresh_text_change_overlay()
         self.refresh_annotations_overlay()
         for c in (frame, self._image, self._viewer):
             if ctrl_on_page(c):
@@ -520,9 +730,11 @@ class PlanFocusViewer:
         """Fit whole page in the viewport (contain) and reset pan/zoom."""
         if self.page_count <= 0:
             return
+        self.hide_text_change_tooltip()
         self._layout_mode = "contain"
         self._apply_image_layout()
         self._reset_viewer_transform()
+        self.refresh_text_change_overlay()
         if ctrl_on_page(self._image):
             self._image.update()
 
@@ -530,9 +742,11 @@ class PlanFocusViewer:
         """Span the viewport width; pan vertically for tall pages."""
         if self.page_count <= 0:
             return
+        self.hide_text_change_tooltip()
         self._layout_mode = "width"
         self._apply_image_layout()
         self._reset_viewer_transform()
+        self.refresh_text_change_overlay()
         if ctrl_on_page(self._image):
             self._image.update()
 
@@ -564,6 +778,7 @@ class PlanFocusViewer:
     def set_page(self, page_index: int) -> None:
         """Show ``page_index`` and refresh nav chrome."""
         self.hide_tools_pill()
+        self.hide_text_change_tooltip()
         ix = self._clamp_index(page_index)
         self.current_index = ix
         if self.page_count <= 0:
@@ -576,6 +791,7 @@ class PlanFocusViewer:
             self._image.update()
         if ctrl_on_page(self._viewer):
             self._viewer.update()
+        self.refresh_text_change_overlay()
         self.refresh_annotations_overlay()
         self._sync_nav_chrome()
         if self._on_page_change is not None:
@@ -668,6 +884,8 @@ def build_plan_focus_viewer(
     )
 
     annotations_overlay = ft.Stack([], expand=True)
+    text_labels_overlay = ft.Stack([], expand=True)
+    text_change_tooltip_host = build_text_change_tooltip_host()
 
     def _on_draw_start(e: ft.DragStartEvent) -> None:
         v = holder.get("v")
@@ -884,9 +1102,24 @@ def build_plan_focus_viewer(
             return
         v._stack_w = max(1.0, float(e.width))
         v._stack_h = max(_FOCUS_MIN_VIEWPORT_H, float(e.height))
+        v.refresh_text_change_overlay()
+
+    def _on_viewer_interaction_start(_e: ft.ControlEvent) -> None:
+        v = holder.get("v")
+        if v is not None:
+            v.hide_text_change_tooltip()
+
+    viewer.on_interaction_start = _on_viewer_interaction_start
 
     viewport_stack = ft.Stack(
-        [viewport_gesture, draw_gesture, draw_rubber_band, tools_pill_host],
+        [
+            viewport_gesture,
+            text_labels_overlay,
+            draw_gesture,
+            draw_rubber_band,
+            tools_pill_host,
+            text_change_tooltip_host,
+        ],
         expand=True,
         clip_behavior=ft.ClipBehavior.NONE,
     )
@@ -926,6 +1159,8 @@ def build_plan_focus_viewer(
         _draw_cloud_btn=draw_cloud_btn,
         _export_btn=export_btn,
         _viewport_stack=viewport_stack,
+        _text_labels_overlay=text_labels_overlay,
+        _text_change_tooltip_host=text_change_tooltip_host,
         _annotations_overlay=annotations_overlay,
         _draw_rubber_band=draw_rubber_band,
         _tools_pill_host=tools_pill_host,
@@ -939,20 +1174,75 @@ def build_plan_focus_viewer(
     return focus
 
 
+def refresh_compare_page_text_overlay(
+    overlay: ComparePageTextOverlay,
+    iv: ft.InteractiveViewer,
+    changes: list[PlanTextChangeView],
+    *,
+    overlay_mode: PlanTextOverlayMode,
+    hover_enabled: bool,
+) -> None:
+    rect = compare_iv_layout_rect(iv)
+    page_changes = _filter_text_changes_for_overlay(changes, overlay.page_index, overlay_mode)
+    host = overlay.tooltip_host
+
+    def _on_hover(ch: PlanTextChangeView, ax: float, ay: float) -> None:
+        if not hover_enabled:
+            return
+        host.content = build_text_change_hover_card(ch.old_text, ch.new_text, kind=ch.kind)
+        vw, vh = _viewer_viewport(iv)
+        left, top = _clamp_tools_pill_position(
+            ax,
+            ay,
+            stack_w=vw,
+            stack_h=vh,
+            pill_w=_TEXT_CHANGE_TOOLTIP_EST_W,
+            pill_h=_TEXT_CHANGE_TOOLTIP_EST_H,
+        )
+        host.left = left
+        host.top = top
+        host.visible = True
+        if ctrl_on_page(host):
+            host.update()
+
+    def _on_exit() -> None:
+        if bool(getattr(host, "visible", False)):
+            host.visible = False
+            if ctrl_on_page(host):
+                host.update()
+
+    overlay.labels_stack.controls = build_text_change_overlay_controls(
+        page_changes,
+        rect,
+        overlay_mode=overlay_mode,
+        hover_enabled=hover_enabled,
+        on_pin_hover=_on_hover,
+        on_pin_hover_exit=_on_exit,
+    )
+    if ctrl_on_page(overlay.labels_stack):
+        overlay.labels_stack.update()
+
+
 def plan_picture_compare_column(
     page_png_paths: list[Path],
     *,
     page_viewport_height: float = _DEFAULT_PAGE_VIEWPORT_H,
     min_scale: float = _FOCUS_MIN_SCALE,
     max_scale: float = _FOCUS_MAX_SCALE,
-) -> tuple[ft.Column, list[ft.InteractiveViewer]]:
+    text_changes: list[PlanTextChangeView] | None = None,
+    overlay_mode: PlanTextOverlayMode = "candidate",
+    hover_enabled: bool = True,
+    text_overlay_visible: bool = True,
+) -> tuple[ft.Column, list[ft.InteractiveViewer], list[ComparePageTextOverlay]]:
     """
     One ``InteractiveViewer`` per page for a compare column (baseline or candidate).
     Outer ``ListView`` scrolls; wire pairs with :func:`wire_synced_interactive_viewer_pair`.
     """
     viewers: list[ft.InteractiveViewer] = []
+    overlays: list[ComparePageTextOverlay] = []
     rows: list[ft.Control] = []
     paths = list(page_png_paths)
+    show_text = bool(text_overlay_visible and text_changes)
     for i, p in enumerate(paths):
         iw, ih = _read_png_pixel_size(p)
         img = ft.Image(
@@ -972,17 +1262,55 @@ def plan_picture_compare_column(
             interaction_update_interval=50,
             data={"img_w": iw, "img_h": ih, "viewport_h": page_viewport_height},
         )
+        if show_text:
+            labels_stack = ft.Stack([], expand=True)
+            tooltip_host = build_text_change_tooltip_host()
+            page_overlay = ComparePageTextOverlay(
+                page_index=i,
+                labels_stack=labels_stack,
+                tooltip_host=tooltip_host,
+            )
+
+            def _hide_tip(_e: ft.ControlEvent, h: ft.Container = tooltip_host) -> None:
+                if bool(getattr(h, "visible", False)):
+                    h.visible = False
+                    if ctrl_on_page(h):
+                        h.update()
+
+            iv.on_interaction_start = _hide_tip
+            refresh_compare_page_text_overlay(
+                page_overlay,
+                iv,
+                text_changes or [],
+                overlay_mode=overlay_mode,
+                hover_enabled=hover_enabled,
+            )
+            overlays.append(page_overlay)
+            page_stack = ft.Stack(
+                [iv, labels_stack, tooltip_host],
+                expand=True,
+            )
+            page_content: ft.Control = ft.Container(
+                content=page_stack,
+                height=page_viewport_height,
+                alignment=ft.Alignment.TOP_CENTER,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                border=_PANE_BORDER,
+                border_radius=8,
+            )
+        else:
+            page_content = ft.Container(
+                content=iv,
+                height=page_viewport_height,
+                alignment=ft.Alignment.TOP_CENTER,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                border=_PANE_BORDER,
+                border_radius=8,
+            )
         viewers.append(iv)
         rows.append(
             ft.Container(
-                content=ft.Container(
-                    content=iv,
-                    height=page_viewport_height,
-                    alignment=ft.Alignment.TOP_CENTER,
-                    clip_behavior=ft.ClipBehavior.HARD_EDGE,
-                    border=_PANE_BORDER,
-                    border_radius=8,
-                ),
+                content=page_content,
                 padding=ft.padding.only(bottom=8 if i + 1 < len(paths) else 0),
             )
         )
@@ -993,7 +1321,7 @@ def plan_picture_compare_column(
         scroll=None,
         expand=True,
     )
-    return col, viewers
+    return col, viewers, overlays
 
 
 def wire_synced_interactive_viewer_pair(

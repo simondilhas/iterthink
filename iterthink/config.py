@@ -62,10 +62,12 @@ SELECTION_OVERLAY: str = "#88B8A8D4"
 STARTUP_DAILY_LOG: bool = True
 NEW_NOTE_NAME_TEMPLATE: str = "unnamed-{n}.md"
 RAG_SYSTEM: bool = False
-RAG_INDEX_ON_STARTUP: bool = True
+RAG_SEARCH_ENABLED: bool = False
+RAG_INDEX_ON_STARTUP: bool = False
 RAG_OVERLAP_CHARS: int = 200
-RAG_RERANKER_ENABLED: bool = True
+RAG_RERANKER_ENABLED: bool = False
 RAG_RERANKER_MODEL: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+RAG_CONTEXT_MAX_CHARS: int = 2400
 PRIVACY_SHIELD_ENABLED: bool = True
 PRIVACY_SHIELD_HF_REPO: str = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
 PRIVACY_SHIELD_HF_FILE: str = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
@@ -74,6 +76,12 @@ PRIVACY_SHIELD_REINJECT: bool = True
 PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT: bool = False
 PRIVACY_SHIELD_CHUNK_MAX_CHARS: int = 2800
 PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS: int = 1
+TOKEN_COST_PERIOD: str = "year"
+PLAN_PDF_IMPORT_ENABLED: bool = False
+FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED: bool = False
+OCR_ENABLED: bool = False
+OCR_ENGINE: str = "rapidocr"
+OCR_MODEL: str = "ppocrv4_latin_mobile"
 
 
 def _bundled_defaults_dict() -> dict[str, Any]:
@@ -170,11 +178,15 @@ def refresh() -> None:
     global PAGE_BG, PRIMARY_COLOR, HIGHLIGHT, ON_PRIMARY, ON_SURFACE, ON_SURFACE_SOFT
     global ON_SURFACE_VARIANT, OUTLINE, SUCCESS
     global SURFACE, SURFACE_VARIANT, SIDEBAR_SURFACE, CHAT_SYSTEM, SELECTION_OVERLAY
-    global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE, RAG_SYSTEM
+    global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE, RAG_SYSTEM, RAG_SEARCH_ENABLED
     global RAG_INDEX_ON_STARTUP, RAG_OVERLAP_CHARS, RAG_RERANKER_ENABLED, RAG_RERANKER_MODEL
+    global RAG_CONTEXT_MAX_CHARS
     global PRIVACY_SHIELD_ENABLED, PRIVACY_SHIELD_HF_REPO, PRIVACY_SHIELD_HF_FILE
     global PRIVACY_SHIELD_CACHE_NAME, PRIVACY_SHIELD_REINJECT, PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT
     global PRIVACY_SHIELD_CHUNK_MAX_CHARS, PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS
+    global TOKEN_COST_PERIOD
+    global PLAN_PDF_IMPORT_ENABLED, FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED
+    global OCR_ENABLED, OCR_ENGINE, OCR_MODEL
 
     merged = _merged_config()
     DOCUMENTS = _as_path("documents_root", merged)
@@ -247,6 +259,9 @@ def refresh() -> None:
         rs = _bundled_rag
     RAG_SYSTEM = _coerce_rag_system_value(rs)
 
+    rse = merged.get("rag_search_enabled", _bd_rag.get("rag_search_enabled", False))
+    RAG_SEARCH_ENABLED = bool(rse) if isinstance(rse, bool) else False
+
     rio = merged.get("rag_index_on_startup", _bd_rag.get("rag_index_on_startup", True))
     RAG_INDEX_ON_STARTUP = bool(rio) if isinstance(rio, bool) else True
 
@@ -265,6 +280,12 @@ def refresh() -> None:
         if isinstance(rrm, str) and rrm.strip()
         else "Xenova/ms-marco-MiniLM-L-6-v2"
     )
+
+    rcm = merged.get("rag_context_max_chars", _bd_rag.get("rag_context_max_chars", 2400))
+    try:
+        RAG_CONTEXT_MAX_CHARS = max(200, int(rcm))
+    except (TypeError, ValueError):
+        RAG_CONTEXT_MAX_CHARS = 2400
 
     nt = merged.get("new_note_name_template")
     if isinstance(nt, str) and nt.strip() and nt.count("{n}") == 1:
@@ -322,6 +343,33 @@ def refresh() -> None:
         PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS = max(0, min(5, int(pso)))
     except (TypeError, ValueError):
         PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS = 1
+
+    tcp = merged.get("token_cost_period", _bd.get("token_cost_period", "year"))
+    if isinstance(tcp, str) and tcp.strip().lower() in ("day", "month", "year"):
+        TOKEN_COST_PERIOD = tcp.strip().lower()
+    else:
+        TOKEN_COST_PERIOD = "year"
+
+    from iterthink.ocr_settings import normalize_ocr_engine, normalize_ocr_model
+
+    ppie = merged.get("plan_pdf_import_enabled", _bd.get("plan_pdf_import_enabled", False))
+    PLAN_PDF_IMPORT_ENABLED = bool(ppie) if isinstance(ppie, bool) else False
+
+    fsra = merged.get(
+        "focus_selection_review_actions_enabled",
+        _bd.get("focus_selection_review_actions_enabled", False),
+    )
+    FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED = bool(fsra) if isinstance(fsra, bool) else False
+
+    oce = merged.get("ocr_enabled", _bd.get("ocr_enabled", False))
+    OCR_ENABLED = bool(oce) if isinstance(oce, bool) else False
+
+    oeng = merged.get("ocr_engine", _bd.get("ocr_engine", "rapidocr"))
+    engine = normalize_ocr_engine(oeng if isinstance(oeng, str) else None)
+    OCR_ENGINE = engine
+
+    om = merged.get("ocr_model", _bd.get("ocr_model", "ppocrv4_latin_mobile"))
+    OCR_MODEL = normalize_ocr_model(engine, om if isinstance(om, str) else None)
 
 
 def read_bootstrap_yaml_text() -> str:

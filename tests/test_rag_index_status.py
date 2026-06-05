@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from iterthink.persistence import content_repo, store_db
-from iterthink.services.rag.index_status import compute_rag_index_status
+from iterthink.services.rag.index_status import RagIndexStatus, compute_rag_index_status, rag_stat_values
 from iterthink.services.rag.workspace_indexer import index_document_path
 
 
@@ -93,6 +93,68 @@ def test_compute_rag_index_status_active_and_historical(
     assert status.total_documents == 1
 
 
+def test_compute_rag_index_status_stale_documents(
+    tmp_path: Path, ephemeral_store: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc_root = tmp_path / "docs"
+    doc_root.mkdir()
+    md = doc_root / "stale.md"
+    md.write_text("# Hi\n\nVersion one.", encoding="utf-8")
+    monkeypatch.setattr("iterthink.config.DOCUMENTS", doc_root)
+
+    from iterthink.db.session import session_scope
+    from iterthink.services.rag.index_status import clear_workspace_markdown_count_cache
+
+    clear_workspace_markdown_count_cache()
+
+    conn = store_db.connect()
+    store_db.init_schema(conn)
+
+    async def _index_v1() -> None:
+        with session_scope() as s, patch(
+            "iterthink.services.rag.workspace_indexer.embed_texts_cached",
+            side_effect=_mock_embed,
+        ):
+            await index_document_path(s, conn, md, enrichment_mode="skip", latest_version_only=True)
+
+    asyncio.run(_index_v1())
+
+    with session_scope() as session:
+        row = content_repo.get_artifact_lineage_by_path(session, md)
+        assert row is not None
+        vid_v1 = store_db.rag_lineage_index_get(conn, row.lineage_id)
+        assert vid_v1 is not None
+        indexed_vid = int(vid_v1["content_version_id"])
+        content_repo.persist_version_snapshot(session, md.resolve(), "# Hi\n\nVersion two.", "manual")
+        session.commit()
+        latest_vid = content_repo.latest_version_id_for_lineage(session, row.lineage_id)
+        assert latest_vid is not None
+        assert int(latest_vid) != indexed_vid
+
+    with session_scope() as session:
+        status = compute_rag_index_status(conn, session)
+    assert status.stale_documents == 1
+    assert status.indexed_documents == 1
+
+
+def test_rag_stat_values() -> None:
+    status = RagIndexStatus(
+        indexed_documents=3,
+        total_documents=5,
+        stale_documents=2,
+        active_chunks=100,
+        historical_chunks=25,
+        index_size_bytes=2048,
+        last_indexed_at=None,
+    )
+    stats = rag_stat_values(status)
+    assert stats["documents"] == "3 / 5 indexed · 2 stale"
+    assert stats["index_size"] == "2 KB"
+    assert stats["last_indexed"] == "—"
+    assert stats["active_chunks"] == "100"
+    assert stats["historical_chunks"] == "25"
+
+
 async def _mock_embed(conn: object, doc_key: str, inputs: list[str]) -> list[list[float]]:
     import numpy as np
 
@@ -114,7 +176,7 @@ async def _mock_embed(conn: object, doc_key: str, inputs: list[str]) -> list[lis
     return out
 
 
-def test_latest_version_only_skips_no_snapshot(
+def test_indexes_from_disk_when_no_pbs_snapshot(
     tmp_path: Path, ephemeral_store: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     doc_root = tmp_path / "docs"
@@ -128,7 +190,7 @@ def test_latest_version_only_skips_no_snapshot(
 
     from iterthink.db.session import session_scope
 
-    async def _run() -> bool:
+    async def _run() -> str:
         with session_scope() as s, patch(
             "iterthink.services.rag.workspace_indexer.embed_texts_cached",
             side_effect=_mock_embed,
@@ -137,8 +199,8 @@ def test_latest_version_only_skips_no_snapshot(
                 s, conn, md, enrichment_mode="skip", latest_version_only=True
             )
 
-    assert asyncio.run(_run()) is False
-    assert conn.execute("SELECT COUNT(*) FROM rag_lineage_index").fetchone()[0] == 0
+    assert asyncio.run(_run()) == "updated"
+    assert conn.execute("SELECT COUNT(*) FROM rag_lineage_index").fetchone()[0] == 1
 
 
 def test_new_version_retains_old_chunks(

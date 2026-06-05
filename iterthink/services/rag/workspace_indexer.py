@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+IndexOutcome = Literal["updated", "unchanged", "no_body", "empty", "missing"]
 
 from iterthink import config
 from iterthink.ai.local_embedding import LOCAL_EMBEDDING_MODEL_ID
@@ -13,36 +18,62 @@ from iterthink.compare.paragraph_semantics import embed_texts_cached, text_hash
 from iterthink.persistence import content_repo, store_db
 from iterthink.services.rag.chunking import build_parent_child_chunks, document_title
 from iterthink.services.rag.enrichment import enrich_child, enrichment_allowed_for_tier
+from iterthink.services.rag.project_scope import project_scope_from_lineage
 from iterthink.studio.tree import is_excluded_from_doc_tree
 
 ProgressCb = Callable[[int, int, str], Awaitable[None] | None]
+
+_log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class IndexAllResult:
+    updated: int
+    scanned: int
+    skipped_empty: int
+    skipped_unchanged: int
+    skipped_no_body: int
 
 
 def _doc_embed_key(lineage_id: str, content_version_id: int) -> str:
     return f"rag_idx::{lineage_id}::{content_version_id}"
 
 
-def _load_body_for_path(
+def _read_disk_body(resolved: Path) -> str | None:
+    try:
+        return resolved.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _load_body_for_index(
     session: Any,
     resolved: Path,
     lineage: Any,
-    *,
-    latest_version_only: bool,
 ) -> tuple[str, int, str] | None:
-    """Return (body, content_version_id, content_sha) or None to skip."""
-    vid = content_repo.latest_version_id_for_lineage(session, lineage.lineage_id)
+    """Load text for indexing: PBS latest version, else on-disk + snapshot."""
+    lid = lineage.lineage_id
+    vid = content_repo.latest_version_id_for_lineage(session, lid)
     if vid is not None:
         body = content_repo.load_version_body(session, vid)
         sha = content_repo.content_sha256(body)
         return body, int(vid), sha
-    if latest_version_only:
-        return None
-    try:
-        body = resolved.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+
+    body = _read_disk_body(resolved)
+    if body is None:
         return None
     sha = content_repo.content_sha256(body)
-    return body, int(lineage.id), sha
+    new_vid = content_repo.persist_version_snapshot(
+        session, resolved, body, "manual", skip_if_unchanged_sha=False
+    )
+    if new_vid is not None:
+        return body, int(new_vid), sha
+    vid = content_repo.latest_version_id_for_lineage(session, lid)
+    if vid is not None:
+        body = content_repo.load_version_body(session, vid)
+        sha = content_repo.content_sha256(body)
+        return body, int(vid), sha
+    return None
 
 
 def iter_workspace_markdown_paths() -> list[Path]:
@@ -68,32 +99,36 @@ async def index_document_path(
     llm_model: str | None = None,
     embed_model_id: str = LOCAL_EMBEDDING_MODEL_ID,
     latest_version_only: bool = True,
-) -> bool:
-    """Index one markdown file. Returns True if indexed, False if skipped unchanged."""
+    force_reindex: bool = False,
+) -> IndexOutcome:
+    """Index one markdown file. Outcome describes whether the RAG index changed."""
+    del latest_version_only  # search-only; indexing always uses PBS latest or on-disk fallback
     resolved = resolved.resolve()
     if not resolved.is_file():
-        return False
+        return "missing"
 
     lineage = content_repo.get_or_create_lineage(session, resolved)
     lid = lineage.lineage_id
-    loaded = _load_body_for_path(
-        session, resolved, lineage, latest_version_only=latest_version_only
-    )
+    project_id, project_slug = project_scope_from_lineage(session, resolved, lineage)
+    loaded = _load_body_for_index(session, resolved, lineage)
     if loaded is None:
-        return False
+        return "no_body"
     body, vid, sha = loaded
     if not body.strip():
         store_db.rag_delete_for_lineage(conn, lid)
         conn.commit()
-        return False
+        return "empty"
 
     existing = store_db.rag_lineage_index_get(conn, lid)
-    if existing is not None:
+    if existing is not None and not force_reindex:
         if (
             str(existing["content_sha"]) == sha
             and int(existing["content_version_id"]) == int(vid)
         ):
-            return False
+            session.commit()
+            return "unchanged"
+
+    session.commit()
 
     store_db.rag_delete_for_version(conn, int(vid))
     title = document_title(body, resolved.name)
@@ -106,9 +141,11 @@ async def index_document_path(
             content_version_id=int(vid),
             content_sha=sha,
             enrichment_mode="skip",
+            project_id=project_id,
+            project_slug=project_slug,
         )
         conn.commit()
-        return True
+        return "updated"
 
     do_enrich = enrichment_allowed_for_tier(ki_tier, enrichment_mode) and llm is not None
     mode_record = "local" if do_enrich else "skip"
@@ -118,6 +155,7 @@ async def index_document_path(
 
     for parent in parents:
         for child in parent.children:
+            enriched = child
             if do_enrich and llm_model:
                 summary, questions = await enrich_child(
                     raw=child.raw_text,
@@ -126,11 +164,10 @@ async def index_document_path(
                     llm=llm,
                     model=llm_model,
                 )
-                child.summary = summary
-                child.questions = questions  # type: ignore[assignment]
-            embed_text = child.build_embed_text(doc_title=title)
+                enriched = replace(child, summary=summary, questions=questions)
+            embed_text = enriched.build_embed_text(doc_title=title, project_label=project_slug)
             embed_inputs.append(embed_text)
-            flat.append((parent, child))
+            flat.append((parent, enriched))
 
     dk = _doc_embed_key(lid, int(vid))
     await embed_texts_cached(conn, dk, embed_inputs)
@@ -180,9 +217,11 @@ async def index_document_path(
         content_version_id=int(vid),
         content_sha=sha,
         enrichment_mode=mode_record,
+        project_id=project_id,
+        project_slug=project_slug,
     )
     conn.commit()
-    return True
+    return "updated"
 
 
 async def index_all_documents(
@@ -195,26 +234,52 @@ async def index_all_documents(
     llm_model: str | None = None,
     progress_cb: ProgressCb | None = None,
     latest_version_only: bool = True,
-) -> tuple[int, int]:
-    """Index all workspace markdown files. Returns (indexed_count, total_count)."""
+    force_reindex: bool = False,
+) -> IndexAllResult:
+    """Index all workspace markdown files."""
     paths = iter_workspace_markdown_paths()
     total = len(paths)
-    indexed = 0
+    updated = 0
+    skipped_empty = 0
+    skipped_unchanged = 0
+    skipped_no_body = 0
     for i, path in enumerate(paths):
         if progress_cb is not None:
             maybe = progress_cb(i + 1, total, path.name)
             if maybe is not None:
                 await maybe
-        changed = await index_document_path(
-            session,
-            conn,
-            path,
-            enrichment_mode=enrichment_mode,
-            ki_tier=ki_tier,
-            llm=llm,
-            llm_model=llm_model,
-            latest_version_only=latest_version_only,
-        )
-        if changed:
-            indexed += 1
-    return indexed, total
+        try:
+            outcome = await index_document_path(
+                session,
+                conn,
+                path,
+                enrichment_mode=enrichment_mode,
+                ki_tier=ki_tier,
+                llm=llm,
+                llm_model=llm_model,
+                latest_version_only=latest_version_only,
+                force_reindex=force_reindex,
+            )
+            session.commit()
+        except asyncio.CancelledError:
+            session.rollback()
+            raise
+        except BaseException:
+            session.rollback()
+            _log.warning("RAG index failed for %s", path, exc_info=True)
+            continue
+        if outcome == "updated":
+            updated += 1
+        elif outcome == "unchanged":
+            skipped_unchanged += 1
+        elif outcome == "empty":
+            skipped_empty += 1
+        elif outcome == "no_body":
+            skipped_no_body += 1
+    return IndexAllResult(
+        updated=updated,
+        scanned=total,
+        skipped_empty=skipped_empty,
+        skipped_unchanged=skipped_unchanged,
+        skipped_no_body=skipped_no_body,
+    )

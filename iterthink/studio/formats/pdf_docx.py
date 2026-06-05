@@ -11,11 +11,12 @@ from iterthink import config
 from iterthink.persistence import content_repo, plan_pdf_annotations
 from iterthink.services import document_import
 from iterthink.services.plan_pdf_export import export_annotated_pdf
+from iterthink.services.plan_text_diff import diff_plan_geometry, geometry_to_label_views
 from iterthink.services.plan_text_extract import (
     load_plan_text_sidecar,
-    page_pngs_with_text_overlay,
     write_plan_text_sidecar,
 )
+from iterthink.studio.plan_text_change_ui import plan_hover_enabled
 from ..history.candidate_state import CompareCandidateSource
 from iterthink.tools.pdf_visual_diff import diff_pdfs_to_overlay_paths
 
@@ -197,6 +198,41 @@ class MarkdownStudioAssetCompare:
         self._sync_plan_overlay_pane_visibility()
 
     @staticmethod
+    def _plan_raw_pages_blocking(pdf_abs: Path) -> list[Path]:
+        return document_import.render_pdf_to_png_pages(pdf_abs, pdf_profile="plan")
+
+    def _plan_text_changes_for_versions(
+        self,
+        doc_path: Path,
+        base_vid: int | None,
+        cand_vid: int | None,
+    ) -> list:
+        if base_vid is None or cand_vid is None:
+            return []
+        base_geo = load_plan_text_sidecar(doc_path, base_vid) or {"pages": []}
+        cand_geo = load_plan_text_sidecar(doc_path, cand_vid) or {"pages": []}
+        if not base_geo.get("pages") and not cand_geo.get("pages"):
+            return []
+        if int(base_vid) == int(cand_vid):
+            return geometry_to_label_views(cand_geo)
+        return diff_plan_geometry(base_geo, cand_geo)
+
+    def _compose_plan_text_changes(
+        self,
+        doc_path: Path,
+        vid: int,
+        geometry: dict,
+    ) -> list:
+        with session_scope() as s:
+            pairs = content_repo.list_plan_pdf_version_options(s, doc_path)
+        if len(pairs) >= 2 and int(pairs[0][0]) == int(vid):
+            prev_vid = int(pairs[1][0])
+            return self._plan_text_changes_for_versions(doc_path, prev_vid, vid)
+        if geometry.get("pages"):
+            return geometry_to_label_views(geometry)
+        return []
+
+    @staticmethod
     def _plan_display_pages_blocking(
         pdf_abs: Path,
         doc_path: Path,
@@ -204,13 +240,8 @@ class MarkdownStudioAssetCompare:
         *,
         show_labels: bool,
     ) -> list[Path]:
-        pages = document_import.render_pdf_to_png_pages(pdf_abs, pdf_profile="plan")
-        if not show_labels:
-            return pages
-        geometry = load_plan_text_sidecar(doc_path, version_id) or {"pages": []}
-        if geometry.get("pages"):
-            return page_pngs_with_text_overlay(pages, geometry, show_labels=True)
-        return pages
+        del doc_path, version_id, show_labels
+        return document_import.render_pdf_to_png_pages(pdf_abs, pdf_profile="plan")
 
     def _plan_compare_panels(self) -> list:
         panels = [self._plan_compare]
@@ -794,13 +825,14 @@ class MarkdownStudioAssetCompare:
         if pg is not None:
             pg.update()
 
-        def _load_base() -> tuple[list[Path], dict]:
+        def _load_base() -> tuple[list[Path], dict, list]:
             pages = document_import.render_pdf_to_png_pages(pdf_abs, pdf_profile="plan")
             geometry = load_plan_text_sidecar(doc_path, vid) or {"pages": []}
-            return pages, geometry
+            text_changes = self._compose_plan_text_changes(doc_path, vid, geometry)
+            return pages, geometry, text_changes
 
         try:
-            base_pages, geometry = await asyncio.to_thread(_load_base)
+            base_pages, geometry, text_changes = await asyncio.to_thread(_load_base)
         except BaseException as ex:
             if gen != getattr(self, "_compose_plan_load_gen", 0):
                 return
@@ -828,6 +860,12 @@ class MarkdownStudioAssetCompare:
                 on_revision_cloud=self._on_compose_plan_revision_cloud,
                 on_export_pdf=self._on_compose_plan_export_pdf,
             )
+            pg = getattr(self, "page", None)
+            focus_viewer.set_text_changes(
+                text_changes,
+                visible=show_labels and bool(text_changes),
+                hover_enabled=plan_hover_enabled(pg),
+            )
             self._apply_compose_plan_viewer(focus_viewer, surface_key=surface_key, page_ix=page_ix)
             if focus_viewer.page_count > 0:
                 self.page.run_task(
@@ -842,37 +880,6 @@ class MarkdownStudioAssetCompare:
 
         if gen != getattr(self, "_compose_plan_load_gen", 0):
             return
-
-        if show_labels and (geometry.get("pages") or []):
-
-            def _overlay() -> list[Path]:
-                return page_pngs_with_text_overlay(base_pages, geometry, show_labels=True)
-
-            try:
-                labeled = await asyncio.to_thread(_overlay)
-            except BaseException as ex:
-                self._snack(f"Label overlay failed: {ex}")
-                return
-            if gen != getattr(self, "_compose_plan_load_gen", 0):
-                return
-            try:
-                focus_viewer = plan_picture_viewer.build_plan_focus_viewer(
-                    labeled,
-                    initial_page_index=page_ix,
-                    on_page_change=self._on_compose_plan_viewer_page_changed,
-                    on_place_comment=self._on_compose_plan_place_comment,
-                    on_revision_cloud=self._on_compose_plan_revision_cloud,
-                    on_export_pdf=self._on_compose_plan_export_pdf,
-                )
-                self._apply_compose_plan_viewer(
-                    focus_viewer, surface_key=surface_key, page_ix=page_ix
-                )
-                if focus_viewer.page_count > 0:
-                    self.page.run_task(
-                        self._show_compose_plan_page_async, self._compose_plan_page_index
-                    )
-            except BaseException as ex:
-                self._snack(f"Label overlay failed: {ex}")
 
     async def _show_compose_plan_page_async(self, page_index: int) -> None:
         host = getattr(self, "_compose_plan_host", None)
@@ -1221,12 +1228,24 @@ class MarkdownStudioAssetCompare:
             )
             return
 
+        show_labels = bool(getattr(self, "_compose_plan_show_labels", True))
+        doc_path = self.current_path.resolve() if self.current_path else None
+        base_vid = int(base[0]) if base is not None else None
+        cand_vid = int(cand[0]) if cand is not None else None
+        text_changes: list = []
+        if doc_path is not None and show_labels:
+            text_changes = self._plan_text_changes_for_versions(doc_path, base_vid, cand_vid)
+
+        pg = getattr(self, "page", None)
+        hover = plan_hover_enabled(pg)
+
         def _append_column(
             lv: ft.ListView,
             paths: list[Path] | None,
             err: str | None,
             *,
             iv_out: list[ft.InteractiveViewer],
+            overlay_mode: plan_picture_viewer.PlanTextOverlayMode,
         ) -> None:
             if paths is None:
                 lv.controls.append(
@@ -1236,16 +1255,21 @@ class MarkdownStudioAssetCompare:
                     )
                 )
                 return
-            col, ivs = plan_picture_viewer.plan_picture_compare_column(paths)
+            col, ivs, _overlays = plan_picture_viewer.plan_picture_compare_column(
+                paths,
+                text_changes=text_changes if show_labels else None,
+                overlay_mode=overlay_mode,
+                hover_enabled=hover,
+                text_overlay_visible=show_labels,
+            )
             iv_out.extend(ivs)
             lv.controls.append(ft.Container(content=col, expand=True))
 
         left_ivs: list[ft.InteractiveViewer] = []
         right_ivs: list[ft.InteractiveViewer] = []
-        _append_column(left_lv, base_paths, base_err, iv_out=left_ivs)
-        _append_column(right_lv, cand_paths, cand_err, iv_out=right_ivs)
+        _append_column(left_lv, base_paths, base_err, iv_out=left_ivs, overlay_mode="baseline")
+        _append_column(right_lv, cand_paths, cand_err, iv_out=right_ivs, overlay_mode="candidate")
 
-        pg = getattr(self, "page", None)
         if pg is not None:
             for i in range(min(len(left_ivs), len(right_ivs))):
                 plan_picture_viewer.wire_synced_interactive_viewer_pair(
@@ -1520,12 +1544,24 @@ class MarkdownStudioAssetCompare:
             )
             return
 
+        show_labels = bool(getattr(self, "_compose_plan_show_labels", True))
+        doc_path = self.current_path.resolve() if self.current_path else None
+        base_vid = int(base[0]) if base is not None else None
+        cand_vid = int(cand[0]) if cand is not None else None
+        text_changes: list = []
+        if doc_path is not None and show_labels:
+            text_changes = self._plan_text_changes_for_versions(doc_path, base_vid, cand_vid)
+
+        pg = getattr(self, "page", None)
+        hover = plan_hover_enabled(pg)
+
         def _append_column(
             lv: ft.ListView,
             paths: list[Path] | None,
             err: str | None,
             *,
             iv_out: list[ft.InteractiveViewer],
+            overlay_mode: plan_picture_viewer.PlanTextOverlayMode,
         ) -> None:
             if paths is None:
                 lv.controls.append(
@@ -1535,15 +1571,20 @@ class MarkdownStudioAssetCompare:
                     )
                 )
                 return
-            col, ivs = plan_picture_viewer.plan_picture_compare_column(paths)
+            col, ivs, _overlays = plan_picture_viewer.plan_picture_compare_column(
+                paths,
+                text_changes=text_changes if show_labels else None,
+                overlay_mode=overlay_mode,
+                hover_enabled=hover,
+                text_overlay_visible=show_labels,
+            )
             iv_out.extend(ivs)
             lv.controls.append(ft.Container(content=col, expand=True))
 
         left_ivs: list[ft.InteractiveViewer] = []
         right_ivs: list[ft.InteractiveViewer] = []
-        _append_column(left_lv, base_paths, base_err, iv_out=left_ivs)
-        _append_column(right_lv, cand_paths, cand_err, iv_out=right_ivs)
-        pg = getattr(self, "page", None)
+        _append_column(left_lv, base_paths, base_err, iv_out=left_ivs, overlay_mode="baseline")
+        _append_column(right_lv, cand_paths, cand_err, iv_out=right_ivs, overlay_mode="candidate")
         if pg is not None:
             for i in range(min(len(left_ivs), len(right_ivs))):
                 plan_picture_viewer.wire_synced_interactive_viewer_pair(

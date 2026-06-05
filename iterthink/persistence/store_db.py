@@ -13,11 +13,12 @@ import sqlite_vec
 
 from iterthink import config
 
-RAG_SCHEMA_VERSION = 2
+RAG_SCHEMA_VERSION = 3
 
 SETTINGS_CHAT = "ollama_chat_model"
 SETTINGS_EMBED = "ollama_embed_model"
 SETTINGS_RAG_ENRICHMENT_MODE = "rag_enrichment_mode"
+SETTINGS_RAG_ENRICHMENT_TIER = "rag_enrichment_tier"
 SETTINGS_RAG_RERANKER_ENABLED = "rag_reranker_enabled"
 SETTINGS_RAG_LATEST_VERSION_ONLY = "rag_latest_version_only"
 
@@ -34,6 +35,7 @@ SETTINGS_SPELLCHECK_LANGUAGE_MODE = "spellcheck_language_mode"
 SETTINGS_SPELLCHECK_LANGUAGE = "spellcheck_language"
 SETTINGS_PROMPTS_BUNDLED_DISMISSED = "prompts_bundled_dismissed"
 SETTINGS_PROMPTS_REMOVED_IDS = "prompts_removed_ids"
+SETTINGS_TOKEN_COST_PERIOD = "token_cost_period"
 
 
 def ensure_store_dir() -> None:
@@ -182,6 +184,13 @@ _RAG_SCHEMA_V2 = """
         );
 """
 
+_RAG_SCHEMA_V3 = """
+        ALTER TABLE rag_lineage_index ADD COLUMN project_id INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE rag_lineage_index ADD COLUMN project_slug TEXT;
+        CREATE INDEX IF NOT EXISTS idx_rag_lineage_project_slug
+        ON rag_lineage_index (project_slug);
+"""
+
 
 def init_schema(conn: sqlite3.Connection) -> None:
     cur = conn.execute("PRAGMA user_version")
@@ -194,6 +203,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
     if ver < 2:
         conn.executescript(_RAG_SCHEMA_V2)
         ver = 2
+    if ver < 3:
+        conn.executescript(_RAG_SCHEMA_V3)
+        ver = 3
     conn.execute(f"PRAGMA user_version = {RAG_SCHEMA_VERSION}")
     conn.commit()
 
@@ -476,7 +488,8 @@ def rag_delete_for_version(conn: sqlite3.Connection, content_version_id: int) ->
 def rag_lineage_index_get(conn: sqlite3.Connection, lineage_id: str) -> sqlite3.Row | None:
     return conn.execute(
         """
-        SELECT lineage_id, content_version_id, content_sha, indexed_at, enrichment_mode
+        SELECT lineage_id, content_version_id, content_sha, indexed_at, enrichment_mode,
+               project_id, project_slug
         FROM rag_lineage_index WHERE lineage_id = ?
         """,
         (lineage_id,),
@@ -490,20 +503,33 @@ def rag_lineage_index_put(
     content_version_id: int,
     content_sha: str,
     enrichment_mode: str,
+    project_id: int = 1,
+    project_slug: str | None = None,
 ) -> None:
     now = time.time()
     conn.execute(
         """
         INSERT INTO rag_lineage_index (
-            lineage_id, content_version_id, content_sha, indexed_at, enrichment_mode
-        ) VALUES (?, ?, ?, ?, ?)
+            lineage_id, content_version_id, content_sha, indexed_at, enrichment_mode,
+            project_id, project_slug
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(lineage_id) DO UPDATE SET
             content_version_id = excluded.content_version_id,
             content_sha = excluded.content_sha,
             indexed_at = excluded.indexed_at,
-            enrichment_mode = excluded.enrichment_mode
+            enrichment_mode = excluded.enrichment_mode,
+            project_id = excluded.project_id,
+            project_slug = excluded.project_slug
         """,
-        (lineage_id, int(content_version_id), content_sha, now, enrichment_mode),
+        (
+            lineage_id,
+            int(content_version_id),
+            content_sha,
+            now,
+            enrichment_mode,
+            int(project_id),
+            project_slug,
+        ),
     )
 
 
@@ -585,7 +611,11 @@ def rag_child_insert(
 
 
 def rag_child_fetch_latest_rows(
-    conn: sqlite3.Connection, lineage_ids: list[str] | None = None
+    conn: sqlite3.Connection,
+    lineage_ids: list[str] | None = None,
+    *,
+    project_slug: str | None = None,
+    project_id: int | None = None,
 ) -> list[tuple]:
     """Return child rows for latest indexed version per lineage.
 
@@ -603,13 +633,23 @@ def rag_child_fetch_latest_rows(
     INNER JOIN rag_lineage_index li ON li.lineage_id = c.lineage_id
         AND li.content_version_id = c.content_version_id
     """
+    where: list[str] = []
+    params: list[object] = []
     if lineage_ids is not None:
         placeholders = ",".join("?" * len(lineage_ids))
-        sql = base + f" WHERE c.lineage_id IN ({placeholders}) ORDER BY c.lineage_id, c.slot_index"
-        rows = conn.execute(sql, lineage_ids).fetchall()
-    else:
-        sql = base + " ORDER BY c.lineage_id, c.slot_index"
-        rows = conn.execute(sql).fetchall()
+        where.append(f"c.lineage_id IN ({placeholders})")
+        params.extend(lineage_ids)
+    if project_slug is not None:
+        where.append("li.project_slug = ?")
+        params.append(project_slug)
+    if project_id is not None:
+        where.append("li.project_id = ?")
+        params.append(int(project_id))
+    sql = base
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY c.lineage_id, c.slot_index"
+    rows = conn.execute(sql, params).fetchall()
     return [tuple(r) for r in rows]
 
 
@@ -646,8 +686,21 @@ def settings_get(conn: sqlite3.Connection, key: str) -> str | None:
 
 
 def settings_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    from sqlalchemy.exc import OperationalError
+
     from iterthink.db.session import session_scope
     from iterthink.persistence import entity_settings
 
-    with session_scope() as session:
-        entity_settings.settings_set(session, key, value)
+    last_exc: OperationalError | None = None
+    for attempt in range(5):
+        try:
+            with session_scope() as session:
+                entity_settings.settings_set(session, key, value)
+            return
+        except OperationalError as exc:
+            last_exc = exc
+            if attempt >= 4:
+                break
+            time.sleep(0.05 * (attempt + 1))
+    if last_exc is not None:
+        raise last_exc

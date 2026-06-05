@@ -8,9 +8,30 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select, text
+
 from iterthink import config
+from iterthink.db.content_models import Content
 from iterthink.persistence import content_repo, store_db
 from iterthink.studio.tree import is_excluded_from_doc_tree
+
+_WORKSPACE_MD_COUNT_CACHE: tuple[float, int] | None = None
+_WORKSPACE_MD_COUNT_TTL_SEC = 30.0
+
+_STALE_COUNT_SQL = """
+SELECT COUNT(*)
+FROM rag_lineage_index li
+INNER JOIN content c
+  ON c.lineage_id = li.lineage_id
+ AND c.is_latest = 1
+ AND c.version_no > 0
+WHERE c.id != li.content_version_id
+"""
+
+
+def clear_workspace_markdown_count_cache() -> None:
+    global _WORKSPACE_MD_COUNT_CACHE
+    _WORKSPACE_MD_COUNT_CACHE = None
 
 
 def iter_workspace_markdown_paths() -> list[Path]:
@@ -25,6 +46,49 @@ def iter_workspace_markdown_paths() -> list[Path]:
     return out
 
 
+def count_workspace_markdown_paths() -> int:
+    """Count workspace .md files; cached briefly to avoid repeated rglob in Settings."""
+    global _WORKSPACE_MD_COUNT_CACHE
+    now = time.monotonic()
+    if _WORKSPACE_MD_COUNT_CACHE is not None:
+        cached_at, cached_count = _WORKSPACE_MD_COUNT_CACHE
+        if now - cached_at < _WORKSPACE_MD_COUNT_TTL_SEC:
+            return cached_count
+    count = len(iter_workspace_markdown_paths())
+    _WORKSPACE_MD_COUNT_CACHE = (now, count)
+    return count
+
+
+def _count_stale_indexed_documents(conn: Any, session: Any) -> int:
+    """Stale = indexed PBS version id differs from latest artifact version."""
+    if config.RAG_DB_PATH.resolve() == config.STORE_DB_PATH.resolve():
+        row = session.execute(text(_STALE_COUNT_SQL)).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
+    index_rows = conn.execute(
+        "SELECT lineage_id, content_version_id FROM rag_lineage_index"
+    ).fetchall()
+    if not index_rows:
+        return 0
+    lineage_ids = [str(row[0]) for row in index_rows]
+    latest_rows = session.execute(
+        select(Content.lineage_id, Content.id).where(
+            Content.lineage_id.in_(lineage_ids),
+            Content.is_latest.is_(True),
+            Content.version_no > 0,
+        )
+    ).all()
+    latest_by_lineage = {str(lid): int(vid) for lid, vid in latest_rows}
+    stale = 0
+    for row in index_rows:
+        lid = str(row[0])
+        indexed_vid = int(row[1])
+        latest_vid = latest_by_lineage.get(lid)
+        if latest_vid is not None and latest_vid != indexed_vid:
+            stale += 1
+    return stale
+
+
 @dataclass(frozen=True)
 class RagIndexStatus:
     indexed_documents: int
@@ -34,6 +98,12 @@ class RagIndexStatus:
     historical_chunks: int
     index_size_bytes: int | None
     last_indexed_at: float | None
+
+
+def format_index_size(size_bytes: int | None) -> str:
+    if size_bytes is None:
+        return "—"
+    return _format_bytes(size_bytes)
 
 
 def _format_bytes(n: int) -> str:
@@ -68,7 +138,7 @@ def format_chunks_line(status: RagIndexStatus) -> str:
 
 def compute_rag_index_status(conn: Any, session: Any) -> RagIndexStatus:
     indexed_documents = int(conn.execute("SELECT COUNT(*) FROM rag_lineage_index").fetchone()[0])
-    total_documents = len(iter_workspace_markdown_paths())
+    total_documents = count_workspace_markdown_paths()
 
     active_chunks = int(
         conn.execute(
@@ -87,16 +157,7 @@ def compute_rag_index_status(conn: Any, session: Any) -> RagIndexStatus:
     last_row = conn.execute("SELECT MAX(indexed_at) FROM rag_lineage_index").fetchone()
     last_indexed_at = float(last_row[0]) if last_row and last_row[0] is not None else None
 
-    stale_documents = 0
-    index_rows = conn.execute(
-        "SELECT lineage_id, content_version_id FROM rag_lineage_index"
-    ).fetchall()
-    for row in index_rows:
-        lid = str(row[0])
-        indexed_vid = int(row[1])
-        latest_vid = content_repo.latest_version_id_for_lineage(session, lid)
-        if latest_vid is not None and int(latest_vid) != indexed_vid:
-            stale_documents += 1
+    stale_documents = _count_stale_indexed_documents(conn, session)
 
     index_size_bytes: int | None = None
     try:
@@ -130,3 +191,16 @@ def is_lineage_index_stale(session: Any, lineage_id: str, indexed_version_id: in
 
 def format_last_indexed_line(status: RagIndexStatus) -> str:
     return f"Last indexed: {_format_timestamp(status.last_indexed_at)}"
+
+
+def rag_stat_values(status: RagIndexStatus) -> dict[str, str]:
+    documents = f"{status.indexed_documents} / {status.total_documents} indexed"
+    if status.stale_documents:
+        documents += f" · {status.stale_documents} stale"
+    return {
+        "documents": documents,
+        "index_size": format_index_size(status.index_size_bytes),
+        "last_indexed": _format_timestamp(status.last_indexed_at),
+        "active_chunks": f"{status.active_chunks:,}",
+        "historical_chunks": f"{status.historical_chunks:,}",
+    }

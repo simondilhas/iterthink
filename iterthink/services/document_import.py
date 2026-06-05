@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from iterthink import config
+from iterthink.ocr_settings import IMAGE_IMPORT_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ PdfProfileHeuristic = Literal["text", "plan"]
 PDF_RENDER_SCALE_TEXT = 1.5
 PDF_RENDER_SCALE_PLAN = 2.0
 
-ALLOWED_IMPORT_EXTENSIONS = frozenset({"docx", "pdf"})
+ALLOWED_IMPORT_EXTENSIONS = frozenset({"docx", "pdf", *IMAGE_IMPORT_EXTENSIONS})
 
 # Trailing ``_<long digits>`` from some OS file pickers (temp copy ids).
 _PICKER_TEMP_STEM_SUFFIX = re.compile(r"_\d{10,}$")
@@ -595,11 +596,17 @@ def pdf_to_markdown(src: Path) -> str:
         logger.warning("Plain pypdf PDF extraction failed: %s", ex)
 
     md = _pdf_to_markdown_legacy(src)
-    if not md.strip():
-        return (
-            "<!-- PDF text extraction returned no content. This may be a scanned PDF. -->\n\n"
-            "*Note: No extractable text; use Original PDF in Compare to view.*"
-        )
+    if not _has_body(md):
+        if config.OCR_ENABLED:
+            from iterthink.services.ocr_import import pdf_to_markdown_ocr
+
+            return pdf_to_markdown_ocr(src)
+        if not md.strip():
+            return (
+                "<!-- PDF text extraction returned no content. This may be a scanned PDF. -->\n\n"
+                "*Note: No extractable text; use Original PDF in Compare to view.*"
+            )
+        return md
     return md
 
 

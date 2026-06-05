@@ -107,6 +107,29 @@ async def main(page: ft.Page) -> None:
 
     await _ollama_startup_check()
 
+    async def _ocr_model_warmup() -> None:
+        if page.web or not config.OCR_ENABLED:
+            return
+        if config.OCR_ENGINE == "ollama":
+            from iterthink.ai.ollama_ocr import check_ollama_ocr_ready
+
+            ok, reason = await check_ollama_ocr_ready(studio.ollama, config.OCR_MODEL)
+            if not ok:
+                studio._snack(
+                    f"OCR uses Ollama vision but is not ready: {reason}. "
+                    "Start `ollama serve` or pull the configured model."
+                )
+            return
+        try:
+            from iterthink.ai.local_ocr import prepare_runtime_ocr_model_sync
+
+            await asyncio.to_thread(prepare_runtime_ocr_model_sync)
+        except BaseException:
+            studio._snack(
+                "Could not download the OCR model (RapidOCR). "
+                "Check your network once; for restricted networks set HF_TOKEN."
+            )
+
     async def _embedding_model_warmup() -> None:
         if page.web:
             return
@@ -162,6 +185,7 @@ async def main(page: ft.Page) -> None:
         except BaseException as ex:
             studio._snack(str(ex))
 
+    page.run_task(_ocr_model_warmup)
     page.run_task(_rag_index_startup)
     page.run_task(_privacy_shield_model_warmup)
     page.run_task(studio._refresh_ki_chat_model_dropdown)

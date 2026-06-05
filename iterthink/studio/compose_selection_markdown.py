@@ -23,7 +23,7 @@ def expand_selection_to_line_bounds(text: str, a: int, b: int) -> tuple[int, int
 
 
 def apply_bold_wrap(text: str, a: int, b: int) -> tuple[str, int, int] | None:
-    """Wrap selection in ** or unwrap if already exactly **…**."""
+    """Wrap selection in ** or unwrap if delimiters are in or around the selection."""
     n = len(text)
     if a < 0 or b > n or a >= b:
         return None
@@ -32,6 +32,10 @@ def apply_bold_wrap(text: str, a: int, b: int) -> tuple[str, int, int] | None:
         inner = sel[2:-2]
         new_t = text[:a] + inner + text[b:]
         return new_t, a, a + len(inner)
+    if a >= 2 and b + 2 <= n and text[a - 2 : a] == "**" and text[b : b + 2] == "**":
+        inner = sel
+        new_t = text[: a - 2] + inner + text[b + 2 :]
+        return new_t, a - 2, a - 2 + len(inner)
     new_t = text[:a] + "**" + sel + "**" + text[b:]
     return new_t, a, a + len(sel) + 4
 
@@ -52,6 +56,17 @@ def apply_italic_wrap(text: str, a: int, b: int) -> tuple[str, int, int] | None:
         inner = sel[1:-1]
         new_t = text[:a] + inner + text[b:]
         return new_t, a, a + len(inner)
+    if (
+        a >= 1
+        and b + 1 <= n
+        and text[a - 1] == "*"
+        and text[b : b + 1] == "*"
+        and (a < 2 or text[a - 2] != "*")
+        and (b + 1 >= n or text[b + 1] != "*")
+    ):
+        inner = sel
+        new_t = text[: a - 1] + inner + text[b + 1 :]
+        return new_t, a - 1, a - 1 + len(inner)
     new_t = text[:a] + "*" + sel + "*" + text[b:]
     return new_t, a, a + len(sel) + 2
 

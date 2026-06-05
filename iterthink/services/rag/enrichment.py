@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any, Protocol
 
+from iterthink.ai.ollama_util import chat_response_text
+
 _ENRICH_SYSTEM = (
     "Summarize the paragraph in one sentence and write exactly 3 short questions it answers. "
     "Respond with JSON: {\"summary\": \"...\", \"questions\": [\"q1\", \"q2\", \"q3\"]}."
@@ -20,19 +22,18 @@ _QUERY_VARIANTS_SYSTEM = (
 class LlmChat(Protocol):
     async def chat(
         self,
-        messages: list[dict[str, str]],
         *,
-        model: str | None = None,
+        model: str = "",
+        messages: list[dict[str, str]] | None = None,
         stream: bool = False,
-    ) -> str: ...
+    ) -> Any: ...
 
 
 def enrichment_allowed_for_tier(ki_tier: str, enrichment_mode: str) -> bool:
     if enrichment_mode == "skip":
         return False
-    if enrichment_mode == "local":
-        return ki_tier == "local"
-    return False
+    tier = (ki_tier or "").strip().lower()
+    return tier in ("local", "company", "cloud")
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -76,14 +77,15 @@ async def enrich_child(
     model: str,
 ) -> tuple[str, tuple[str, str, str]]:
     user = f"Document: {doc_title}\nSection: {header}\n\nParagraph:\n{raw.strip()}"
-    reply = await llm.chat(
-        [
+    resp = await llm.chat(
+        model=model,
+        messages=[
             {"role": "system", "content": _ENRICH_SYSTEM},
             {"role": "user", "content": user},
         ],
-        model=model,
+        stream=False,
     )
-    obj = _extract_json_object(reply)
+    obj = _extract_json_object(chat_response_text(resp))
     if obj is None:
         return "", ("", "", "")
     summary = str(obj.get("summary") or "").strip()
@@ -97,14 +99,15 @@ async def generate_query_variants(
     llm: LlmChat,
     model: str,
 ) -> tuple[str, str, str]:
-    reply = await llm.chat(
-        [
+    resp = await llm.chat(
+        model=model,
+        messages=[
             {"role": "system", "content": _QUERY_VARIANTS_SYSTEM},
             {"role": "user", "content": query.strip()},
         ],
-        model=model,
+        stream=False,
     )
-    obj = _extract_json_object(reply)
+    obj = _extract_json_object(chat_response_text(resp))
     if obj is None:
         return ("", "", "")
     return _normalize_questions(obj.get("questions"))  # type: ignore[return-value]

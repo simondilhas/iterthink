@@ -196,6 +196,14 @@ class MarkdownStudioKiSidebar:
         if key == "escape" and self._compose_tab_inline_rename_active:
             self.page.run_task(self._compose_tab_cancel_inline_rename)
             return
+        if key == "tab" and not (e.ctrl or e.meta or e.alt):
+            if (
+                getattr(self, "_compose_editor_focused", False)
+                and int(getattr(self, "_main_tab_index", -1)) == TAB_PRESENT
+                and getattr(self, "_focus_view_mode", "edit") == "edit"
+            ):
+                self.page.run_task(self._compose_handle_tab_key_async, shift=e.shift)
+            return
         if key != "j":
             return
         if not (e.ctrl or e.meta):
@@ -302,16 +310,16 @@ class MarkdownStudioKiSidebar:
             self._chat_history.update()
 
     def _on_ki_tier_tabs_change(self, e: ft.ControlEvent) -> None:
-        try:
-            idx = int(e.data)
-        except (TypeError, ValueError):
-            idx = int(getattr(e.control, "selected_index", 0))
-        if not (0 <= idx < len(KI_TIERS)):
+        from iterthink.studio.llm_backend import ki_tier_index_from_change_event
+
+        fallback = KI_TIERS.index(normalize_ki_tier(self.ki_tier))
+        idx = ki_tier_index_from_change_event(e, fallback=fallback)
+        if idx is None:
             return
         self.ki_tier = KI_TIERS[idx]
         self._persist_ki_tier()
         self._sync_chat_model_ui()
-        self._sync_ki_tier_tab_icons()
+        self._sync_ki_tier_tabs_ui()
 
     def _sync_ki_tier_tab_icons(self) -> None:
         sync_llm_tier_tab_icons(getattr(self, "_ki_tier_tabs", None))
@@ -327,6 +335,7 @@ class MarkdownStudioKiSidebar:
                 tabs_ctrl.update()
         self._sync_ki_tier_tab_icons()
         self._sync_privacy_shield_icon()
+        self._sync_token_cost_display()
 
     def _sync_privacy_shield_icon(self) -> None:
         sync_privacy_shield_icon(

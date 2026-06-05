@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
+from iterthink import config
 from iterthink.services import document_import
+from iterthink.studio.explorer import (
+    _effective_pdf_import_profile,
+    _import_allowed_extensions,
+)
 
 
 def test_normalize_import_library_stem_strips_picker_suffix() -> None:
@@ -45,3 +50,27 @@ def test_import_pdf_dialog_hint_new_vs_version(tmp_path: Path) -> None:
     assert ver_hint == "Add version to: ./note.pdf"
     assert "library file" not in new_hint
     assert "→" not in new_hint
+
+
+def test_import_allowed_extensions_ocr_off(monkeypatch) -> None:
+    monkeypatch.setattr(config, "OCR_ENABLED", False)
+    assert _import_allowed_extensions() == ["docx", "pdf"]
+
+
+def test_import_allowed_extensions_ocr_on(monkeypatch) -> None:
+    monkeypatch.setattr(config, "OCR_ENABLED", True)
+    exts = _import_allowed_extensions()
+    assert exts[:2] == ["docx", "pdf"]
+    assert "png" in exts
+    assert "webp" in exts
+
+
+def test_plan_pdf_import_coerce_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(config, "PLAN_PDF_IMPORT_ENABLED", False)
+    assert _effective_pdf_import_profile("plan") == "text"
+    assert _effective_pdf_import_profile("text") == "text"
+
+
+def test_plan_pdf_import_coerce_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(config, "PLAN_PDF_IMPORT_ENABLED", True)
+    assert _effective_pdf_import_profile("plan") == "plan"

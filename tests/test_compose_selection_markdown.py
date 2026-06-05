@@ -28,10 +28,24 @@ def test_apply_bold_wrap() -> None:
     assert new == "x ab y" and (s0, s1) == (2, 4)
 
 
+def test_apply_bold_wrap_inner_selection_unwraps() -> None:
+    u = apply_bold_wrap("**ab**", 2, 4)
+    assert u is not None
+    new, s0, s1 = u
+    assert new == "ab" and (s0, s1) == (0, 2)
+
+
 def test_apply_italic_wrap() -> None:
     assert apply_italic_wrap("a bc d", 2, 4) == ("a *bc* d", 2, 6)
     u = apply_italic_wrap("a *x* b", 2, 5)
     assert u is not None and u[0] == "a x b"
+
+
+def test_apply_italic_wrap_inner_selection_unwraps() -> None:
+    u = apply_italic_wrap("*x*", 1, 2)
+    assert u is not None
+    new, s0, s1 = u
+    assert new == "x" and (s0, s1) == (0, 1)
 
 
 def test_apply_bullet_block() -> None:

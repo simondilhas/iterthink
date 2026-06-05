@@ -17,11 +17,110 @@ from iterthink.persistence import content_repo, store_db
 from iterthink.services import document_import
 from iterthink.db.session import session_scope
 from .constants import TAB_FUTURE, TAB_HISTORY, TAB_PRESENT
+from .list_continuation import normalize_buffer_newlines
 from .util import ctrl_on_page as _ctrl_on_page
 
 
 def _ext_is_pdf(path: Path) -> bool:
     return path.suffix.lower() == ".pdf"
+
+
+def _ext_is_image(path: Path) -> bool:
+    ext = path.suffix.lower().lstrip(".")
+    from iterthink.ocr_settings import is_image_import_extension
+
+    return is_image_import_extension(ext)
+
+
+_IMAGE_IMPORT_EXTENSIONS = ["png", "jpg", "jpeg", "webp"]
+
+
+def _import_allowed_extensions() -> list[str]:
+    exts = ["docx", "pdf"]
+    if config.OCR_ENABLED:
+        exts.extend(_IMAGE_IMPORT_EXTENSIONS)
+    return exts
+
+
+def _import_unsupported_file_snack() -> str:
+    if config.OCR_ENABLED:
+        return "Unsupported file. Choose Word, PDF, or image (png/jpg/webp)."
+    return "Unsupported file. Choose Word or PDF."
+
+
+def _effective_pdf_import_profile(
+    profile: document_import.PdfProfileHeuristic,
+) -> document_import.PdfProfileHeuristic:
+    if profile == "plan" and not config.PLAN_PDF_IMPORT_ENABLED:
+        return "text"
+    return profile
+
+
+_PDF_IMPORT_LABEL_TEXT = "Content only (reports)"
+_PDF_IMPORT_LABEL_PLAN = "Content and Layout (e.g. Review of plans, Layouts)"
+
+
+def _pdf_import_suggested_label(profile: document_import.PdfProfileHeuristic) -> str:
+    return "Content and Layout" if profile == "plan" else "Content only"
+
+
+def _experimental_badge() -> ft.Container:
+    color = config.ON_SURFACE_VARIANT
+    return ft.Container(
+        content=ft.Text(
+            "Experimental",
+            size=10,
+            weight=ft.FontWeight.W_600,
+            color=color,
+        ),
+        padding=ft.padding.symmetric(horizontal=6, vertical=2),
+        border_radius=6,
+        bgcolor=ft.Colors.with_opacity(0.16, color),
+    )
+
+
+def _pdf_import_profile_radios(
+    *,
+    suggested: document_import.PdfProfileHeuristic,
+    selected: dict[str, document_import.PdfProfileHeuristic],
+    on_change: ft.ControlEventHandler[ft.RadioGroup] | None = None,
+) -> ft.RadioGroup:
+    """RadioGroup for PDF import profile; plan row uses explicit tap (badge/Row breaks selection)."""
+    rg_holder: list[ft.RadioGroup] = []
+    plan_radio = ft.Radio(value="plan", label=_PDF_IMPORT_LABEL_PLAN)
+
+    def _select_plan(_e: ft.ControlEvent) -> None:
+        if not rg_holder:
+            return
+        rg_holder[0].value = "plan"
+        selected["value"] = "plan"
+        if _ctrl_on_page(rg_holder[0]):
+            rg_holder[0].update()
+
+    controls: list[ft.Control] = [
+        ft.Radio(value="text", label=_PDF_IMPORT_LABEL_TEXT),
+        ft.GestureDetector(
+            content=ft.Row(
+                [
+                    plan_radio,
+                    _experimental_badge(),
+                ],
+                tight=True,
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                wrap=False,
+            ),
+            on_tap=_select_plan,
+            mouse_cursor=ft.MouseCursor.CLICK,
+        ),
+    ]
+    rg = ft.RadioGroup(
+        value=suggested,
+        content=ft.Column(controls, tight=True, spacing=4),
+        on_change=on_change,
+    )
+    rg_holder.append(rg)
+    return rg
 
 
 def _stage_import_source(src: Path) -> Path:
@@ -981,10 +1080,10 @@ class MarkdownStudioExplorer:
                 pick_initial = str(config.DOCUMENTS)
         try:
             files = await self._fp_import.pick_files(
-                dialog_title="Import Word or PDF",
+                dialog_title="Import Word, PDF, or image",
                 initial_directory=pick_initial,
                 file_type=ft.FilePickerFileType.CUSTOM,
-                allowed_extensions=["docx", "pdf"],
+                allowed_extensions=_import_allowed_extensions(),
             )
         except BaseException as ex:
             self._snack(f"Picker failed: {ex}")
@@ -993,7 +1092,10 @@ class MarkdownStudioExplorer:
             return
         src = Path(files[0].path)
         if document_import.validate_extension(src) is None:
-            self._snack("Unsupported file. Choose a .docx or .pdf file.")
+            self._snack(_import_unsupported_file_snack())
+            return
+        if _ext_is_image(src) and not config.OCR_ENABLED:
+            self._snack("Enable OCR in Settings → Import to import images.")
             return
         if new_document:
             await self._import_finish_new_document_dialog(src, dest_parent=dest_parent)
@@ -1019,6 +1121,8 @@ class MarkdownStudioExplorer:
         self, src: Path
     ) -> document_import.PdfProfileHeuristic | None:
         """Let the user pick document (markdown) vs plan (drawing) import."""
+        if not config.PLAN_PDF_IMPORT_ENABLED:
+            return "text"
         try:
             suggested = await asyncio.to_thread(document_import.classify_pdf_profile, src)
         except BaseException as ex:
@@ -1028,42 +1132,27 @@ class MarkdownStudioExplorer:
         outcome: dict[str, document_import.PdfProfileHeuristic | None] = {"profile": None}
 
         hint = ft.Text(
-            f"Suggested: {'Plan' if suggested == 'plan' else 'Document'} (from text density).",
+            f"Suggested: {_pdf_import_suggested_label(suggested)}",
             size=12,
             color=config.ON_SURFACE_VARIANT,
         )
-        rg = ft.RadioGroup(
-            value=suggested,
-            content=ft.Column(
-                [
-                    ft.Radio(
-                        value="text",
-                        label="Document PDF — markdown extraction",
-                    ),
-                    ft.Text(
-                        "Prose-oriented PDFs: editable text, paragraph compare in History.",
-                        size=11,
-                        color=config.ON_SURFACE_VARIANT,
-                    ),
-                    ft.Radio(
-                        value="plan",
-                        label="Plan PDF — drawing / floorplan",
-                    ),
-                    ft.Text(
-                        "Sparse text: PNG viewer, labels on image, visual red/green diff.",
-                        size=11,
-                        color=config.ON_SURFACE_VARIANT,
-                    ),
-                ],
-                tight=True,
-                spacing=4,
-            ),
+        selected: dict[str, document_import.PdfProfileHeuristic] = {"value": suggested}
+
+        def _on_profile_change(e: ft.ControlEvent) -> None:
+            raw = getattr(e.control, "value", None)
+            if raw in ("text", "plan"):
+                selected["value"] = raw  # type: ignore[assignment]
+
+        rg = _pdf_import_profile_radios(
+            suggested=suggested,
+            selected=selected,
+            on_change=_on_profile_change,
         )
 
         async def confirm(_e: ft.ControlEvent | None = None) -> None:
-            val = rg.value
+            val = rg.value or selected["value"]
             if val not in ("text", "plan"):
-                self._snack("Choose Document or Plan import.")
+                self._snack("Choose an import type.")
                 return
             outcome["profile"] = val  # type: ignore[assignment]
             self.page.pop_dialog()
@@ -1076,7 +1165,7 @@ class MarkdownStudioExplorer:
         self.page.show_dialog(
             ft.AlertDialog(
                 modal=True,
-                title=ft.Text("PDF import type"),
+                title=ft.Text("Import PDF"),
                 content=ft.Column([hint, rg], tight=True, spacing=8),
                 actions=[
                     ft.TextButton("Cancel", on_click=cancel),
@@ -1133,54 +1222,77 @@ class MarkdownStudioExplorer:
         dest_hint = document_import.import_pdf_dialog_hint(
             dest, root, import_into_existing=import_into_existing
         )
-        profile_hint = ft.Text(
-            (
-                "Suggested: Plan PDF (drawing)."
-                if suggested_prof == "plan"
-                else "Suggested: Document PDF (text)."
-            ),
-            size=11,
-            color=config.ON_SURFACE_VARIANT,
-        )
-        pdf_profile_rg = ft.RadioGroup(
-            value=suggested_prof,
-            content=ft.Column(
-                [
-                    ft.Text(
-                        dest_hint,
-                        size=12,
-                        color=config.ON_SURFACE_VARIANT,
-                    ),
-                    profile_hint,
-                    ft.Text("Import as", size=12, weight=ft.FontWeight.W_500),
-                    ft.Radio(value="text", label="Document PDF"),
-                    ft.Radio(value="plan", label="Plan PDF"),
-                ],
-                tight=True,
-                spacing=4,
-            ),
-        )
+        plan_import_enabled = config.PLAN_PDF_IMPORT_ENABLED
 
         async def apply(_e: ft.ControlEvent | None = None) -> None:
-            val = pdf_profile_rg.value
-            if val not in ("text", "plan"):
-                self._snack("Choose Document or Plan import.")
-                return
-            if suggested_prof == "plan" and val == "text":
-                self._snack("Plan-like PDF: Plan PDF opens the drawing viewer.")
-            self.page.pop_dialog()
-            await self._write_import_result(
-                staged_src,
-                dest,
-                pdf_profile=val,  # type: ignore[arg-type]
-                import_into_existing=import_into_existing,
+            try:
+                if plan_import_enabled:
+                    val = pdf_profile_rg.value or selected_profile["value"]
+                    if val not in ("text", "plan"):
+                        self._snack("Choose an import type.")
+                        return
+                    if suggested_prof == "plan" and val == "text":
+                        self._snack(
+                            "Sparse-text PDF: use Content and Layout for the drawing viewer."
+                        )
+                    profile = val  # type: ignore[assignment]
+                else:
+                    profile = "text"
+                self.page.pop_dialog()
+                await self._write_import_result(
+                    staged_src,
+                    dest,
+                    pdf_profile=profile,  # type: ignore[arg-type]
+                    import_into_existing=import_into_existing,
+                )
+            except BaseException as ex:
+                self._snack(f"Import failed: {ex}")
+
+        dialog_content: list[ft.Control] = [
+            ft.Text(
+                dest_hint,
+                size=12,
+                color=config.ON_SURFACE_VARIANT,
+            ),
+        ]
+        pdf_profile_rg: ft.RadioGroup | None = None
+        selected_profile: dict[str, document_import.PdfProfileHeuristic] = {
+            "value": suggested_prof,
+        }
+        if plan_import_enabled:
+            profile_hint = ft.Text(
+                f"Suggested: {_pdf_import_suggested_label(suggested_prof)}",
+                size=11,
+                color=config.ON_SURFACE_VARIANT,
+            )
+
+            def _on_pdf_profile_change(e: ft.ControlEvent) -> None:
+                raw = getattr(e.control, "value", None)
+                if raw in ("text", "plan"):
+                    selected_profile["value"] = raw  # type: ignore[assignment]
+
+            pdf_profile_rg = _pdf_import_profile_radios(
+                suggested=suggested_prof,
+                selected=selected_profile,
+                on_change=_on_pdf_profile_change,
+            )
+            dialog_content.extend(
+                [
+                    profile_hint,
+                    ft.Text("Import as", size=12, weight=ft.FontWeight.W_500),
+                    pdf_profile_rg,
+                ]
             )
 
         self.page.show_dialog(
             ft.AlertDialog(
                 modal=True,
                 title=ft.Text("Import PDF" if not import_into_existing else "Import PDF version"),
-                content=pdf_profile_rg,
+                content=ft.Column(
+                    dialog_content,
+                    tight=True,
+                    spacing=4,
+                ),
                 actions=[
                     ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
                     ft.TextButton("Import", on_click=lambda _e: self.page.run_task(apply)),
@@ -1217,17 +1329,36 @@ class MarkdownStudioExplorer:
         ext = document_import.validate_extension(src)
         pdf_src = src if ext == "pdf" else None
         docx_src = src if ext == "docx" else None
+        image_src = src if ext in ("png", "jpg", "jpeg", "webp") else None
         if pdf_src is not None and not pdf_src.is_file():
             self._snack("PDF file is no longer available. Import again.")
+            return
+        if image_src is not None and not image_src.is_file():
+            self._snack("Image file is no longer available. Import again.")
             return
         pdf_prof: content_repo.PdfProfile | None = None
         lazy_geometry_src: Path | None = None
         progress: _ImportProgressHandle | None = None
-        if ext == "pdf":
+        if ext in ("pdf", "png", "jpg", "jpeg", "webp"):
             progress = await self._begin_import_progress("Preparing import…")
         try:
-            if pdf_src is not None:
-                pdf_prof = pdf_profile or document_import.classify_pdf_profile(src)
+            if image_src is not None:
+                if not config.OCR_ENABLED:
+                    self._snack("Enable OCR in Settings → Import to import images.")
+                    return
+                if progress is not None:
+                    await progress.set_message("Running OCR…")
+
+                def _ocr_image() -> tuple[str, None, None]:
+                    from iterthink.services.ocr_import import image_to_markdown
+
+                    return image_to_markdown(image_src, dest), None, None
+
+                md, pdf_prof, _ = await asyncio.to_thread(_ocr_image)
+            elif pdf_src is not None:
+                pdf_prof = _effective_pdf_import_profile(
+                    pdf_profile or document_import.classify_pdf_profile(src)
+                )
                 if pdf_prof == "plan":
                     if progress is not None:
                         await progress.set_message("Saving plan PDF…")
@@ -1587,7 +1718,7 @@ class MarkdownStudioExplorer:
         sort_mode = getattr(self, "_tree_sort_mode", "name_az")
         root_res = root.resolve()
 
-        if q:
+        if q and config.RAG_SEARCH_ENABLED:
             tree = build_search_md_tree(root_res, q)
 
             def render_level(node: dict[str, Any], parent_path: Path, depth: int = 0) -> list[ft.Control]:
@@ -1681,7 +1812,7 @@ class MarkdownStudioExplorer:
             self._sync_ki_comments_tab_layout()
         self.last_saved_text = text
         self.editor.value = text
-        self._editor_prev_for_list_continue = text
+        self._editor_prev_for_list_continue = normalize_buffer_newlines(text)
         self._compare_editor.value = text
         self._compare_baseline_snapshot = text
         self._refresh_compare_tab_candidate_ui()

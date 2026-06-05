@@ -320,7 +320,7 @@ def test_llm_backend_skips_reinject_when_disabled() -> None:
         mock_redact = AsyncMock(return_value=(redacted_msgs, rmap))
 
         async def fake_openai_nonstream(client, **kwargs):
-            return {"message": {"content": "Reply about {{PERSON_1}}"}}
+            return {"message": {"content": "Reply about {{PERSON_1}}"}}, None
 
         backend = LlmChatBackend(
             ollama,
@@ -370,7 +370,7 @@ def test_llm_backend_redacts_before_company_call() -> None:
 
         async def fake_openai_nonstream(client, **kwargs):
             captured_messages.append(list(kwargs["messages"]))
-            return {"message": {"content": "Reply about {{PERSON_1}}"}}
+            return {"message": {"content": "Reply about {{PERSON_1}}"}}, None
 
         backend = LlmChatBackend(
             ollama,

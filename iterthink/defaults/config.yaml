@@ -55,10 +55,13 @@ new_note_name_template: "unnamed-{n}.md"
 rag_system: false
 
 # Workspace RAG indexing and semantic search
-rag_index_on_startup: true
+# Sidebar search (semantic queries and /f filename filter).
+rag_search_enabled: false
+rag_index_on_startup: false
 rag_overlap_chars: 200
-rag_reranker_enabled: true
+rag_reranker_enabled: false
 rag_reranker_model: Xenova/ms-marco-MiniLM-L-6-v2
+rag_context_max_chars: 2400
 
 # Privacy shield: redact names, orgs, and API keys locally before Office/Cloud LLM calls.
 privacy_shield_enabled: true
@@ -74,3 +77,17 @@ privacy_shield_show_masked_in_chat: false
 privacy_shield_chunk_max_chars: 2800
 # Paragraphs repeated at chunk boundaries (0 = no overlap).
 privacy_shield_chunk_overlap_paragraphs: 1
+
+# Token cost counter (Office/Cloud): aggregation window for AI bar and Usage settings.
+token_cost_period: year
+
+# Layout-aware plan PDF import (experimental; Content and Layout profile).
+plan_pdf_import_enabled: false
+
+# Focus editor text-selection toolbar: spelling review button and LLM sparkle menu.
+focus_selection_review_actions_enabled: false
+
+# Scanned PDF / image import OCR (off by default; models download on first use).
+ocr_enabled: false
+ocr_engine: rapidocr
+ocr_model: ppocrv4_latin_mobile

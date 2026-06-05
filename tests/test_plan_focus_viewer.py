@@ -176,6 +176,8 @@ def test_show_page_skips_when_not_on_page() -> None:
         _draw_cloud_btn=MagicMock(),
         _export_btn=MagicMock(),
         _viewport_stack=MagicMock(),
+        _text_labels_overlay=MagicMock(),
+        _text_change_tooltip_host=MagicMock(visible=False),
         _annotations_overlay=MagicMock(),
         _draw_rubber_band=MagicMock(visible=False),
         _tools_pill_host=MagicMock(visible=False),
@@ -205,8 +207,9 @@ def test_plan_picture_compare_column(tmp_path: Path) -> None:
     paths = [tmp_path / f"p{i}.png" for i in range(2)]
     for p in paths:
         p.write_bytes(b"x")
-    col, ivs = plan_picture_viewer.plan_picture_compare_column(paths)
+    col, ivs, overlays = plan_picture_viewer.plan_picture_compare_column(paths)
     assert len(ivs) == 2
+    assert overlays == []
     assert col.scroll is None
     assert ivs[0].constrained is True
     assert ivs[0].data["img_w"] >= 1
@@ -329,3 +332,91 @@ def test_wire_sync_pan_only() -> None:
     asyncio.run(tasks[0][0](*tasks[0][1]))
     right.pan.assert_awaited_once_with(3.0, -2.0)
     right.zoom.assert_not_called()
+
+
+def _write_test_png(path: Path, w: int = 200, h: int = 200) -> None:
+    from PIL import Image
+
+    Image.new("RGB", (w, h), (255, 255, 255)).save(path)
+
+
+def test_text_change_tooltip_show_hide(tmp_path: Path) -> None:
+    from iterthink.services.plan_text_diff import PlanTextChangeView
+
+    p = tmp_path / "page_0001.png"
+    _write_test_png(p)
+    v = plan_picture_viewer.build_plan_focus_viewer([p])
+    v.sync_viewport(800.0, 600.0)
+    change = PlanTextChangeView(
+        change_id="t1",
+        page_index=0,
+        kind="modified",
+        norm_bbox=(0.05, 0.05, 0.2, 0.08),
+        display_text="A-102",
+        old_text="A-101",
+        new_text="A-102",
+        size_pt=10.0,
+        pin_norm=(0.21, 0.05),
+    )
+    v.set_text_changes([change], visible=True, hover_enabled=True)
+    assert len(v._text_labels_overlay.controls) >= 1
+    v.show_text_change_tooltip(change, 100.0, 80.0)
+    assert v._text_change_tooltip_host.visible is True
+    assert v._text_change_tooltip_host.content is not None
+    v.hide_text_change_tooltip()
+    assert v._text_change_tooltip_host.visible is False
+
+
+def test_set_page_hides_text_change_tooltip(tmp_path: Path) -> None:
+    from iterthink.services.plan_text_diff import PlanTextChangeView
+
+    p0 = tmp_path / "page_0001.png"
+    p1 = tmp_path / "page_0002.png"
+    _write_test_png(p0)
+    _write_test_png(p1)
+    v = plan_picture_viewer.build_plan_focus_viewer([p0, p1])
+    v.sync_viewport(800.0, 600.0)
+    change = PlanTextChangeView(
+        change_id="t1",
+        page_index=0,
+        kind="modified",
+        norm_bbox=(0.05, 0.05, 0.2, 0.08),
+        display_text="X",
+        old_text="X",
+        new_text="Y",
+        size_pt=10.0,
+        pin_norm=(0.21, 0.05),
+    )
+    v.set_text_changes([change], visible=True)
+    v.show_text_change_tooltip(change, 50.0, 50.0)
+    v.set_page(1)
+    assert v._text_change_tooltip_host.visible is False
+
+
+def test_compare_column_with_text_changes(tmp_path: Path) -> None:
+    from iterthink.services.plan_text_diff import PlanTextChangeView
+
+    p = tmp_path / "p0.png"
+    _write_test_png(p)
+    ch = PlanTextChangeView(
+        change_id="c1",
+        page_index=0,
+        kind="modified",
+        norm_bbox=(0.1, 0.1, 0.3, 0.12),
+        display_text="B",
+        old_text="A",
+        new_text="B",
+        size_pt=10.0,
+        pin_norm=(0.31, 0.1),
+    )
+    col, ivs, overlays = plan_picture_viewer.plan_picture_compare_column(
+        [p],
+        text_changes=[ch],
+        overlay_mode="candidate",
+        hover_enabled=True,
+        text_overlay_visible=True,
+    )
+    assert len(ivs) == 1
+    assert len(overlays) == 1
+    assert len(overlays[0].labels_stack.controls) >= 1
+    assert col is not None

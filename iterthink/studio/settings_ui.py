@@ -27,7 +27,10 @@ from iterthink.ai.ollama_models import classify_installed_models
 from iterthink.ai.ollama_util import ollama_error_message
 from .constants import KI_TIER_TAB_ICON_PX, SIDEBAR_TOOLBAR_ROW_H_PX
 from .llm_backend import build_llm_tier_tabs, sync_llm_tier_tab_icons
+from .settings_ocr import build_ocr_settings_tab
 from .settings_privacy import build_privacy_settings_tab
+from .settings_rag import build_rag_settings_tab
+from .settings_token_cost import build_token_cost_settings_tab
 from .prompts_merge_ui import show_prompt_merge_dialog
 from .util import (
     CLOUD_VENDOR_ANTHROPIC,
@@ -78,23 +81,17 @@ async def _open_settings_dialog(studio: Any) -> None:
     studio.ensure_file_pickers()
 
     chat_opts: list[str] = []
-    try:
-        chat_opts, _embed_opts = await classify_installed_models(ollama)
-    except BaseException as ex:
-        studio._snack(f"Could not list Ollama models (Local section): {ollama_error_message(ex)}")
-    if not chat_opts:
-        studio._snack("No chat models found locally. Try: ollama pull llama3.2")
 
     chat_dd = ft.Dropdown(
         label="Chat model (Ollama — Local tier)",
-        options=[ft.dropdown.Option(n) for n in chat_opts],
-        value=studio.ollama_model if studio.ollama_model in chat_opts else (chat_opts[0] if chat_opts else None),
+        options=[],
+        value=studio.ollama_model or None,
         expand=True,
-        disabled=not chat_opts,
+        disabled=True,
     )
 
     status_txt = ft.Text(
-        f"{len(chat_opts)} chat model(s)" if chat_opts else "No chat models",
+        "Loading local models…",
         size=12,
         color=ft.Colors.GREY_500,
     )
@@ -961,14 +958,27 @@ async def _open_settings_dialog(studio: Any) -> None:
         studio._snack("Prompts saved.")
 
     def _on_settings_ki_tier_tabs_change(e: ft.ControlEvent) -> None:
-        try:
-            idx = int(e.data)
-        except (TypeError, ValueError):
-            idx = int(getattr(e.control, "selected_index", 0))
-        if not (0 <= idx < len(KI_TIERS)):
+        from iterthink.studio.llm_backend import ki_tier_index_from_change_event
+
+        fallback = KI_TIERS.index(normalize_ki_tier(studio.ki_tier))
+        idx = ki_tier_index_from_change_event(e, fallback=fallback)
+        if idx is None:
             return
         studio.ki_tier = KI_TIERS[idx]
-        store_db.settings_set(studio._db, store_db.SETTINGS_KI_TIER, studio.ki_tier)
+        try:
+            store_db.settings_set(studio._db, store_db.SETTINGS_KI_TIER, studio.ki_tier)
+        except Exception as exc:
+            from sqlalchemy.exc import OperationalError
+
+            if not isinstance(exc, OperationalError):
+                raise
+            studio.ki_tier = normalize_ki_tier(
+                store_db.settings_get(studio._db, store_db.SETTINGS_KI_TIER)
+            )
+            studio._snack("Database busy — wait for indexing to finish")
+            if hasattr(studio, "_sync_ki_tier_tabs_ui"):
+                studio._sync_ki_tier_tabs_ui()
+            return
         if hasattr(studio, "_sync_ki_tier_tabs_ui"):
             studio._sync_ki_tier_tabs_ui()
         if hasattr(studio, "_sync_chat_model_ui"):
@@ -1165,6 +1175,7 @@ async def _open_settings_dialog(studio: Any) -> None:
         tab_bar_height=max(float(SIDEBAR_TOOLBAR_ROW_H_PX), 40.0),
         tab_texts=("Home", "Office", "Cloud"),
     )
+    studio._settings_ki_tier_tabs = settings_ki_tier_tabs
     sync_llm_tier_tab_icons(settings_ki_tier_tabs)
 
     models_models_column = ft.Column(
@@ -1176,83 +1187,11 @@ async def _open_settings_dialog(studio: Any) -> None:
             wrap_crypto,
             wrap_office,
             wrap_cloud,
-            ft.Divider(height=12),
-            ft.Text("Search indexing", size=14, weight=ft.FontWeight.W_600),
         ],
         tight=True,
         spacing=12,
         scroll=ft.ScrollMode.AUTO,
     )
-
-    rag_status_text = ft.Text("", size=12, color=config.ON_SURFACE_SOFT)
-    rag_chunks_text = ft.Text("", size=12, color=config.ON_SURFACE_VARIANT)
-    rag_last_indexed_text = ft.Text("", size=12, color=config.ON_SURFACE_VARIANT)
-    rag_progress_label = ft.Text("", size=12, color=config.ON_SURFACE_SOFT, visible=False)
-    rag_progress_bar = ft.ProgressBar(value=0, visible=False)
-    rag_reindex_btn = ft.OutlinedButton("Re-index all")
-
-    studio._rag_settings_status_text = rag_status_text
-    studio._rag_settings_chunks_text = rag_chunks_text
-    studio._rag_settings_last_indexed_text = rag_last_indexed_text
-    studio._rag_settings_progress_bar = rag_progress_bar
-    studio._rag_settings_progress_label = rag_progress_label
-    studio._rag_settings_reindex_btn = rag_reindex_btn
-
-    async def on_rag_reindex(_e: ft.ControlEvent | None = None) -> None:
-        await studio._rag_reindex_all_from_settings()
-
-    rag_reindex_btn.on_click = lambda e: page.run_task(on_rag_reindex, e)
-
-    rag_search_column = ft.Column(
-        [
-            rag_status_text,
-            rag_chunks_text,
-            rag_last_indexed_text,
-            rag_progress_bar,
-            rag_progress_label,
-            ft.Switch(
-                label="Latest saved version only",
-                value=(store_db.settings_get(studio._db, store_db.SETTINGS_RAG_LATEST_VERSION_ONLY) or "true")
-                != "false",
-                tooltip="Index and search the newest PBS snapshot; older snapshots kept for timetravel",
-                on_change=lambda e: store_db.settings_set(
-                    studio._db,
-                    store_db.SETTINGS_RAG_LATEST_VERSION_ONLY,
-                    "true" if e.control.value else "false",
-                ),
-            ),
-            ft.Dropdown(
-                label="RAG enrichment",
-                value=store_db.settings_get(studio._db, store_db.SETTINGS_RAG_ENRICHMENT_MODE) or "local",
-                options=[
-                    ft.dropdown.Option("local", "Local (Ollama)"),
-                    ft.dropdown.Option("skip", "Skip"),
-                ],
-                on_select=lambda e: store_db.settings_set(
-                    studio._db,
-                    store_db.SETTINGS_RAG_ENRICHMENT_MODE,
-                    str(e.control.value or "local"),
-                ),
-            ),
-            ft.Switch(
-                label="Reranker",
-                value=(store_db.settings_get(studio._db, store_db.SETTINGS_RAG_RERANKER_ENABLED) or "true")
-                != "false",
-                on_change=lambda e: store_db.settings_set(
-                    studio._db,
-                    store_db.SETTINGS_RAG_RERANKER_ENABLED,
-                    "true" if e.control.value else "false",
-                ),
-            ),
-            rag_reindex_btn,
-        ],
-        tight=True,
-        spacing=8,
-    )
-
-    models_models_column.controls.extend([rag_search_column])
-
-    studio._refresh_rag_settings_status()
 
     tab_models = ft.Container(
         padding=8,
@@ -1284,6 +1223,8 @@ async def _open_settings_dialog(studio: Any) -> None:
         ),
     )
 
+    tab_rag = build_rag_settings_tab(studio=studio, page=page)
+
     export_author_tf = ft.TextField(
         label="Author (Word export)",
         value=store_db.settings_get(studio._db, store_db.SETTINGS_EXPORT_AUTHOR) or "",
@@ -1312,6 +1253,12 @@ async def _open_settings_dialog(studio: Any) -> None:
             expand=True,
             scroll=ft.ScrollMode.AUTO,
         ),
+    )
+
+    tab_ocr = build_ocr_settings_tab(
+        studio=studio,
+        bootstrap_data=_bootstrap_data,
+        on_saved=lambda: _apply_paths_and_theme(studio, store_changed=False),
     )
 
     tab_app = ft.Container(
@@ -1510,6 +1457,14 @@ async def _open_settings_dialog(studio: Any) -> None:
         on_saved=lambda: _apply_paths_and_theme(studio, store_changed=False),
     )
 
+    tab_usage = build_token_cost_settings_tab(
+        studio=studio,
+        bootstrap_data=_bootstrap_data,
+        on_period_changed=lambda: studio._sync_token_cost_display()
+        if hasattr(studio, "_sync_token_cost_display")
+        else None,
+    )
+
     tab_license = ft.Container(
         padding=8,
         content=ft.Column(
@@ -1526,7 +1481,21 @@ async def _open_settings_dialog(studio: Any) -> None:
         ),
     )
 
-    panels = [tab_app, tab_paths, tab_export, tab_privacy, tab_license, tab_models, tab_prompts]
+    _RAG_PANEL_IX = 2
+    _OCR_PANEL_IX = 4
+
+    panels = [
+        tab_app,
+        tab_paths,
+        tab_rag,
+        tab_export,
+        tab_ocr,
+        tab_privacy,
+        tab_usage,
+        tab_license,
+        tab_models,
+        tab_prompts,
+    ]
     tab_stack = ft.Stack(controls=panels, expand=True)
     for i, c in enumerate(panels):
         c.visible = i == 0
@@ -1534,6 +1503,10 @@ async def _open_settings_dialog(studio: Any) -> None:
     def show_panel(ix: int) -> None:
         for i, c in enumerate(panels):
             c.visible = i == ix
+        if ix == _RAG_PANEL_IX and hasattr(studio, "_refresh_rag_settings_status"):
+            studio._refresh_rag_settings_status()
+        if ix == _OCR_PANEL_IX and hasattr(studio, "_ocr_settings_refresh_status"):
+            page.run_task(studio._ocr_settings_refresh_status)
         if _ctrl_on_page(tab_stack):
             tab_stack.update()
 
@@ -1551,14 +1524,25 @@ async def _open_settings_dialog(studio: Any) -> None:
         destinations=[
             ft.NavigationRailDestination(icon=ft.Icons.PALETTE_OUTLINED, label="App"),
             ft.NavigationRailDestination(icon=ft.Icons.FOLDER_OUTLINED, label="Paths"),
+            ft.NavigationRailDestination(icon=ft.Icons.MANAGE_SEARCH, label="RAG"),
             ft.NavigationRailDestination(icon=ft.Icons.DESCRIPTION_OUTLINED, label="Export"),
+            ft.NavigationRailDestination(icon=ft.Icons.DOCUMENT_SCANNER_OUTLINED, label="Import"),
             ft.NavigationRailDestination(icon=ft.Icons.SHIELD_OUTLINED, label="Privacy"),
+            ft.NavigationRailDestination(icon=ft.Icons.PAYMENTS_OUTLINED, label="Usage"),
             ft.NavigationRailDestination(icon=ft.Icons.KEY, label="License"),
             ft.NavigationRailDestination(icon=ft.Icons.SMART_TOY_OUTLINED, label="Models"),
             ft.NavigationRailDestination(icon=ft.Icons.FORMAT_LIST_BULLETED, label="Prompts"),
         ],
         on_change=on_rail_change,
     )
+
+    def focus_rag_settings_panel() -> None:
+        show_panel(_RAG_PANEL_IX)
+        rail.selected_index = _RAG_PANEL_IX
+        if _ctrl_on_page(rail):
+            rail.update()
+
+    studio._focus_rag_settings_panel = focus_rag_settings_panel
 
     body = ft.Row(
         [
@@ -1579,6 +1563,35 @@ async def _open_settings_dialog(studio: Any) -> None:
         actions=[ft.TextButton("Close", on_click=lambda e: page.pop_dialog())],
         actions_alignment=ft.MainAxisAlignment.END,
     )
+    async def load_local_models_for_settings() -> None:
+        nonlocal chat_opts, ollama
+        try:
+            chat_opts, _ = await classify_installed_models(ollama)
+        except BaseException as ex:
+            status_txt.value = ollama_error_message(ex)
+            chat_dd.disabled = True
+            if _ctrl_on_page(status_txt):
+                status_txt.update()
+            if _ctrl_on_page(chat_dd):
+                chat_dd.update()
+            studio._snack(f"Could not list Ollama models (Local section): {ollama_error_message(ex)}")
+            return
+        chat_dd.options = [ft.dropdown.Option(n) for n in chat_opts]
+        if studio.ollama_model in chat_opts:
+            chat_dd.value = studio.ollama_model
+        elif chat_opts:
+            chat_dd.value = chat_opts[0]
+        else:
+            chat_dd.value = None
+        chat_dd.disabled = not chat_opts
+        status_txt.value = f"{len(chat_opts)} chat model(s)" if chat_opts else "No chat models"
+        if not chat_opts:
+            studio._snack("No chat models found locally. Try: ollama pull llama3.2")
+        if _ctrl_on_page(chat_dd):
+            chat_dd.update()
+            status_txt.update()
+
     # Yield so the File menu overlay finishes closing before the modal is stacked.
     await asyncio.sleep(0)
     page.show_dialog(dlg)
+    page.run_task(load_local_models_for_settings)

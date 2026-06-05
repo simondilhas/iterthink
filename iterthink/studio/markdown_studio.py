@@ -62,6 +62,7 @@ from .history import CompareCandidateSource, MarkdownStudioCompareText
 from .ki_comments import paragraph_comment_label, plan_comment_list_label, sorted_comment_rows
 from .ki_sidebar import KI_TOPIC_STRIP_DISCUSS_ICON, MarkdownStudioKiSidebar
 from .llm_backend import MarkdownStudioLlmBackend, build_llm_tier_tabs, sync_privacy_shield_icon
+from .token_cost_ui import build_token_cost_label
 from .llm_generation_control import MarkdownStudioLlmGenerationControl
 from .main_workspace_tabs import MainWorkspaceTabsMixin
 from .shell import MarkdownStudioShell
@@ -145,6 +146,8 @@ class MarkdownStudio(
         self._editor_prev_for_list_continue: str = ""
         self._editor_list_continue_applying: bool = False
         self._compose_toolbar_applying: bool = False
+        self._compose_toolbar_snap_range: tuple[int, int] | None = None
+        self._compose_editor_focused: bool = False
         self._compose_editor_stack_width: float = 400.0
         self._compose_editor_stack_height: float = 320.0
         # Right-click context menu wrapping the editor; items rebuilt when prompts.yaml reloads.
@@ -268,6 +271,8 @@ class MarkdownStudio(
             enable_interactive_selection=True,
             on_change=self._on_editor_change,
             on_selection_change=self._on_selection_change,
+            on_focus=lambda _e: self._set_compose_editor_focused(True),
+            on_blur=lambda _e: self._set_compose_editor_focused(False),
         )
         self._compare_editor = ft.TextField(
             multiline=True,
@@ -1299,6 +1304,7 @@ class MarkdownStudio(
 
         self.tree_search_field.on_focus = lambda _e: _tree_search_rim(True)
         self.tree_search_field.on_blur = lambda _e: _tree_search_rim(False)
+        self._sync_rag_search_ui()
 
         self._init_content_find_replace_ui(_hint_style)
 
@@ -1355,14 +1361,9 @@ class MarkdownStudio(
         )
         self._ki_act_panel = ft.Column(
             [
+                
                 ft.Text(
-                    "Ready to act on this change?",
-                    size=13,
-                    weight=ft.FontWeight.W_600,
-                    color=config.PRIMARY_COLOR,
-                ),
-                ft.Text(
-                    "Connect {yourcompany}os to turn document changes into structured workflows — automatically routed to the right people.",
+                    "Connect {yourcompany}os to turn document changes into automated workflows and decisions.",
                     size=12,
                     color=config.ON_SURFACE_VARIANT,
                     selectable=True,
@@ -1644,6 +1645,7 @@ class MarkdownStudio(
             icon_size=KI_TIER_TAB_ICON_PX,
             tab_bar_height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
         )
+        self._ensure_ki_tier_tabs_enabled()
         self._privacy_shield_icon = ft.Icon(
             ft.Icons.SHIELD,
             size=KI_TIER_TAB_ICON_PX,
@@ -1655,9 +1657,12 @@ class MarkdownStudio(
             tier=self.ki_tier,
             reinject=config.PRIVACY_SHIELD_REINJECT,
         )
+        self._token_cost_label = build_token_cost_label(size=11)
+        self._sync_token_cost_display()
         self._ki_tier_row = ft.Row(
             [
                 ft.Container(content=self._ki_tier_tabs, expand=True),
+                self._token_cost_label,
                 self._privacy_shield_icon,
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -1849,6 +1854,7 @@ class MarkdownStudio(
         if _ctrl_on_page(tier_bar):
             tier_bar.update()
         self._sync_ki_tier_tab_icons()
+        self._sync_token_cost_display()
 
     def apply_config_theme(self) -> None:
         self.page.theme_mode = ft.ThemeMode.LIGHT if config.IS_LIGHT else ft.ThemeMode.DARK
@@ -1935,6 +1941,7 @@ class MarkdownStudio(
         self._chat_input.focused_bgcolor = config.SURFACE
         self._chat_input.border_color = ui_theme.outline_muted()
         self._tree_search_bar.bgcolor = config.SURFACE
+        self._sync_rag_search_ui()
         self._sync_content_find_replace_field_theme(_hs)
         self._apply_main_workspace_tab_chrome_theme()
         self._apply_ki_tier_tab_bar_theme()

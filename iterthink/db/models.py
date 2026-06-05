@@ -123,3 +123,20 @@ class CredentialVault(Base):
     kdf_salt: Mapped[bytes] = mapped_column(nullable=False)
     ciphertext: Mapped[bytes] = mapped_column(nullable=False)
     verifier: Mapped[bytes] = mapped_column(nullable=False)
+
+
+class LlmUsageEvent(Base):
+    """Remote LLM API token usage (Office/Cloud tiers) for cost aggregation."""
+
+    __tablename__ = "llm_usage_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    tier: Mapped[str] = mapped_column(String(16), nullable=False)
+    vendor: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    model: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    created_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
+
+    __table_args__ = (Index("ix_llm_usage_events_created_at", "created_at"),)

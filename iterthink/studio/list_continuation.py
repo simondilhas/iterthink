@@ -9,15 +9,20 @@ _ORDERED_LINE = re.compile(r"^(\s*)(\d+)\.\s*(.*)$")
 _BULLET_LINE = re.compile(r"^(\s*)([-*+])\s+(?!\[)(.*)$")
 
 
-def single_newline_insert_index(old: str, new: str) -> int | None:
-    """If ``new`` is ``old`` with exactly one ``\\n`` inserted, return that index (unique only)."""
+def _newline_insert_candidates(old: str, new: str) -> list[int]:
+    """Indices in ``new`` where removing ``\\n`` at that position yields ``old``."""
     if len(new) != len(old) + 1:
-        return None
-    matches = [
+        return []
+    return [
         i
         for i, ch in enumerate(new)
         if ch == "\n" and (new[:i] + new[i + 1 :]) == old
     ]
+
+
+def single_newline_insert_index(old: str, new: str) -> int | None:
+    """If ``new`` is ``old`` with exactly one ``\\n`` inserted, return that index (unique only)."""
+    matches = _newline_insert_candidates(old, new)
     if len(matches) != 1:
         return None
     return matches[0]
@@ -39,6 +44,17 @@ def _newline_insert_index_at_caret(old: str, new: str, caret_after: int) -> int 
 
 def _normalize_line(line: str) -> str:
     return line.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def normalize_buffer_newlines(text: str) -> str:
+    """Whole-buffer CRLF/CR → LF for diff-based Enter merge."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def map_index_after_normalize_newlines(text: str, idx: int) -> int:
+    """Map a code-unit offset in *text* to the same logical position after ``normalize_buffer_newlines``."""
+    idx = max(0, min(idx, len(text)))
+    return len(text[:idx].replace("\r\n", "\n").replace("\r", "\n"))
 
 
 def is_empty_list_item_line(line: str) -> bool:
@@ -101,6 +117,52 @@ def outdent_empty_list_item_line(line: str) -> str | None:
     return None
 
 
+def _list_line_before_newline(old: str, i: int) -> str:
+    line_start = old.rfind("\n", 0, i) + 1
+    return old[line_start:i]
+
+
+def _resolve_newline_insert_index(
+    old: str,
+    new: str,
+    selection_start: int,
+    selection_end: int,
+) -> int | None:
+    """Pick the inserted ``\\n`` when diff or caret alone is ambiguous (e.g. near ``\\n\\n``)."""
+    candidates = _newline_insert_candidates(old, new)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    list_related = [
+        i
+        for i in candidates
+        if is_empty_list_item_line(_list_line_before_newline(old, i))
+        or markdown_list_continuation_prefix(_list_line_before_newline(old, i)) is not None
+    ]
+    if len(list_related) == 1:
+        return list_related[0]
+    pool = list_related or candidates
+    if selection_start != selection_end:
+        return pool[0]
+    preferred = selection_start - 1
+    if preferred in pool:
+        return preferred
+    return min(pool, key=lambda j: abs(j - selection_start))
+
+
+def _merge_exit_empty_list_item(old: str, line_start: int, i: int) -> tuple[str, int]:
+    """Drop an empty top-level list marker and leave the caret on the following blank line."""
+    rest = i
+    if rest < len(old) and old[rest] == "\n":
+        rest += 1
+    if rest >= len(old):
+        merged = old[:line_start] + "\n"
+    else:
+        merged = old[:line_start] + old[rest:]
+    return merged, line_start + 1
+
+
 def markdown_list_continuation_prefix(line: str) -> str | None:
     """Return text to insert after ``\\n`` to continue a list, or ``None``."""
     line = _normalize_line(line)
@@ -135,6 +197,8 @@ def merge_if_list_continuation_after_enter(
     # new newline vs ``old`` — do not require a collapsed selection in that case.
     i = single_newline_insert_index(old, new)
     if i is None:
+        i = _resolve_newline_insert_index(old, new, selection_start, selection_end)
+    if i is None:
         if selection_start != selection_end:
             return None
         i = _newline_insert_index_at_caret(old, new, selection_start)
@@ -148,9 +212,7 @@ def merge_if_list_continuation_after_enter(
             merged = old[:line_start] + outdented + "\n" + old[i:]
             new_caret = line_start + len(outdented)
             return merged, new_caret
-        merged = old[:line_start] + "\n" + old[i:]
-        new_caret = line_start + 1
-        return merged, new_caret
+        return _merge_exit_empty_list_item(old, line_start, i)
     prefix = markdown_list_continuation_prefix(line)
     if prefix is None:
         return None

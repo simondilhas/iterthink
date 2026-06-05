@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -18,60 +17,56 @@ from iterthink.db.content_models import Content
 from iterthink.persistence import content_repo, store_db
 
 from .chunk_type import ChunkType, classify_chunk_type, parse_chunk_type
+from .context_format import format_rag_context_block, rag_chunk_display_body
 
 _DOC_KEY_PREFIX = "impact_rag::"
-_CHUNK_MAX_CHARS = 600
-_RAG_CTX_START = re.compile(r"<!--\s*iterthink-rag-context-start\s*-->", re.IGNORECASE)
-_RAG_CTX_END = re.compile(r"<!--\s*iterthink-rag-context-end\s*-->", re.IGNORECASE)
-_TRIVIAL_HEADING_CHUNK = re.compile(r"^#{1,6}\s*[\d\-–—.]+\s*$", re.MULTILINE)
-
-
-def rag_chunk_display_body(chunk: str) -> str:
-    s = chunk.strip()
-    start_m = _RAG_CTX_START.search(s)
-    if not start_m:
-        return s
-    tail = s[start_m.end() :]
-    end_m = _RAG_CTX_END.search(tail)
-    if not end_m:
-        return s
-    body = tail[end_m.end() :].strip()
-    return body if body else s
-
-
-def _chunk_usable_for_norm_context(chunk_full: str) -> bool:
-    s = rag_chunk_display_body(chunk_full).strip()
-    if len(s) < 20:
-        return False
-    if _TRIVIAL_HEADING_CHUNK.fullmatch(s):
-        return False
-    if len(s) > 60 and s.count(".") / len(s) > 0.22:
-        return False
-    if re.search(r"(?:\.\s*){6,}\d", s):
-        return False
-    return True
 
 
 def _format_ranked_context_parts(
+    scored: list[
+        tuple[float, str, str, int, ChunkType, str, str, str]
+    ],
+    *,
+    top_k: int,
+) -> str:
+    """Each score tuple: sim, fname, raw_text, slot_index, chunk_type, parent_text, doc_title, section_header."""
+    parts: list[str] = []
+    seen_parents: set[int] = set()
+    for item in scored:
+        _sim, fname, raw_text, slot_index, chunk_type, parent_text, doc_title, section_header = item[:8]
+        parent_id = item[8] if len(item) > 8 else None
+        if parent_id is not None:
+            pid = int(parent_id)
+            if pid in seen_parents:
+                continue
+            seen_parents.add(pid)
+        block = format_rag_context_block(
+            fname=fname,
+            doc_title=doc_title,
+            section_header=section_header,
+            parent_text=parent_text,
+            raw_text=raw_text,
+            slot_index=slot_index,
+            chunk_type=chunk_type,
+        )
+        if block is None:
+            continue
+        parts.append(block)
+        if len(parts) >= top_k:
+            break
+    return "\n\n".join(parts)
+
+
+def _format_ranked_context_parts_legacy(
     scored: list[tuple[float, str, str, int, ChunkType]],
     *,
     top_k: int,
 ) -> str:
-    parts: list[str] = []
-    for _sim, fname, chunk, chunk_index, chunk_type in scored:
-        raw = chunk.strip()
-        if not _chunk_usable_for_norm_context(raw):
-            continue
-        snip = rag_chunk_display_body(raw).strip()
-        if len(snip) > _CHUNK_MAX_CHARS:
-            snip = snip[: _CHUNK_MAX_CHARS - 1] + "…"
-        para_num = chunk_index + 1
-        parts.append(
-            f"[{fname}] chunk_index={chunk_index} paragraph={para_num} type={chunk_type.value}\n{snip}"
-        )
-        if len(parts) >= top_k:
-            break
-    return "\n\n".join(parts)
+    enriched = [
+        (sim, fname, chunk, idx, ct, "", "", "")
+        for sim, fname, chunk, idx, ct in scored
+    ]
+    return _format_ranked_context_parts(enriched, top_k=top_k)
 
 
 def _doc_key(path: Path) -> str:
@@ -157,7 +152,7 @@ def retrieve_context_for_paragraph(
     if not scored:
         return ""
     scored.sort(key=lambda t: t[0], reverse=True)
-    return _format_ranked_context_parts(scored, top_k=top_k)
+    return _format_ranked_context_parts_legacy(scored, top_k=top_k)
 
 
 def doc_key_version(lineage_id: str, content_version_id: int) -> str:
@@ -192,13 +187,18 @@ async def ingest_latest_versions_for_document_ids(
             continue
         if not path.is_file():
             continue
-        await index_document_path(
-            session,
-            conn,
-            path,
-            enrichment_mode="skip",
-            embed_model_id=embed_model_id,
-        )
+        try:
+            await index_document_path(
+                session,
+                conn,
+                path,
+                enrichment_mode="skip",
+                embed_model_id=embed_model_id,
+            )
+            session.commit()
+        except BaseException:
+            session.rollback()
+            continue
 
 
 def _document_labels(session: Any, doc_ids: list[int]) -> dict[int, str]:
@@ -231,13 +231,17 @@ def retrieve_context_by_lineage_ids(
     if not para_floats or not lineage_ids:
         return ""
     rows = store_db.rag_child_fetch_latest_rows(conn, lineage_ids)
-    scored: list[tuple[float, str, str, int, ChunkType]] = []
+    scored: list[tuple[float, str, str, int, ChunkType, str, str, str, int]] = []
     if rows:
         for row in rows:
             lid = str(row[1])
             slot_index = int(row[3])
             chunk_text = str(row[4])
             vec_rowid = int(row[8])
+            parent_id = int(row[9])
+            doc_title = str(row[10])
+            section_header = str(row[11])
+            parent_text = str(row[12])
             ct = classify_chunk_type(rag_chunk_display_body(chunk_text))
             if chunk_types_include is not None and ct not in chunk_types_include:
                 continue
@@ -251,9 +255,22 @@ def retrieve_context_by_lineage_ids(
             if not chunk_floats:
                 continue
             sim = cosine_sim(para_floats, chunk_floats)
-            scored.append((sim, labels.get(lid, lid[:8]), chunk_text, slot_index, ct))
+            scored.append(
+                (
+                    sim,
+                    labels.get(lid, lid[:8]),
+                    chunk_text,
+                    slot_index,
+                    ct,
+                    parent_text,
+                    doc_title,
+                    section_header,
+                    parent_id,
+                )
+            )
     if not scored:
         legacy = store_db.impact_version_chunk_fetch_latest_rows(conn, lineage_ids)
+        legacy_scored: list[tuple[float, str, str, int, ChunkType]] = []
         for lid, _ver_id, chunk_idx, vec_rowid, chunk_text, chunk_type_raw in legacy:
             ct = parse_chunk_type(chunk_type_raw)
             if chunk_types_include is not None and ct not in chunk_types_include:
@@ -268,7 +285,11 @@ def retrieve_context_by_lineage_ids(
             if not chunk_floats:
                 continue
             sim = cosine_sim(para_floats, chunk_floats)
-            scored.append((sim, labels.get(lid, lid[:8]), chunk_text, int(chunk_idx), ct))
+            legacy_scored.append((sim, labels.get(lid, lid[:8]), chunk_text, int(chunk_idx), ct))
+        if not legacy_scored:
+            return ""
+        legacy_scored.sort(key=lambda t: t[0], reverse=True)
+        return _format_ranked_context_parts_legacy(legacy_scored, top_k=top_k)
     if not scored:
         return ""
     scored.sort(key=lambda t: t[0], reverse=True)
