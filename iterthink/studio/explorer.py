@@ -1718,7 +1718,7 @@ class MarkdownStudioExplorer:
         sort_mode = getattr(self, "_tree_sort_mode", "name_az")
         root_res = root.resolve()
 
-        if q and config.RAG_SEARCH_ENABLED:
+        if q:
             tree = build_search_md_tree(root_res, q)
 
             def render_level(node: dict[str, Any], parent_path: Path, depth: int = 0) -> list[ft.Control]:

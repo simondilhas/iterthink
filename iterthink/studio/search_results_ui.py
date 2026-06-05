@@ -35,24 +35,26 @@ class MarkdownStudioSearchResults:
     def _rag_search_enabled(self) -> bool:
         return config.RAG_SEARCH_ENABLED
 
+    def _tree_search_hint(self) -> str:
+        if self._rag_search_enabled():
+            return "Search… (/f for filenames)"
+        return "Search…"
+
     def _sync_rag_search_ui(self) -> None:
-        """Show or hide sidebar search; clear state when disabled."""
+        """Update search hint; clear semantic RAG state when disabled."""
         enabled = self._rag_search_enabled()
-        bar = getattr(self, "_tree_search_bar", None)
-        if bar is not None and getattr(bar, "visible", None) != enabled:
-            bar.visible = enabled
         field = getattr(self, "tree_search_field", None)
+        if field is not None:
+            hint = self._tree_search_hint()
+            if getattr(field, "hint_text", None) != hint:
+                field.hint_text = hint
         if not enabled:
             self._search_gen = getattr(self, "_search_gen", 0) + 1
             self._search_hits = []
-            if field is not None and getattr(field, "value", ""):
-                field.value = ""
             self._show_search_results_panel(False)
             MarkdownStudioExplorer._rebuild_tree_ui(self)
             if _ctrl_on_page(getattr(self, "tree_column", None)):
                 self.tree_column.update()
-        if bar is not None and _ctrl_on_page(bar):
-            bar.update()
         if field is not None and _ctrl_on_page(field):
             field.update()
 
@@ -231,9 +233,16 @@ class MarkdownStudioSearchResults:
             self.tree_column.controls.append(self._make_tree_file_row(path.name, path))
 
     def _on_tree_search_change(self, _e: ft.ControlEvent | None = None) -> None:
-        if not self._rag_search_enabled():
-            return
         raw = (self.tree_search_field.value or "").strip()
+        if not self._rag_search_enabled():
+            self._search_gen += 1
+            self._search_hits = []
+            self._show_search_results_panel(False)
+            self._rebuild_tree_ui()
+            if _ctrl_on_page(self.tree_column):
+                self.tree_column.update()
+            return
+
         query, filename_mode = parse_search_query(raw)
 
         if not raw:

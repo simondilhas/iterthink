@@ -145,6 +145,7 @@ class MarkdownStudio(
         # List continuation on Enter: previous buffer + re-entrancy guard while rewriting value.
         self._editor_prev_for_list_continue: str = ""
         self._editor_list_continue_applying: bool = False
+        self._editor_pending_caret: int | None = None
         self._compose_toolbar_applying: bool = False
         self._compose_toolbar_snap_range: tuple[int, int] | None = None
         self._compose_editor_focused: bool = False

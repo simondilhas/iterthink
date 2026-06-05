@@ -230,4 +230,4 @@ Source available under [BUSL-1.1](https://mariadb.com/bsl11/).
 
 ---
 
-*iterthink — the review layer for documents and models.*
+*iterthink — the review layer*

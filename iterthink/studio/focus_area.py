@@ -34,9 +34,11 @@ from .compose_toolbar_layout import selection_first_line_anchor_px
 from .discuss_context import discuss_llm_context_text
 from iterthink.compare.margin import paragraph_index_at_offset, replace_paragraph_at_index, split_paragraphs
 from .list_continuation import (
+    infer_selection_after_single_enter,
     map_index_after_normalize_newlines,
-    merge_if_list_continuation_after_enter,
+    map_norm_index_to_raw,
     normalize_buffer_newlines,
+    plan_list_continuation_after_enter,
 )
 from .markdown_preview import markdown_preview_with_task_checkboxes
 from iterthink.ai.llm_router import remote_http_error_message
@@ -667,11 +669,22 @@ class MarkdownStudioCompose:
             return
         if not getattr(self, "_compose_editor_focused", False):
             return
+        buf = self.editor.value or ""
+        sel = self.editor.selection
+        collapsed = sel is None or sel.is_collapsed
+        if not shift and collapsed:
+            caret = int(sel.start) if sel is not None else len(buf)
+            if not self._compose_caret_at_line_start(buf, caret):
+                self._compose_insert_at_caret("  ")
+                try:
+                    await self.editor.focus()
+                except BaseException:
+                    pass
+                return
         rng = self._compose_indent_key_range()
         if rng is None:
             return
         a, b = rng
-        buf = self.editor.value or ""
         got = apply_outdent_block(buf, a, b) if shift else apply_indent_block(buf, a, b)
         if got is None:
             return
@@ -681,6 +694,25 @@ class MarkdownStudioCompose:
             await self.editor.focus()
         except BaseException:
             pass
+
+    def _compose_caret_at_line_start(self, buf: str, caret: int) -> bool:
+        line_start = buf.rfind("\n", 0, caret) + 1
+        return not buf[line_start:caret].strip()
+
+    def _compose_insert_at_caret(self, text: str) -> None:
+        raw_buf = self.editor.value or ""
+        sel = self.editor.selection
+        caret = int(sel.start) if sel is not None else len(raw_buf)
+        caret = max(0, min(caret, len(raw_buf)))
+        updated = raw_buf[:caret] + text + raw_buf[caret:]
+        c = caret + len(text)
+        self._editor_pending_caret = c
+        self.editor.value = updated
+        self.editor.selection = ft.TextSelection(c, c)
+        self._editor_prev_for_list_continue = normalize_buffer_newlines(updated)
+        if _ctrl_on_page(self.editor):
+            self.editor.update()
+        self._after_editor_programmatic_change()
 
     def _kick_debounced_compare_diff_if_main_editor_backs_buffers(self) -> None:
         """Review baseline and History newer=current draft both read from ``editor``; keep analyse in sync."""
@@ -1091,6 +1123,66 @@ class MarkdownStudioCompose:
             self._margin_gen += 1
             self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)
 
+    def _compose_list_continue_selection(
+        self, old: str, new: str, raw_new: str, sel: ft.TextSelection | None
+    ) -> tuple[int, int]:
+        inferred = infer_selection_after_single_enter(old, new)
+        if sel is None:
+            return inferred
+        ss = map_index_after_normalize_newlines(raw_new, int(sel.start))
+        se = map_index_after_normalize_newlines(raw_new, int(sel.end))
+        if ss != se:
+            return ss, se
+        if ss == len(new) and inferred[0] < len(new):
+            return inferred
+        if inferred[0] != len(new) and abs(ss - inferred[0]) > 2:
+            return inferred
+        return ss, se
+
+    def _apply_list_continue_local(
+        self,
+        raw_buf: str,
+        delete_start: int,
+        delete_end: int,
+        insert_text: str,
+        caret_norm: int,
+    ) -> None:
+        raw_lo = map_norm_index_to_raw(raw_buf, delete_start)
+        raw_hi = map_norm_index_to_raw(raw_buf, delete_end)
+        updated = raw_buf[:raw_lo] + insert_text + raw_buf[raw_hi:]
+        raw_caret = map_norm_index_to_raw(updated, caret_norm)
+        self._editor_pending_caret = raw_caret
+        self._editor_list_continue_applying = True
+        try:
+            self.editor.value = updated
+            self.editor.selection = ft.TextSelection(raw_caret, raw_caret)
+            self._editor_prev_for_list_continue = normalize_buffer_newlines(updated)
+            if _ctrl_on_page(self.editor):
+                self.editor.update()
+        finally:
+            self._editor_list_continue_applying = False
+
+    def _apply_list_continue_replace(self, merged: str, caret: int) -> None:
+        c = max(0, min(int(caret), len(merged)))
+        self._editor_pending_caret = c
+        self._editor_list_continue_applying = True
+        try:
+            self.editor.value = merged
+            self.editor.selection = ft.TextSelection(c, c)
+            self._editor_prev_for_list_continue = normalize_buffer_newlines(merged)
+            if _ctrl_on_page(self.editor):
+                self.editor.update()
+        finally:
+            self._editor_list_continue_applying = False
+
+    async def _deferred_after_list_continue(self) -> None:
+        await asyncio.sleep(0)
+        self._after_editor_programmatic_change()
+        if getattr(self, "_left_sidebar_tab", 0) == 1 and hasattr(
+            self, "_kick_debounced_content_tree"
+        ):
+            self._kick_debounced_content_tree()
+
     def _on_editor_change(self, _e: ft.ControlEvent) -> None:
         if self._editor_list_continue_applying:
             self._editor_prev_for_list_continue = normalize_buffer_newlines(
@@ -1108,25 +1200,21 @@ class MarkdownStudioCompose:
             old = normalize_buffer_newlines(raw_old)
             new = normalize_buffer_newlines(raw_new)
             sel = self.editor.selection
-            if sel is not None:
-                ss = map_index_after_normalize_newlines(raw_new, int(sel.start))
-                se = map_index_after_normalize_newlines(raw_new, int(sel.end))
-            else:
-                ss, se = 0, 0
-            got = merge_if_list_continuation_after_enter(old, new, ss, se)
-            if got is not None:
-                mval, mcaret = got
-                self._editor_list_continue_applying = True
-                try:
-                    self.editor.value = mval
-                    self.editor.selection = ft.TextSelection(mcaret, mcaret)
-                    if _ctrl_on_page(self.editor):
-                        self.editor.update()
-                    self.page.run_task(
-                        self._compose_restore_editor_selection, mcaret, mcaret
+            ss, se = self._compose_list_continue_selection(old, new, raw_new, sel)
+            plan = plan_list_continuation_after_enter(old, new, ss, se)
+            if plan is not None:
+                if plan.kind == "replace":
+                    self._apply_list_continue_replace(plan.merged, plan.caret)
+                else:
+                    self._apply_list_continue_local(
+                        raw_new,
+                        plan.delete_start,
+                        plan.delete_end,
+                        plan.insert_text,
+                        plan.caret,
                     )
-                finally:
-                    self._editor_list_continue_applying = False
+                self.page.run_task(self._deferred_after_list_continue)
+                return
 
         self._editor_prev_for_list_continue = normalize_buffer_newlines(
             self.editor.value or ""
@@ -1173,6 +1261,17 @@ class MarkdownStudioCompose:
 
     def _on_selection_change(self, e: ft.TextSelectionChangeEvent) -> None:
         sel = e.selection
+        pending = getattr(self, "_editor_pending_caret", None)
+        if pending is not None:
+            buf = self.editor.value or ""
+            pc = max(0, min(int(pending), len(buf)))
+            cur = int(sel.start) if sel is not None else -1
+            if cur != pc:
+                self.editor.selection = ft.TextSelection(pc, pc)
+                if _ctrl_on_page(self.editor):
+                    self.editor.update()
+                return
+            self._editor_pending_caret = None
         buf = self.editor.value or ""
         if sel is not None and not sel.is_collapsed:
             t = (e.selected_text or "").strip()
@@ -1311,16 +1410,6 @@ class MarkdownStudioCompose:
             actions_wrap.update()
         if presence_host is not None and _ctrl_on_page(presence_host):
             presence_host.update()
-
-    async def _compose_restore_editor_selection(self, a: int, b: int) -> None:
-        await asyncio.sleep(0.06)
-        buf = self.editor.value or ""
-        if a < 0 or b > len(buf) or a > b:
-            return
-        await self.editor.focus()
-        self.editor.selection = ft.TextSelection(a, b)
-        if _ctrl_on_page(self.editor):
-            self.editor.update()
 
     def _margin_action_footer_controls(
         self,

@@ -20,19 +20,27 @@ def test_bundled_rag_search_disabled() -> None:
     assert _bundled_defaults_dict()["rag_search_enabled"] is False
 
 
-def test_rag_search_gated_on_tree_search_change(monkeypatch) -> None:
+def test_rag_semantic_search_gated_when_feature_disabled(monkeypatch) -> None:
     monkeypatch.setattr(config, "RAG_SEARCH_ENABLED", False)
     studio = MarkdownStudioSearchResults()
-    studio.tree_search_field = MagicMock(value="/f notes")
+    studio.tree_search_field = MagicMock(value="notes")
+    studio.tree_column = MagicMock()
     studio._search_gen = 0
-    called: list[str] = []
+    semantic_called: list[bool] = []
+    rebuild_called: list[bool] = []
 
-    def _fail(*_a: object, **_k: object) -> None:
-        called.append("rebuild")
+    async def _no_semantic(*_a: object, **_k: object) -> None:
+        semantic_called.append(True)
 
-    studio._rebuild_tree_ui_filename = _fail  # type: ignore[method-assign]
+    def _rebuild() -> None:
+        rebuild_called.append(True)
+
+    studio._debounced_semantic_search = _no_semantic  # type: ignore[method-assign]
+    studio._rebuild_tree_ui = _rebuild  # type: ignore[method-assign]
+    studio._show_search_results_panel = lambda _v: None  # type: ignore[method-assign]
     studio._on_tree_search_change()
-    assert called == []
+    assert semantic_called == []
+    assert rebuild_called == [True]
 
 
 def test_parse_search_query_filename_mode() -> None:
