@@ -27,6 +27,7 @@ from iterthink.ai.ollama_models import classify_installed_models
 from iterthink.ai.ollama_util import ollama_error_message
 from .constants import KI_TIER_TAB_ICON_PX, SIDEBAR_TOOLBAR_ROW_H_PX
 from .llm_backend import build_llm_tier_tabs, sync_llm_tier_tab_icons
+from .settings_knowledge import build_knowledge_settings_tab
 from .settings_ocr import build_ocr_settings_tab
 from .settings_privacy import build_privacy_settings_tab
 from .settings_rag import build_rag_settings_tab
@@ -1224,6 +1225,7 @@ async def _open_settings_dialog(studio: Any) -> None:
     )
 
     tab_rag = build_rag_settings_tab(studio=studio, page=page)
+    tab_knowledge = build_knowledge_settings_tab(studio=studio, page=page)
 
     export_author_tf = ft.TextField(
         label="Author (Word export)",
@@ -1482,12 +1484,14 @@ async def _open_settings_dialog(studio: Any) -> None:
     )
 
     _RAG_PANEL_IX = 2
-    _OCR_PANEL_IX = 4
+    _KNOWLEDGE_PANEL_IX = 3
+    _OCR_PANEL_IX = 5
 
     panels = [
         tab_app,
         tab_paths,
         tab_rag,
+        tab_knowledge,
         tab_export,
         tab_ocr,
         tab_privacy,
@@ -1503,8 +1507,10 @@ async def _open_settings_dialog(studio: Any) -> None:
     def show_panel(ix: int) -> None:
         for i, c in enumerate(panels):
             c.visible = i == ix
-        if ix == _RAG_PANEL_IX and hasattr(studio, "_refresh_rag_settings_status"):
-            studio._refresh_rag_settings_status()
+        if ix == _RAG_PANEL_IX and hasattr(studio, "_present_rag_settings_stats"):
+            studio._present_rag_settings_stats()
+        if ix == _KNOWLEDGE_PANEL_IX and hasattr(studio, "_refresh_knowledge_settings_summary"):
+            studio._refresh_knowledge_settings_summary()
         if ix == _OCR_PANEL_IX and hasattr(studio, "_ocr_settings_refresh_status"):
             page.run_task(studio._ocr_settings_refresh_status)
         if _ctrl_on_page(tab_stack):
@@ -1525,6 +1531,7 @@ async def _open_settings_dialog(studio: Any) -> None:
             ft.NavigationRailDestination(icon=ft.Icons.PALETTE_OUTLINED, label="App"),
             ft.NavigationRailDestination(icon=ft.Icons.FOLDER_OUTLINED, label="Paths"),
             ft.NavigationRailDestination(icon=ft.Icons.MANAGE_SEARCH, label="RAG"),
+            ft.NavigationRailDestination(icon=ft.Icons.MENU_BOOK_OUTLINED, label="Knowledge"),
             ft.NavigationRailDestination(icon=ft.Icons.DESCRIPTION_OUTLINED, label="Export"),
             ft.NavigationRailDestination(icon=ft.Icons.DOCUMENT_SCANNER_OUTLINED, label="Import"),
             ft.NavigationRailDestination(icon=ft.Icons.SHIELD_OUTLINED, label="Privacy"),

@@ -41,6 +41,26 @@ class ChildChunk:
         return "\n".join(parts)
 
 
+def build_retrieval_query_text(
+    raw_text: str,
+    *,
+    doc_title: str = "Untitled",
+    section_header: str = "",
+    project_label: str | None = None,
+) -> str:
+    """Embed text aligned with ``ChildChunk.build_embed_text`` (without enrichment fields)."""
+    parts: list[str] = []
+    if project_label and project_label.strip():
+        parts.append(f"Project: {project_label.strip()}")
+    parts.extend([
+        f"Title: {doc_title}",
+        f"Header: {section_header}",
+        "---",
+        raw_text.strip(),
+    ])
+    return "\n".join(parts)
+
+
 @dataclass
 class ParentChunk:
     parent_index: int

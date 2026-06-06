@@ -13,7 +13,7 @@ import sqlite_vec
 
 from iterthink import config
 
-RAG_SCHEMA_VERSION = 3
+RAG_SCHEMA_VERSION = 4
 
 SETTINGS_CHAT = "ollama_chat_model"
 SETTINGS_EMBED = "ollama_embed_model"
@@ -191,6 +191,25 @@ _RAG_SCHEMA_V3 = """
         ON rag_lineage_index (project_slug);
 """
 
+_RAG_SCHEMA_V4 = """
+        CREATE TABLE IF NOT EXISTS impact_override_context (
+            content_version_id INTEGER NOT NULL,
+            paragraph_index INTEGER NOT NULL,
+            prompt_id TEXT NOT NULL,
+            paragraph_text_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            override_comment TEXT NOT NULL,
+            embed_text TEXT NOT NULL,
+            vec_rowid INTEGER NOT NULL,
+            embed_model_id TEXT NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (content_version_id, paragraph_index, prompt_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_impact_override_ver_prompt
+        ON impact_override_context (content_version_id, prompt_id);
+"""
+
 
 def init_schema(conn: sqlite3.Connection) -> None:
     cur = conn.execute("PRAGMA user_version")
@@ -206,6 +225,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
     if ver < 3:
         conn.executescript(_RAG_SCHEMA_V3)
         ver = 3
+    if ver < 4:
+        conn.executescript(_RAG_SCHEMA_V4)
+        ver = 4
     conn.execute(f"PRAGMA user_version = {RAG_SCHEMA_VERSION}")
     conn.commit()
 
@@ -465,6 +487,136 @@ def impact_version_embeddings_complete(
         return False
     cnt, sha = int(row[0]), str(row[1] or "")
     return cnt == chunk_count and sha == content_sha
+
+
+def impact_override_context_upsert(
+    conn: sqlite3.Connection,
+    *,
+    content_version_id: int,
+    paragraph_index: int,
+    prompt_id: str,
+    paragraph_text_hash: str,
+    status: str,
+    override_comment: str,
+    embed_text: str,
+    vec_rowid: int,
+    embed_model_id: str,
+) -> None:
+    now = time.time()
+    conn.execute(
+        """
+        INSERT INTO impact_override_context (
+            content_version_id, paragraph_index, prompt_id, paragraph_text_hash,
+            status, override_comment, embed_text, vec_rowid, embed_model_id, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(content_version_id, paragraph_index, prompt_id) DO UPDATE SET
+            paragraph_text_hash = excluded.paragraph_text_hash,
+            status = excluded.status,
+            override_comment = excluded.override_comment,
+            embed_text = excluded.embed_text,
+            vec_rowid = excluded.vec_rowid,
+            embed_model_id = excluded.embed_model_id,
+            updated_at = excluded.updated_at
+        """,
+        (
+            int(content_version_id),
+            int(paragraph_index),
+            str(prompt_id),
+            str(paragraph_text_hash),
+            str(status),
+            str(override_comment),
+            str(embed_text),
+            int(vec_rowid),
+            str(embed_model_id),
+            now,
+        ),
+    )
+    conn.commit()
+
+
+def impact_override_context_delete(
+    conn: sqlite3.Connection,
+    *,
+    content_version_id: int,
+    paragraph_index: int,
+    prompt_id: str,
+) -> None:
+    conn.execute(
+        """
+        DELETE FROM impact_override_context
+        WHERE content_version_id = ? AND paragraph_index = ? AND prompt_id = ?
+        """,
+        (int(content_version_id), int(paragraph_index), str(prompt_id)),
+    )
+    conn.commit()
+
+
+def impact_override_context_fetch_for_version(
+    conn: sqlite3.Connection,
+    *,
+    content_version_id: int,
+    prompt_id: str,
+) -> list[tuple[int, str, str, str, int]]:
+    """Return (paragraph_index, status, override_comment, embed_text, vec_rowid) rows."""
+    rows = conn.execute(
+        """
+        SELECT paragraph_index, status, override_comment, embed_text, vec_rowid
+        FROM impact_override_context
+        WHERE content_version_id = ? AND prompt_id = ?
+        ORDER BY paragraph_index
+        """,
+        (int(content_version_id), str(prompt_id)),
+    ).fetchall()
+    return [
+        (int(r[0]), str(r[1]), str(r[2]), str(r[3]), int(r[4]))
+        for r in rows
+    ]
+
+
+def impact_override_context_list_all(
+    conn: sqlite3.Connection,
+) -> list[tuple[int, int, str, str, str, str, str, str, float]]:
+    """Return all override embedding rows (content_version_id, paragraph_index, …)."""
+    rows = conn.execute(
+        """
+        SELECT content_version_id, paragraph_index, prompt_id, paragraph_text_hash,
+               status, override_comment, embed_text, embed_model_id, updated_at
+        FROM impact_override_context
+        ORDER BY content_version_id, prompt_id, paragraph_index
+        """
+    ).fetchall()
+    return [
+        (
+            int(r[0]),
+            int(r[1]),
+            str(r[2]),
+            str(r[3]),
+            str(r[4]),
+            str(r[5]),
+            str(r[6]),
+            str(r[7]),
+            float(r[8]),
+        )
+        for r in rows
+    ]
+
+
+def embedding_cache_vec_rowid(
+    conn: sqlite3.Connection,
+    lineage_id: str,
+    input_hash: str,
+    embed_model_id: str,
+) -> int | None:
+    row = conn.execute(
+        """
+        SELECT vec_rowid FROM paragraph_embedding_cache
+        WHERE lineage_id = ? AND input_hash = ? AND embed_model_id = ?
+        """,
+        (lineage_id, input_hash, embed_model_id),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row[0])
 
 
 # ---------------------------------------------------------------------------

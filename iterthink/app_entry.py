@@ -186,6 +186,7 @@ async def main(page: ft.Page) -> None:
             studio._snack(str(ex))
 
     page.run_task(_ocr_model_warmup)
+    page.run_task(studio._hydrate_rag_status_on_startup)
     page.run_task(_rag_index_startup)
     page.run_task(_privacy_shield_model_warmup)
     page.run_task(studio._refresh_ki_chat_model_dropdown)

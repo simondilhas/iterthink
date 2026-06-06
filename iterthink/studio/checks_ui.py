@@ -280,12 +280,17 @@ class MarkdownStudioChecksUi:
                 content=ft.Text("·", size=14, color=config.OUTLINE),
                 alignment=ft.Alignment.TOP_CENTER,
             )
-        symbol = checks_mod.extract_symbol(check, payload) if check else "?"
+        symbol = checks_mod.effective_symbol(check, payload) if check else "?"
         color = check.color_for_symbol(symbol) if check else config.ON_SURFACE_VARIANT
         summary_raw = checks_mod.extract_summary(check, payload) if check else ""
         tip: str | None = None
         if summary_raw:
             tip = summary_raw if len(summary_raw) <= 220 else summary_raw[:217] + "…"
+        border = (
+            ft.border.all(1.5, ft.Colors.with_opacity(0.75, color))
+            if checks_mod.is_overridden(payload)
+            else None
+        )
         return ft.Container(
             content=ft.Text(
                 symbol,
@@ -296,7 +301,10 @@ class MarkdownStudioChecksUi:
             ),
             alignment=ft.Alignment.TOP_CENTER,
             padding=ft.padding.only(top=2),
+            border=border,
+            border_radius=4,
             on_hover=lambda e, i=idx: self._on_eval_symbol_hover(e, i),
+            on_click=lambda _e, i=idx: self._on_eval_symbol_click(i),
             tooltip=tip,
         )
 
@@ -323,6 +331,7 @@ class MarkdownStudioChecksUi:
 
     def _hide_all_result_card_overlays(self) -> None:
         self._result_card_visible_for = None
+        self._result_card_pinned_ui_idx = None
         self._result_card_hide_gen += 1
         for ov in (self._result_card_overlay, self._future_result_card_overlay):
             ov.visible = False
@@ -332,13 +341,17 @@ class MarkdownStudioChecksUi:
     def _on_eval_symbol_hover(self, e: ft.ControlEvent, idx: int) -> None:
         if str(e.data).lower() == "true":
             self._show_result_card(idx)
-        else:
+        elif getattr(self, "_result_card_pinned_ui_idx", None) != idx:
             self._schedule_hide_result_card()
+
+    def _on_eval_symbol_click(self, ui_idx: int) -> None:
+        self._result_card_pinned_ui_idx = ui_idx
+        self._show_result_card(ui_idx)
 
     def _on_result_card_hover(self, e: ft.ControlEvent) -> None:
         if str(e.data).lower() == "true":
             self._result_card_hide_gen += 1  # cancel pending hide
-        else:
+        elif getattr(self, "_result_card_pinned_ui_idx", None) is None:
             self._schedule_hide_result_card()
 
     def _show_result_card(self, idx: int) -> None:
@@ -374,13 +387,15 @@ class MarkdownStudioChecksUi:
         row_pitch = 88.0  # pragmatic estimate; ListView spacing=0 + padding=2.
         top = max(4.0, idx * row_pitch + 4.0)
         active.top = top
-        active.content = self._build_result_card(check, payload, cand_idx)
+        active.content = self._build_result_card(check, payload, cand_idx, ui_idx=idx)
         active.visible = True
         self._result_card_visible_for = (cid, idx)
         if _ctrl_on_page(active):
             active.update()
 
     def _schedule_hide_result_card(self) -> None:
+        if getattr(self, "_result_card_pinned_ui_idx", None) is not None:
+            return
         self._result_card_hide_gen += 1
         gen = self._result_card_hide_gen
         self.page.run_task(self._hide_result_card_after_delay, gen)
@@ -389,12 +404,159 @@ class MarkdownStudioChecksUi:
         await asyncio.sleep(RESULT_CARD_HIDE_DELAY_SEC)
         if gen != self._result_card_hide_gen:
             return
+        if getattr(self, "_result_card_pinned_ui_idx", None) is not None:
+            return
         self._result_card_visible_for = None
         for ov in (self._result_card_overlay, self._future_result_card_overlay):
             if ov.visible:
                 ov.visible = False
                 if _ctrl_on_page(ov):
                     ov.update()
+
+    def _check_pair_for_ui_idx(self, ui_idx: int) -> tuple[int, str, str] | None:
+        cand_idx = self._eval_cand_idx(ui_idx)
+        if cand_idx is None:
+            return None
+        buffers = self._active_compare_buffers()
+        pairs = aligned_compare_pairs(buffers.baseline, buffers.candidate)
+        if not (0 <= cand_idx < len(pairs)):
+            return None
+        old, new = pairs[cand_idx]
+        return cand_idx, old, new
+
+    def _check_payload_for_ui_idx(self, ui_idx: int) -> tuple[str, dict[str, Any], int] | None:
+        cid = self._active_check_id
+        if not cid:
+            return None
+        pair = self._check_pair_for_ui_idx(ui_idx)
+        if pair is None:
+            return None
+        cand_idx, _old, _new = pair
+        results = self._check_results.get(cid) or []
+        if not (0 <= cand_idx < len(results)):
+            return None
+        payload = results[cand_idx]
+        if not isinstance(payload, dict):
+            return None
+        return cid, payload, cand_idx
+
+    async def _persist_check_override_async(
+        self,
+        ui_idx: int,
+        symbol: str | None,
+        recommendation: str | None,
+    ) -> None:
+        got = self._check_payload_for_ui_idx(ui_idx)
+        if got is None:
+            return
+        cid, payload, cand_idx = got
+        check = checks_mod.get_check(cid)
+        if check is None:
+            return
+        pair = self._check_pair_for_ui_idx(ui_idx)
+        if pair is None:
+            return
+        _ci, old, new = pair
+        new_sym = symbol if symbol is not None else checks_mod.effective_symbol(check, payload)
+        new_rec = (
+            recommendation
+            if recommendation is not None
+            else checks_mod.effective_primary_recommendation(payload)
+        )
+        patched = checks_mod.apply_check_override(
+            payload,
+            check,
+            symbol=new_sym,
+            recommendation=new_rec or "",
+        )
+        checks_runner.save_result(
+            cid,
+            old,
+            new,
+            self.chat_model_for_requests(),
+            patched,
+            document_path_key=self._analysis_document_path_key(),
+        )
+        results = self._check_results.setdefault(cid, [])
+        if cand_idx < len(results):
+            results[cand_idx] = patched
+        self._refresh_eval_cell(ui_idx)
+        if self._result_card_visible_for == (cid, ui_idx):
+            self._show_result_card(ui_idx)
+
+    async def _clear_check_override_async(self, ui_idx: int) -> None:
+        got = self._check_payload_for_ui_idx(ui_idx)
+        if got is None:
+            return
+        cid, payload, cand_idx = got
+        check = checks_mod.get_check(cid)
+        if check is None:
+            return
+        pair = self._check_pair_for_ui_idx(ui_idx)
+        if pair is None:
+            return
+        _ci, old, new = pair
+        cleared = checks_mod.clear_check_override(payload, check)
+        checks_runner.save_result(
+            cid,
+            old,
+            new,
+            self.chat_model_for_requests(),
+            cleared,
+            document_path_key=self._analysis_document_path_key(),
+        )
+        results = self._check_results.setdefault(cid, [])
+        if cand_idx < len(results):
+            results[cand_idx] = cleared
+        self._refresh_eval_cell(ui_idx)
+        if self._result_card_visible_for == (cid, ui_idx):
+            self._show_result_card(ui_idx)
+
+    def _build_check_symbol_badge(
+        self,
+        check: checks_mod.Check,
+        payload: dict[str, Any],
+        *,
+        symbol: str,
+        color: str,
+        ui_idx: int,
+    ) -> ft.Control:
+        badge_inner = ft.Text(symbol, size=22, weight=ft.FontWeight.W_700, color=color)
+        menu_items: list[ft.PopupMenuItem] = [
+            ft.PopupMenuItem(
+                content=ft.Text(s.symbol, size=13),
+                on_click=lambda _e, sym=s.symbol: self.page.run_task(
+                    self._persist_check_override_async,
+                    ui_idx,
+                    sym,
+                    None,
+                ),
+            )
+            for s in check.symbol_set
+        ]
+        if checks_mod.is_overridden(payload):
+            menu_items.append(ft.PopupMenuItem())
+            menu_items.append(
+                ft.PopupMenuItem(
+                    content=ft.Text("Reset to model", size=13),
+                    on_click=lambda _e: self.page.run_task(
+                        self._clear_check_override_async,
+                        ui_idx,
+                    ),
+                )
+            )
+        return ft.PopupMenuButton(
+            content=ft.Container(
+                content=badge_inner,
+                width=34,
+                height=34,
+                alignment=ft.Alignment.CENTER,
+                border_radius=8,
+                bgcolor=ft.Colors.with_opacity(0.18, color),
+            ),
+            items=menu_items,
+            tooltip="Change symbol",
+        )
 
     def _metric_chip(self, label: str, value: Any, value_set: tuple[str, ...]) -> ft.Container:
         """Coloured chip for a project/sustainability metric (None/Low/Medium/High) or numeric score."""
@@ -443,23 +605,31 @@ class MarkdownStudioChecksUi:
             border=ft.border.all(1, ft.Colors.with_opacity(0.55, chip_color)),
         )
 
-    def _build_result_card(self, check: checks_mod.Check, payload: dict, idx: int) -> ft.Control:
-        symbol = checks_mod.extract_symbol(check, payload)
+    def _build_result_card(
+        self,
+        check: checks_mod.Check,
+        payload: dict,
+        idx: int,
+        *,
+        ui_idx: int,
+    ) -> ft.Control:
+        symbol = checks_mod.effective_symbol(check, payload)
         color = check.color_for_symbol(symbol)
         summary = checks_mod.extract_summary(check, payload)
         metrics = checks_mod.extract_metrics(check, payload)
         recs = checks_mod.extract_recommendations(payload, limit=3)
         confidence = checks_mod.extract_confidence(payload)
         label = checks_mod.extract_label(payload)
+        primary_rec = checks_mod.effective_primary_recommendation(payload)
+
+        def _close_card(_e: ft.ControlEvent) -> None:
+            self._result_card_pinned_ui_idx = None
+            self._hide_all_result_card_overlays()
 
         header = ft.Row(
             [
-                ft.Container(
-                    content=ft.Text(symbol, size=22, weight=ft.FontWeight.W_700, color=color),
-                    width=34, height=34,
-                    alignment=ft.Alignment.CENTER,
-                    border_radius=8,
-                    bgcolor=ft.Colors.with_opacity(0.18, color),
+                self._build_check_symbol_badge(
+                    check, payload, symbol=symbol, color=color, ui_idx=ui_idx
                 ),
                 ft.Column(
                     [
@@ -487,6 +657,13 @@ class MarkdownStudioChecksUi:
                     ),
                     tooltip="Model confidence" if confidence is not None else None,
                 ),
+                ft.IconButton(
+                    ft.Icons.CLOSE,
+                    icon_size=14,
+                    padding=ft.padding.all(0),
+                    on_click=_close_card,
+                    icon_color=config.ON_SURFACE_VARIANT,
+                ),
             ],
             spacing=10,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -494,7 +671,9 @@ class MarkdownStudioChecksUi:
 
         rows: list[ft.Control] = [header]
 
-        if summary:
+        overridden = checks_mod.is_overridden(payload)
+
+        if summary and not overridden:
             rows.append(
                 ft.Container(
                     content=ft.Text(
@@ -521,11 +700,89 @@ class MarkdownStudioChecksUi:
                     )
                 )
 
-        if recs:
-            rec_controls: list[ft.Control] = [
-                ft.Text("Recommendations", size=10, color=config.ON_SURFACE_VARIANT)
+        if overridden:
+            model_sym = checks_mod.model_symbol(check, payload)
+            model_sym_color = check.color_for_symbol(model_sym)
+            model_summary_text = checks_mod.model_summary(check, payload)
+            model_recs = checks_mod.model_recommendations(payload, limit=3)
+            model_lines: list[ft.Control] = [
+                ft.Text("Model suggestion", size=10, weight=ft.FontWeight.W_600, color=config.ON_SURFACE_VARIANT),
+                ft.Row(
+                    [
+                        ft.Text(
+                            model_sym,
+                            size=16,
+                            weight=ft.FontWeight.W_700,
+                            color=model_sym_color,
+                        ),
+                    ],
+                    tight=True,
+                ),
             ]
-            for r in recs:
+            if model_summary_text:
+                model_lines.append(
+                    ft.Text(
+                        model_summary_text,
+                        size=11,
+                        color=config.ON_SURFACE,
+                        selectable=True,
+                    )
+                )
+            for r in model_recs:
+                action = str(r.get("action") or r.get("recommendation") or "").strip()
+                if action:
+                    model_lines.append(
+                        ft.Text(f"• {action}", size=11, color=config.ON_SURFACE, selectable=True)
+                    )
+            rows.append(
+                ft.Container(
+                    content=ft.Column(model_lines, spacing=3, tight=True),
+                    padding=ft.padding.only(top=6),
+                    bgcolor=ft.Colors.with_opacity(0.06, config.ON_SURFACE),
+                    border_radius=6,
+                    border=ft.border.all(1, ft.Colors.with_opacity(0.2, config.OUTLINE)),
+                )
+            )
+
+        rec_label = "Your override" if overridden else "Recommendation"
+        rec_tf = ft.TextField(
+            value=primary_rec,
+            dense=True,
+            multiline=True,
+            min_lines=2,
+            max_lines=6,
+            text_size=12,
+            expand=True,
+            on_blur=lambda e, i=ui_idx: self.page.run_task(
+                self._persist_check_override_async,
+                i,
+                None,
+                e.control.value,
+            ),
+            on_submit=lambda e, i=ui_idx: self.page.run_task(
+                self._persist_check_override_async,
+                i,
+                None,
+                e.control.value,
+            ),
+        )
+        rows.append(
+            ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(rec_label, size=10, color=config.ON_SURFACE_VARIANT),
+                        rec_tf,
+                    ],
+                    spacing=4,
+                    tight=True,
+                ),
+                padding=ft.padding.only(top=6),
+            )
+        )
+
+        if len(recs) > 1 and not overridden:
+            extra_controls: list[ft.Control] = []
+            for r in recs[1:]:
                 action = str(r.get("action") or r.get("recommendation") or "").strip()
                 if not action:
                     continue
@@ -535,25 +792,35 @@ class MarkdownStudioChecksUi:
                     "medium": "#F0A455",
                     "low": "#7ED9A0",
                 }.get(priority, config.ON_SURFACE_VARIANT)
-                rec_controls.append(
+                extra_controls.append(
                     ft.Row(
                         [
                             ft.Container(
-                                width=6, height=6, border_radius=3, bgcolor=pcolor,
+                                width=6,
+                                height=6,
+                                border_radius=3,
+                                bgcolor=pcolor,
                                 margin=ft.margin.only(top=6),
                             ),
-                            ft.Text(action, size=12, color=config.ON_SURFACE, expand=True, selectable=True),
+                            ft.Text(
+                                action,
+                                size=12,
+                                color=config.ON_SURFACE,
+                                expand=True,
+                                selectable=True,
+                            ),
                         ],
                         spacing=8,
                         vertical_alignment=ft.CrossAxisAlignment.START,
                     )
                 )
-            rows.append(
-                ft.Container(
-                    content=ft.Column(rec_controls, spacing=2, tight=True),
-                    padding=ft.padding.only(top=6),
+            if extra_controls:
+                rows.append(
+                    ft.Container(
+                        content=ft.Column(extra_controls, spacing=2, tight=True),
+                        padding=ft.padding.only(top=4),
+                    )
                 )
-            )
 
         return ft.Column(
             rows,
@@ -572,7 +839,7 @@ class MarkdownStudioChecksUi:
         if not nonempty:
             lines.append("No paragraph-level results returned.")
             return "\n".join(lines)
-        syms = [checks_mod.extract_symbol(check, p) for _, p in nonempty]
+        syms = [checks_mod.effective_symbol(check, p) for _, p in nonempty]
         ctr = Counter(syms)
         hist = ", ".join(f"{s}: {c}" for s, c in sorted(ctr.items(), key=lambda x: (-x[1], x[0]))[:12])
         lines.append(f"Symbols: {hist}")

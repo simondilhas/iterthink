@@ -36,3 +36,28 @@ def test_format_falls_back_to_raw() -> None:
     )
     assert block is not None
     assert "Standalone paragraph" in block
+
+
+def test_format_relaxed_includes_short_text() -> None:
+    block = format_rag_context_block(
+        fname="doc.md",
+        parent_text="",
+        raw_text="Short label",
+        slot_index=0,
+        chunk_type=ChunkType.UNKNOWN,
+        strict_filter=False,
+    )
+    assert block is not None
+    assert "Short label" in block
+
+
+def test_format_strict_skips_short_text() -> None:
+    block = format_rag_context_block(
+        fname="doc.md",
+        parent_text="",
+        raw_text="Short label",
+        slot_index=0,
+        chunk_type=ChunkType.UNKNOWN,
+        strict_filter=True,
+    )
+    assert block is None

@@ -389,7 +389,11 @@ class _HistoryParagraphUIMixin:
         # _apply_active_tab_ui_state() sets visible=True later, but the listview
         # update below runs first; if the panel is still False from a prior
         # non-Review tab visit the rows would be invisible until the state call fires.
-        if self._main_tab_index == TAB_FUTURE and not self._review_change_panel.visible:
+        if (
+            self._main_tab_index == TAB_FUTURE
+            and int(getattr(self, "_review_subtab_index", 0)) == 0
+            and not self._review_change_panel.visible
+        ):
             self._review_change_panel.visible = True
             self._review_change_panel.expand = True
             if _ctrl_on_page(self._review_change_panel):
@@ -397,7 +401,7 @@ class _HistoryParagraphUIMixin:
 
         self._sync_future_pdf_layers_visibility()
         self._compare_pill_gen += 1
-        current_text = self.editor.value or ""
+        current_text = self._review_baseline_text()
         ai_text = self._compare_editor.value or ""
         if len(current_text) + len(ai_text) > _DIFF_SPAN_CHAR_CAP:
             half = _DIFF_SPAN_CHAR_CAP // 2

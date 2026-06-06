@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from iterthink.checks import Check, unchanged_paragraph_payload
+from iterthink.checks import Check, is_overridden, format_prior_override_context, unchanged_paragraph_payload
 from iterthink.db.models import ParagraphAnalysis
 from iterthink.db.session import session_scope
 from iterthink.ai.ollama_util import chat_response_text
@@ -216,14 +216,47 @@ async def run_check_for_document(
             results[i] = payload
             await _emit(on_progress, i, payload, err)
             continue
+        cached = (
+            load_cached(check.id, old, new, model, document_path_key=document_path_key)
+            if not ctx
+            else None
+        )
+        if cached is not None and is_overridden(cached):
+            results[i] = cached
+            await _emit(on_progress, i, cached, None)
+            continue
         # Skip cache when context is present (context not factored into cache key).
         if use_cache and not ctx:
-            payload = load_cached(
-                check.id, old, new, model, document_path_key=document_path_key
-            )
+            payload = cached
         if payload is None:
+            prior_blocks: list[str] = []
+            for j, (o_j, n_j) in enumerate(pairs):
+                if j == i:
+                    continue
+                prior = results[j]
+                if prior is None and not ctx:
+                    prior = load_cached(
+                        check.id, o_j, n_j, model, document_path_key=document_path_key
+                    )
+                if isinstance(prior, dict) and is_overridden(prior):
+                    block = format_prior_override_context(
+                        check, paragraph_index=j, payload=prior
+                    )
+                    if block:
+                        prior_blocks.append(block)
+            merged_ctx = ctx
+            if prior_blocks:
+                prior_text = "\n\n".join(prior_blocks)
+                merged_ctx = (
+                    (merged_ctx + "\n\n" + prior_text).strip() if merged_ctx.strip() else prior_text
+                )
             payload, err = await run_paragraph(
-                llm_chat, model=model, check=check, old=old, new=new, context=ctx
+                llm_chat,
+                model=model,
+                check=check,
+                old=old,
+                new=new,
+                context=merged_ctx,
             )
             if payload is not None and not ctx:
                 try:

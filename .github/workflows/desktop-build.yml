@@ -441,6 +441,7 @@ jobs:
           Exec=iterthink
           Icon=iterthink
           Categories=Utility;
+          StartupWMClass=dev.iterthink.local.iterthink
           DESKTOP
 
           ICON_SRC="${ITER_REPO}/iterthink/assets/fav.png"
@@ -495,9 +496,10 @@ jobs:
           [Desktop Entry]
           Type=Application
           Name=Iterthink
-          Exec=iterthink
+          Exec=/usr/bin/iterthink
           Icon=iterthink
           Categories=Utility;
+          StartupWMClass=dev.iterthink.local.iterthink
           DESKTOP
 
           # Icon: reuse the AppImage one if it exists, else resize from package asset

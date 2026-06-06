@@ -61,13 +61,14 @@ SELECTION_OVERLAY: str = "#88B8A8D4"
 
 STARTUP_DAILY_LOG: bool = True
 NEW_NOTE_NAME_TEMPLATE: str = "unnamed-{n}.md"
-RAG_SYSTEM: bool = False
-RAG_SEARCH_ENABLED: bool = False
+RAG_SYSTEM: bool = True
+RAG_SEARCH_ENABLED: bool = True
 RAG_INDEX_ON_STARTUP: bool = False
 RAG_OVERLAP_CHARS: int = 200
 RAG_RERANKER_ENABLED: bool = False
 RAG_RERANKER_MODEL: str = "Xenova/ms-marco-MiniLM-L-6-v2"
 RAG_CONTEXT_MAX_CHARS: int = 2400
+RAG_IMPACT_TOP_K: int = 3
 PRIVACY_SHIELD_ENABLED: bool = True
 PRIVACY_SHIELD_HF_REPO: str = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
 PRIVACY_SHIELD_HF_FILE: str = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
@@ -180,7 +181,7 @@ def refresh() -> None:
     global SURFACE, SURFACE_VARIANT, SIDEBAR_SURFACE, CHAT_SYSTEM, SELECTION_OVERLAY
     global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE, RAG_SYSTEM, RAG_SEARCH_ENABLED
     global RAG_INDEX_ON_STARTUP, RAG_OVERLAP_CHARS, RAG_RERANKER_ENABLED, RAG_RERANKER_MODEL
-    global RAG_CONTEXT_MAX_CHARS
+    global RAG_CONTEXT_MAX_CHARS, RAG_IMPACT_TOP_K
     global PRIVACY_SHIELD_ENABLED, PRIVACY_SHIELD_HF_REPO, PRIVACY_SHIELD_HF_FILE
     global PRIVACY_SHIELD_CACHE_NAME, PRIVACY_SHIELD_REINJECT, PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT
     global PRIVACY_SHIELD_CHUNK_MAX_CHARS, PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS
@@ -262,8 +263,9 @@ def refresh() -> None:
     rse = merged.get("rag_search_enabled", _bd_rag.get("rag_search_enabled", False))
     RAG_SEARCH_ENABLED = bool(rse) if isinstance(rse, bool) else False
 
-    rio = merged.get("rag_index_on_startup", _bd_rag.get("rag_index_on_startup", True))
-    RAG_INDEX_ON_STARTUP = bool(rio) if isinstance(rio, bool) else True
+    _bundled_rio = _bd_rag.get("rag_index_on_startup", False)
+    rio = merged.get("rag_index_on_startup", _bundled_rio)
+    RAG_INDEX_ON_STARTUP = bool(rio) if isinstance(rio, bool) else bool(_bundled_rio)
 
     roc = merged.get("rag_overlap_chars", _bd_rag.get("rag_overlap_chars", 200))
     try:
@@ -271,8 +273,9 @@ def refresh() -> None:
     except (TypeError, ValueError):
         RAG_OVERLAP_CHARS = 200
 
-    rre = merged.get("rag_reranker_enabled", _bd_rag.get("rag_reranker_enabled", True))
-    RAG_RERANKER_ENABLED = bool(rre) if isinstance(rre, bool) else True
+    _bundled_rre = _bd_rag.get("rag_reranker_enabled", False)
+    rre = merged.get("rag_reranker_enabled", _bundled_rre)
+    RAG_RERANKER_ENABLED = bool(rre) if isinstance(rre, bool) else bool(_bundled_rre)
 
     rrm = merged.get("rag_reranker_model", _bd_rag.get("rag_reranker_model", "Xenova/ms-marco-MiniLM-L-6-v2"))
     RAG_RERANKER_MODEL = (
@@ -286,6 +289,12 @@ def refresh() -> None:
         RAG_CONTEXT_MAX_CHARS = max(200, int(rcm))
     except (TypeError, ValueError):
         RAG_CONTEXT_MAX_CHARS = 2400
+
+    ritk = merged.get("rag_impact_top_k", _bd_rag.get("rag_impact_top_k", 3))
+    try:
+        RAG_IMPACT_TOP_K = max(1, int(ritk))
+    except (TypeError, ValueError):
+        RAG_IMPACT_TOP_K = 3
 
     nt = merged.get("new_note_name_template")
     if isinstance(nt, str) and nt.strip() and nt.count("{n}") == 1:

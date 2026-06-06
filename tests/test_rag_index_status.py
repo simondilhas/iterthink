@@ -9,7 +9,13 @@ from unittest.mock import patch
 import pytest
 
 from iterthink.persistence import content_repo, store_db
-from iterthink.services.rag.index_status import RagIndexStatus, compute_rag_index_status, rag_stat_values
+from iterthink.services.rag.index_status import (
+    RagIndexStatus,
+    compute_rag_index_status,
+    format_idle_status_line,
+    prune_orphan_rag_lineages,
+    rag_stat_values,
+)
 from iterthink.services.rag.workspace_indexer import index_document_path
 
 
@@ -24,9 +30,16 @@ def test_compute_rag_index_status_active_and_historical(
     conn = store_db.connect()
     store_db.init_schema(conn)
 
+    from iterthink.db.session import session_scope
+
+    with session_scope() as session:
+        lin = content_repo.get_or_create_lineage(session, (doc_root / "a.md").resolve())
+        lid = lin.lineage_id
+        session.commit()
+
     pid = store_db.rag_parent_insert(
         conn,
-        lineage_id="lid-old",
+        lineage_id=lid,
         content_version_id=1,
         parent_index=0,
         doc_title="Hi",
@@ -37,7 +50,7 @@ def test_compute_rag_index_status_active_and_historical(
     store_db.rag_child_insert(
         conn,
         parent_id=pid,
-        lineage_id="lid-old",
+        lineage_id=lid,
         content_version_id=1,
         slot_index=0,
         raw_text="Body.",
@@ -51,7 +64,7 @@ def test_compute_rag_index_status_active_and_historical(
     )
     pid2 = store_db.rag_parent_insert(
         conn,
-        lineage_id="lid-old",
+        lineage_id=lid,
         content_version_id=2,
         parent_index=0,
         doc_title="Hi",
@@ -62,7 +75,7 @@ def test_compute_rag_index_status_active_and_historical(
     store_db.rag_child_insert(
         conn,
         parent_id=pid2,
-        lineage_id="lid-old",
+        lineage_id=lid,
         content_version_id=2,
         slot_index=0,
         raw_text="New body.",
@@ -76,7 +89,7 @@ def test_compute_rag_index_status_active_and_historical(
     )
     store_db.rag_lineage_index_put(
         conn,
-        lineage_id="lid-old",
+        lineage_id=lid,
         content_version_id=2,
         content_sha="sha2",
         enrichment_mode="skip",
@@ -142,6 +155,7 @@ def test_rag_stat_values() -> None:
         indexed_documents=3,
         total_documents=5,
         stale_documents=2,
+        orphan_documents=0,
         active_chunks=100,
         historical_chunks=25,
         index_size_bytes=2048,
@@ -153,6 +167,88 @@ def test_rag_stat_values() -> None:
     assert stats["last_indexed"] == "—"
     assert stats["active_chunks"] == "100"
     assert stats["historical_chunks"] == "25"
+
+
+def test_compute_rag_index_status_excludes_orphan_lineages(
+    tmp_path: Path, ephemeral_store: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc_root = tmp_path / "docs"
+    doc_root.mkdir()
+    (doc_root / "a.md").write_text("# Hi\n\nBody.", encoding="utf-8")
+    monkeypatch.setattr("iterthink.config.DOCUMENTS", doc_root)
+
+    conn = store_db.connect()
+    store_db.init_schema(conn)
+    store_db.rag_lineage_index_put(
+        conn,
+        lineage_id="orphan-lid",
+        content_version_id=1,
+        content_sha="sha",
+        enrichment_mode="skip",
+    )
+    conn.commit()
+
+    from iterthink.db.session import session_scope
+
+    with session_scope() as session:
+        status = compute_rag_index_status(conn, session)
+    assert status.indexed_documents == 0
+    assert status.total_documents == 1
+    assert status.orphan_documents == 1
+
+
+def test_prune_orphan_rag_lineages(
+    tmp_path: Path, ephemeral_store: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc_root = tmp_path / "docs"
+    doc_root.mkdir()
+    (doc_root / "a.md").write_text("# Hi\n\nBody.", encoding="utf-8")
+    monkeypatch.setattr("iterthink.config.DOCUMENTS", doc_root)
+
+    conn = store_db.connect()
+    store_db.init_schema(conn)
+    store_db.rag_lineage_index_put(
+        conn,
+        lineage_id="orphan-lid",
+        content_version_id=1,
+        content_sha="sha",
+        enrichment_mode="skip",
+    )
+    conn.commit()
+
+    from iterthink.db.session import session_scope
+
+    with session_scope() as session:
+        pruned = prune_orphan_rag_lineages(conn, session)
+    assert pruned == 1
+    assert conn.execute("SELECT COUNT(*) FROM rag_lineage_index").fetchone()[0] == 0
+
+
+def test_format_idle_status_line() -> None:
+    empty = RagIndexStatus(
+        indexed_documents=0,
+        total_documents=5,
+        stale_documents=0,
+        orphan_documents=0,
+        active_chunks=0,
+        historical_chunks=0,
+        index_size_bytes=None,
+        last_indexed_at=None,
+    )
+    assert format_idle_status_line(empty) == "Not indexed"
+
+    indexed = RagIndexStatus(
+        indexed_documents=3,
+        total_documents=5,
+        stale_documents=0,
+        orphan_documents=0,
+        active_chunks=10,
+        historical_chunks=0,
+        index_size_bytes=1024,
+        last_indexed_at=1700000000.0,
+    )
+    line = format_idle_status_line(indexed)
+    assert "3 / 5 indexed" in line
 
 
 async def _mock_embed(conn: object, doc_key: str, inputs: list[str]) -> list[list[float]]:
