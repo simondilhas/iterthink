@@ -50,18 +50,20 @@ startup_daily_log: true
 # Used for "New file" and first-run create when startup_daily_log is false; must contain {n} once.
 new_note_name_template: "unnamed-{n}.md"
 
-# Review tab: when false (default), hide Difference|Impact subtabs — only diff/compare under Review.
-# Set to true for the Impact (RAG) subtab and pills. User ~/.config/iterthink/config.yaml overrides this file.
-rag_system: false
+# Review tab: when false, hide Difference|Impact subtabs — only diff/compare under Review.
+# User ~/.config/iterthink/config.yaml overrides this file.
+rag_system: true
 
 # Workspace RAG indexing and semantic search
 # Sidebar search (semantic queries and /f filename filter).
-rag_search_enabled: false
+rag_search_enabled: true
 rag_index_on_startup: false
 rag_overlap_chars: 200
 rag_reranker_enabled: false
 rag_reranker_model: Xenova/ms-marco-MiniLM-L-6-v2
 rag_context_max_chars: 2400
+# Top-k RAG excerpts per paragraph for Review → Impact context checks.
+rag_impact_top_k: 3
 
 # Privacy shield: redact names, orgs, and API keys locally before Office/Cloud LLM calls.
 privacy_shield_enabled: true

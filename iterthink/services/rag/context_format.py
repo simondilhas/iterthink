@@ -39,16 +39,25 @@ def chunk_usable_for_norm_context(chunk_full: str) -> bool:
     return True
 
 
+def chunk_usable_for_context(chunk_full: str, *, strict: bool) -> bool:
+    s = rag_chunk_display_body(chunk_full).strip()
+    if not s:
+        return False
+    if strict:
+        return chunk_usable_for_norm_context(chunk_full)
+    return True
+
+
 def _context_max_chars() -> int:
     return max(200, int(getattr(config, "RAG_CONTEXT_MAX_CHARS", 2400)))
 
 
-def _select_context_body(*, parent_text: str, raw_text: str) -> str:
+def _select_context_body(*, parent_text: str, raw_text: str, strict_filter: bool) -> str:
     parent = (parent_text or "").strip()
     raw = (raw_text or "").strip()
-    if parent and chunk_usable_for_norm_context(parent):
+    if parent and chunk_usable_for_context(parent, strict=strict_filter):
         return rag_chunk_display_body(parent).strip()
-    if raw and chunk_usable_for_norm_context(raw):
+    if raw and chunk_usable_for_context(raw, strict=strict_filter):
         return rag_chunk_display_body(raw).strip()
     return ""
 
@@ -63,8 +72,11 @@ def format_rag_context_block(
     slot_index: int,
     chunk_type: ChunkType,
     max_chars: int | None = None,
+    strict_filter: bool = True,
 ) -> str | None:
-    snip = _select_context_body(parent_text=parent_text, raw_text=raw_text)
+    snip = _select_context_body(
+        parent_text=parent_text, raw_text=raw_text, strict_filter=strict_filter
+    )
     if not snip:
         return None
     cap = max_chars if max_chars is not None else _context_max_chars()
@@ -79,3 +91,28 @@ def format_rag_context_block(
     header_bits.append(f"paragraph={para_num}")
     header_bits.append(f"type={chunk_type.value}")
     return " ".join(header_bits) + f"\n{snip}"
+
+
+def format_override_context_block(
+    *,
+    paragraph_index: int,
+    status: str,
+    override_comment: str,
+    embed_text: str,
+    max_chars: int | None = None,
+) -> str | None:
+    comment = (override_comment or "").strip()
+    body = (embed_text or "").strip()
+    if not comment and not body:
+        return None
+    cap = max_chars if max_chars is not None else _context_max_chars()
+    snip = body
+    if len(snip) > cap:
+        snip = snip[: cap - 1] + "…"
+    header = (
+        f"[PRIOR REVIEW] paragraph={paragraph_index + 1} "
+        f"human_status={status}"
+    )
+    if comment:
+        return f"{header}\nrecommendation={comment}\n{snip}"
+    return f"{header}\n{snip}"

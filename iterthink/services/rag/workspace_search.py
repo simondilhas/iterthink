@@ -15,6 +15,14 @@ from iterthink.services.rag.enrichment import generate_query_variants
 from iterthink.services.rag.index_status import is_lineage_index_stale
 
 FILENAME_PREFIX = "/f"
+PROJECT_PREFIX = "/p"
+
+
+@dataclass(frozen=True)
+class ParsedSearchQuery:
+    query: str
+    filename_mode: bool = False
+    project_slug: str | None = None
 
 
 @dataclass(frozen=True)
@@ -29,13 +37,22 @@ class SearchHit:
     score: float
 
 
-def parse_search_query(raw: str) -> tuple[str, bool]:
-    """Return (query, filename_mode)."""
+def parse_search_query(raw: str) -> ParsedSearchQuery:
+    """Parse sidebar search: ``/f`` filename filter, ``/p <project> <query>`` project scope."""
     s = (raw or "").strip()
     if s.lower().startswith(FILENAME_PREFIX):
         rest = s[len(FILENAME_PREFIX) :].strip()
-        return rest, True
-    return s, False
+        return ParsedSearchQuery(query=rest, filename_mode=True)
+    if s.lower().startswith(PROJECT_PREFIX):
+        rest = s[len(PROJECT_PREFIX) :].strip()
+        if not rest:
+            return ParsedSearchQuery(query="")
+        slug, _, tail = rest.partition(" ")
+        slug = slug.strip()
+        if not slug:
+            return ParsedSearchQuery(query="")
+        return ParsedSearchQuery(query=tail.strip(), project_slug=slug)
+    return ParsedSearchQuery(query=s)
 
 
 def _embed_query_sync(text: str) -> list[float]:
@@ -83,14 +100,16 @@ async def search_workspace(
     project_slug: str | None = None,
     project_id: int | None = None,
 ) -> list[SearchHit]:
-    q, filename_mode = parse_search_query(query)
-    if filename_mode or not q:
+    parsed = parse_search_query(query)
+    if parsed.filename_mode or not parsed.query:
         return []
+    q = parsed.query
 
+    scoped_slug = project_slug if project_slug is not None else parsed.project_slug
     rows = store_db.rag_child_fetch_latest_rows(
         conn,
         None,
-        project_slug=project_slug,
+        project_slug=scoped_slug,
         project_id=project_id,
     )
     if not rows:
@@ -143,14 +162,19 @@ async def search_workspace(
             pass
 
     hits: list[SearchHit] = []
-    seen: set[tuple[str, int]] = set()
+    seen_slots: set[tuple[str, int]] = set()
+    seen_parents: set[int] = set()
     for score, row in pool:
         lid = str(row[1])
         slot_index = int(row[3])
-        key = (lid, slot_index)
-        if key in seen:
+        parent_id = int(row[9])
+        slot_key = (lid, slot_index)
+        if slot_key in seen_slots:
             continue
-        seen.add(key)
+        if parent_id in seen_parents:
+            continue
+        seen_slots.add(slot_key)
+        seen_parents.add(parent_id)
 
         doc_title = str(row[10])
         section_header = str(row[11])

@@ -180,7 +180,7 @@ class _HistoryDiffSpansMixin:
             return
         if not self._future_left_diff_texts:
             return
-        current = self.editor.value or ""
+        current = self._review_baseline_text()
         candidate = self._compare_editor.value or ""
         if len(current) + len(candidate) > _DIFF_SPAN_CHAR_CAP:
             half = _DIFF_SPAN_CHAR_CAP // 2

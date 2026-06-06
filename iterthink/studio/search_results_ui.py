@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +22,11 @@ from iterthink.services.rag.workspace_search import (
 from iterthink.services.rag.project_scope import project_slug_for_path
 from iterthink.studio.tree import build_search_md_tree
 
+from .constants import TAB_PRESENT
 from .explorer import MarkdownStudioExplorer
 from .util import KI_TIER_LOCAL, ctrl_on_page as _ctrl_on_page, normalize_ki_tier
+
+_log = logging.getLogger(__name__)
 
 
 class MarkdownStudioSearchResults:
@@ -37,7 +41,7 @@ class MarkdownStudioSearchResults:
 
     def _tree_search_hint(self) -> str:
         if self._rag_search_enabled():
-            return "Search… (/f for filenames)"
+            return "Search… (/f filenames, /p project)"
         return "Search…"
 
     def _sync_rag_search_ui(self) -> None:
@@ -70,6 +74,7 @@ class MarkdownStudioSearchResults:
         self._semantic_search_active = False
         self._rag_index_running = False
         self._rag_status_line_value = "Idle"
+        self._rag_cached_stat_values: dict[str, str] | None = None
         self._rag_index_progress_visible = False
         self._rag_index_progress_current = 0
         self._rag_index_progress_total = 0
@@ -86,6 +91,7 @@ class MarkdownStudioSearchResults:
         self._rag_settings_progress_bar: ft.ProgressBar | None = None
         self._rag_settings_progress_label: ft.Text | None = None
         self._rag_settings_reindex_btn: ft.OutlinedButton | None = None
+        self._rag_settings_rebuild_btn: ft.OutlinedButton | None = None
         self._rag_settings_tier_dd: ft.Dropdown | None = None
         self._rag_settings_latest_only_switch: ft.Switch | None = None
         self._rag_settings_enrichment_dd: ft.Dropdown | None = None
@@ -95,6 +101,7 @@ class MarkdownStudioSearchResults:
         self._search_results_host = ft.Container(
             expand=True,
             visible=False,
+            padding=ft.Padding.symmetric(horizontal=24, vertical=8),
             content=self._search_results_list,
         )
 
@@ -127,16 +134,56 @@ class MarkdownStudioSearchResults:
             visible = False
         self._semantic_search_active = visible
         self._search_results_host.visible = visible
+        centered = getattr(self, "_compose_centered_row", None)
+        if centered is not None:
+            centered.visible = not visible
         writing = getattr(self, "_compose_writing_slot", None)
         if writing is not None:
             writing.visible = not visible
+            writing.expand = not visible
+        plan_host = getattr(self, "_compose_plan_host", None)
+        if plan_host is not None:
+            plan_host.expand = not visible
+        self._search_results_host.expand = visible
         host = getattr(self, "_compose_tab_body_stack", None)
-        if host is not None and _ctrl_on_page(host):
-            host.update()
+        reading_inner = getattr(self, "_compose_reading_inner", None)
+        for ctrl in (
+            self._search_results_host,
+            centered,
+            writing,
+            plan_host,
+            reading_inner,
+            self._search_results_list,
+            host,
+        ):
+            if ctrl is not None and _ctrl_on_page(ctrl):
+                ctrl.update()
+        page = getattr(self, "page", None)
+        if page is not None:
+            page.update()
+
+    def _render_search_loading_state(self) -> None:
+        self._search_results_list.controls.clear()
+        self._search_results_list.controls.append(
+            ft.Row(
+                [
+                    ft.ProgressRing(
+                        width=18,
+                        height=18,
+                        stroke_width=2,
+                        color=config.PRIMARY_COLOR,
+                    ),
+                    ft.Text("Searching…", size=12, color=config.ON_SURFACE_VARIANT),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+        )
+        if _ctrl_on_page(self._search_results_list):
+            self._search_results_list.update()
 
     def _build_search_hit_card(self, hit: SearchHit) -> ft.Control:
-        snippet_source = hit.parent_text.strip() or hit.raw_text.strip()
-        snippet = snippet_source
+        snippet = hit.raw_text.strip() or hit.parent_text.strip()
         if len(snippet) > 320:
             snippet = snippet[:319] + "…"
 
@@ -188,17 +235,24 @@ class MarkdownStudioSearchResults:
         if _ctrl_on_page(self.tree_column):
             self.tree_column.update()
 
-    async def _run_semantic_search_async(self, query: str, gen: int) -> None:
+    async def _run_semantic_search_async(
+        self,
+        query: str,
+        gen: int,
+        *,
+        project_slug: str | None = None,
+    ) -> None:
         enrichment = self._rag_enrichment_mode()
         tier = self._rag_enrichment_tier()
         llm, llm_model = self._rag_llm_bundle()
-        project_slug: str | None = None
-        current = getattr(self, "current_path", None)
-        if current is not None:
-            try:
-                project_slug = project_slug_for_path(Path(current))
-            except (TypeError, ValueError, OSError):
-                project_slug = None
+        if project_slug is None:
+            current = getattr(self, "current_path", None)
+            if current is not None:
+                try:
+                    project_slug = project_slug_for_path(Path(current))
+                except (TypeError, ValueError, OSError):
+                    project_slug = None
+        search_error: BaseException | None = None
         try:
             with session_scope() as session:
                 hits = await search_workspace(
@@ -213,13 +267,29 @@ class MarkdownStudioSearchResults:
                     latest_version_only=self._rag_latest_version_only(),
                     project_slug=project_slug,
                 )
-        except BaseException:
+        except BaseException as ex:
+            _log.warning("Semantic search failed", exc_info=True)
+            search_error = ex
             hits = []
         if gen != self._search_gen:
             return
         self._render_search_results(hits)
-        self._rebuild_tree_ui_for_search(hits)
         self._show_search_results_panel(True)
+        if search_error is not None:
+            self._snack(f"Semantic search failed: {search_error}")
+        elif not hits:
+            self._maybe_snack_empty_semantic_index()
+
+    def _maybe_snack_empty_semantic_index(self) -> None:
+        try:
+            from iterthink.services.rag.index_status import compute_rag_index_status
+
+            with session_scope() as session:
+                status = compute_rag_index_status(self._db, session)
+            if status.indexed_documents == 0:
+                self._snack("No indexed documents. Sync index in Settings → RAG.")
+        except BaseException:
+            pass
 
     def _rebuild_tree_ui_for_search(self, hits: list[SearchHit]) -> None:
         self.tree_column.controls.clear()
@@ -243,7 +313,7 @@ class MarkdownStudioSearchResults:
                 self.tree_column.update()
             return
 
-        query, filename_mode = parse_search_query(raw)
+        parsed = parse_search_query(raw)
 
         if not raw:
             self._search_gen += 1
@@ -254,23 +324,46 @@ class MarkdownStudioSearchResults:
                 self.tree_column.update()
             return
 
-        if filename_mode:
+        if parsed.filename_mode:
             self._search_gen += 1
             self._show_search_results_panel(False)
-            self._rebuild_tree_ui_filename(query)
+            self._rebuild_tree_ui_filename(parsed.query)
             if _ctrl_on_page(self.tree_column):
                 self.tree_column.update()
             return
 
+        if raw.lower().startswith("/p"):
+            if parsed.project_slug is None:
+                self._snack("Project name required after /p")
+                return
+            if not parsed.query:
+                self._snack("Enter search terms after /p ProjectName")
+                return
+
         self._search_gen += 1
         gen = self._search_gen
-        self.page.run_task(self._debounced_semantic_search, query, gen)
+        self._search_hits = []
+        if getattr(self, "_main_tab_index", None) != TAB_PRESENT:
+            self._request_tab_switch(TAB_PRESENT)
+        self._render_search_loading_state()
+        self._show_search_results_panel(True)
+        self.page.run_task(
+            self._debounced_semantic_search,
+            parsed.query,
+            gen,
+            parsed.project_slug,
+        )
 
-    async def _debounced_semantic_search(self, query: str, gen: int) -> None:
+    async def _debounced_semantic_search(
+        self,
+        query: str,
+        gen: int,
+        project_slug: str | None = None,
+    ) -> None:
         await asyncio.sleep(0.3)
         if gen != self._search_gen:
             return
-        await self._run_semantic_search_async(query, gen)
+        await self._run_semantic_search_async(query, gen, project_slug=project_slug)
 
     def _rebuild_tree_ui_filename(self, query: str) -> None:
         self.tree_column.controls.clear()
@@ -328,13 +421,15 @@ class MarkdownStudioSearchResults:
         if not self._rag_search_enabled():
             MarkdownStudioExplorer._rebuild_tree_ui(self)
             return
+        if self._semantic_search_active:
+            return
         raw = (self.tree_search_field.value or "").strip()
         if not raw:
             MarkdownStudioExplorer._rebuild_tree_ui(self)
             return
-        query, filename_mode = parse_search_query(raw)
-        if filename_mode:
-            self._rebuild_tree_ui_filename(query)
+        parsed = parse_search_query(raw)
+        if parsed.filename_mode:
+            self._rebuild_tree_ui_filename(parsed.query)
             return
         if self._search_hits:
             self._rebuild_tree_ui_for_search(self._search_hits)
@@ -360,6 +455,17 @@ class MarkdownStudioSearchResults:
             ("historical_chunks", self._rag_settings_historical_chunks_text),
         )
 
+    def _rag_stat_label(self, key: str, default: str = "—") -> str:
+        cache = self._rag_cached_stat_values
+        if isinstance(cache, dict) and key in cache:
+            return cache[key]
+        return default
+
+    def _store_rag_display(self, stats: dict[str, str], idle_line: str | None) -> None:
+        self._rag_cached_stat_values = dict(stats)
+        if idle_line is not None:
+            self._rag_status_line_value = idle_line
+
     def _set_rag_settings_stats_loading(self) -> None:
         for _, ctrl in self._rag_settings_stat_controls():
             if ctrl is not None:
@@ -368,45 +474,93 @@ class MarkdownStudioSearchResults:
                     ctrl.update()
 
     def _apply_rag_settings_stats(self, stats: dict[str, str]) -> None:
+        self._rag_cached_stat_values = dict(stats)
         for key, ctrl in self._rag_settings_stat_controls():
             if ctrl is not None:
                 ctrl.value = stats[key]
                 if _ctrl_on_page(ctrl):
                     ctrl.update()
 
-    def _refresh_rag_settings_status_sync(self) -> None:
-        from iterthink.services.rag.index_status import compute_rag_index_status, rag_stat_values
+    def _compute_rag_display(self) -> tuple[dict[str, str], str | None]:
+        from iterthink.services.rag.index_status import (
+            compute_rag_index_status,
+            format_idle_status_line,
+            rag_stat_values,
+        )
 
+        with session_scope() as session:
+            status = compute_rag_index_status(self._db, session)
+        stats = rag_stat_values(status)
+        idle_line: str | None = None
+        if not self._rag_index_running and not self._rag_index_progress_visible:
+            idle_line = format_idle_status_line(status)
+        return stats, idle_line
+
+    def _refresh_rag_settings_status_sync(self, *, show_loading: bool = False) -> None:
         try:
-            with session_scope() as session:
-                status = compute_rag_index_status(self._db, session)
-            self._apply_rag_settings_stats(rag_stat_values(status))
-        except BaseException:
-            pass
+            stats, idle_line = self._compute_rag_display()
+            self._store_rag_display(stats, idle_line)
+            self._apply_rag_settings_stats(stats)
+            if idle_line is not None:
+                self._set_rag_status_line(idle_line)
+        except BaseException as ex:
+            _log.warning("RAG settings status refresh failed", exc_info=True)
+            if self._rag_cached_stat_values:
+                self._apply_rag_settings_stats(self._rag_cached_stat_values)
+            if not self._rag_index_running:
+                self._snack(f"Could not load index status: {ex}")
         self._apply_rag_job_ui()
 
-    def _refresh_rag_settings_status(self) -> None:
+    def _refresh_rag_settings_status(self, *, show_loading: bool = False) -> None:
         page = getattr(self, "page", None)
         if page is not None:
-            page.run_task(self._refresh_rag_settings_status_async)
+            page.run_task(self._refresh_rag_settings_status_async, show_loading)
             return
-        self._refresh_rag_settings_status_sync()
+        self._refresh_rag_settings_status_sync(show_loading=show_loading)
 
-    async def _refresh_rag_settings_status_async(self) -> None:
-        from iterthink.services.rag.index_status import compute_rag_index_status, rag_stat_values
-
-        self._set_rag_settings_stats_loading()
-
-        def _compute() -> dict[str, str]:
-            with session_scope() as session:
-                status = compute_rag_index_status(self._db, session)
-            return rag_stat_values(status)
+    async def _refresh_rag_settings_status_async(self, show_loading: bool = False) -> None:
+        if show_loading:
+            self._set_rag_settings_stats_loading()
 
         try:
-            stats = await asyncio.to_thread(_compute)
-        except BaseException:
+            await asyncio.sleep(0)
+            stats, idle_line = self._compute_rag_display()
+        except BaseException as ex:
+            _log.warning("RAG settings status refresh failed", exc_info=True)
+            if self._rag_cached_stat_values:
+                self._apply_rag_settings_stats(self._rag_cached_stat_values)
+            if not self._rag_index_running:
+                self._snack(f"Could not load index status: {ex}")
+            self._apply_rag_job_ui()
             return
+        self._store_rag_display(stats, idle_line)
         self._apply_rag_settings_stats(stats)
+        if idle_line is not None:
+            self._set_rag_status_line(idle_line)
+        self._apply_rag_job_ui()
+
+    def _present_rag_settings_stats(self) -> None:
+        """Show cached index stats immediately; refresh quietly in the background."""
+        if self._rag_cached_stat_values:
+            self._apply_rag_settings_stats(self._rag_cached_stat_values)
+            if self._rag_status_line_value and self._rag_status_line_value != "Idle":
+                self._set_rag_status_line(self._rag_status_line_value)
+        self._refresh_rag_settings_status(show_loading=not self._rag_cached_stat_values)
+
+    async def _hydrate_rag_status_on_startup(self) -> None:
+        if getattr(self, "page", None) is not None and self.page.web:
+            return
+
+        try:
+            await asyncio.sleep(0)
+            stats, idle_line = self._compute_rag_display()
+        except BaseException as ex:
+            _log.warning("RAG startup status hydration failed", exc_info=True)
+            return
+        self._store_rag_display(stats, idle_line)
+        self._apply_rag_settings_stats(stats)
+        if idle_line is not None:
+            self._set_rag_status_line(idle_line)
         self._apply_rag_job_ui()
 
     @staticmethod
@@ -458,6 +612,7 @@ class MarkdownStudioSearchResults:
         disabled = visible
         for ctrl in (
             self._rag_settings_reindex_btn,
+            self._rag_settings_rebuild_btn,
             self._rag_settings_tier_dd,
             self._rag_settings_latest_only_switch,
             self._rag_settings_enrichment_dd,
@@ -482,18 +637,24 @@ class MarkdownStudioSearchResults:
     def _rag_progress_callback(self) -> Any:
         async def progress_cb(current: int, total: int, name: str) -> None:
             self._set_rag_index_progress(True, current=current, total=total, name=name)
-            if current > 1:
-                self._refresh_rag_settings_status()
             await asyncio.sleep(0)
 
         return progress_cb
 
-    async def _rag_reindex_all_from_settings(self) -> None:
+    @staticmethod
+    def _rag_index_done_summary(result: Any) -> str:
+        return (
+            f"Updated {result.updated} · scanned {result.scanned}"
+            f" · unchanged {result.skipped_unchanged}"
+        )
+
+    async def _rag_reindex_all_from_settings(self, *, force_reindex: bool = False) -> None:
         if self._rag_index_running:
             self._snack("Indexing already in progress")
             return
         self._rag_index_running = True
-        self._snack("Indexing workspace…")
+        label = "Rebuilding workspace index…" if force_reindex else "Syncing workspace index…"
+        self._snack(label)
         self._set_rag_index_progress(True, current=0, total=0)
         enrichment = self._rag_enrichment_mode()
         llm, llm_model = self._rag_llm_bundle()
@@ -508,17 +669,13 @@ class MarkdownStudioSearchResults:
                     llm=llm,
                     llm_model=llm_model,
                     progress_cb=progress_cb,
-                    force_reindex=True,
+                    force_reindex=force_reindex,
                 )
-            summary = (
-                f"Updated {result.updated} · scanned {result.scanned}"
-                f" · unchanged {result.skipped_unchanged}"
-            )
+            summary = self._rag_index_done_summary(result)
             self._set_rag_status_line(f"Done — {summary}")
             from iterthink.services.rag.index_status import clear_workspace_markdown_count_cache
 
             clear_workspace_markdown_count_cache()
-            self._refresh_rag_settings_status()
             self._snack(f"Search index: {summary}")
         except asyncio.CancelledError:
             cancelled = True
@@ -530,7 +687,11 @@ class MarkdownStudioSearchResults:
             self._rag_index_running = False
             if not cancelled:
                 self._set_rag_index_progress(False)
+                self._refresh_rag_settings_status_sync()
                 self._ensure_ki_tier_tabs_enabled()
+
+    async def _rag_rebuild_all_from_settings(self) -> None:
+        await self._rag_reindex_all_from_settings(force_reindex=True)
 
     async def _rag_startup_index_async(self) -> None:
         if not config.RAG_INDEX_ON_STARTUP or self.page.web:
@@ -539,7 +700,7 @@ class MarkdownStudioSearchResults:
         if self._rag_index_running:
             return
         self._rag_index_running = True
-        self._snack("Indexing workspace…")
+        self._snack("Syncing workspace index…")
         self._set_rag_index_progress(True, current=0, total=0)
         enrichment = self._rag_enrichment_mode()
         llm, llm_model = self._rag_llm_bundle()
@@ -560,9 +721,8 @@ class MarkdownStudioSearchResults:
 
             with session_scope() as session:
                 status = compute_rag_index_status(self._db, session)
-            summary = f"Updated {result.updated} · scanned {result.scanned}"
+            summary = self._rag_index_done_summary(result)
             self._set_rag_status_line(f"Done — {summary}")
-            self._refresh_rag_settings_status()
             msg = format_status_line(status)
             if result.updated:
                 msg += f" · {result.updated} updated"
@@ -577,6 +737,7 @@ class MarkdownStudioSearchResults:
             self._rag_index_running = False
             if not cancelled:
                 self._set_rag_index_progress(False)
+                self._refresh_rag_settings_status_sync()
                 self._ensure_ki_tier_tabs_enabled()
 
     def _ensure_ki_tier_tabs_enabled(self) -> None:

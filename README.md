@@ -75,10 +75,10 @@ When a change matters, trigger a follow-up workflow directly through [{yourcompa
 
 Download the matching asset from the release page:
 
-- `iterthink-0.0.3-windows-installer.exe` (tested, unsigned)
-- `iterthink-0.0.3-fedora-x86_64.rpm` (tested)
-- `iterthink-0.0.3-linux-x86_64.AppImage` (tested)
-- `iterthink-0.0.3-macos.dmg` (untested, unsigned)
+- `iterthink-0.0.3-windows-installer.exe` (signed)
+- `iterthink-0.0.3-fedora-x86_64.rpm`
+- `iterthink-0.0.3-linux-x86_64.AppImage`
+- `iterthink-0.0.3-macos.dmg` (signed)
 
 
 ### Install from GitHub (pip)
@@ -175,8 +175,8 @@ Using a cloud API key (OpenAI, Anthropic, Gemini) sends your text to that provid
 -[ ] Compare Excel sheets
 -[ ] Compare PDF Plans (Floorplans, Sections)
 -[ ] IFC model comparison — see what changed between two BIM model versions
--[x] Linux, Windows and macOS installers (started, signing of installers and testing)[]
--[ ] signing of macOS und windows installer
+-[x] Linux, Windows and macOS installers (certified)
+-[x] Signing of macOS and Windows installers
 -[ ] Sync and version history across devices
 -[ ] Team review features for collaborative workflows
 -[ ] Deeper [{yourcompany}os](https://yourcompanyos.io) integration — from change detection to closed decisions
@@ -203,7 +203,7 @@ Raw data means nothing until it's clean, defined, reviewed, and acted on.
 
 This is early software. Defaults and behavior may change between releases.
 
-- **Platform:** Primarily developed and tested on **Fedora Linux**. Windows and macOS may work but are not regularly QA'd — [open an issue](https://github.com/simondilhas/iterthink/issues) if something breaks.
+- **Platform:** Certified on **Fedora Linux**, **Windows**, and **macOS**. [Open an issue](https://github.com/simondilhas/iterthink/issues) if something breaks on your system.
 - **AI backend:** Ollama is the most tested backend. OpenAI, Claude, and Gemini work but get less QA.
 - **Privacy:** Local-first by default — no account, no cloud sync, files stay on your disk. Using a cloud API key sends your text to that provider.
 

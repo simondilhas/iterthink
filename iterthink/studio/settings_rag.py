@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 import flet as ft
+import yaml
 from sqlalchemy.exc import OperationalError
 
 from iterthink import config
 from iterthink.persistence import store_db
-from .util import KI_TIER_CLOUD, KI_TIER_COMPANY, KI_TIER_LOCAL, normalize_ki_tier
+from .util import KI_TIER_CLOUD, KI_TIER_COMPANY, KI_TIER_LOCAL, ctrl_on_page as _ctrl_on_page, normalize_ki_tier
 
 _STAT_LABEL_W = 140
 _VALUE_STYLE = dict(size=12, color=config.ON_SURFACE_VARIANT)
@@ -40,12 +41,15 @@ def build_rag_settings_tab(*, studio: Any, page: ft.Page) -> ft.Container:
     progress_name = str(getattr(studio, "_rag_index_progress_name", ""))
     status_text = str(getattr(studio, "_rag_status_line_value", "Idle"))
 
+    stat = getattr(studio, "_rag_stat_label", None)
+    stat_label = stat if callable(stat) else (lambda _k, d="—": d)
+
     status_val = ft.Text(status_text, **_VALUE_STYLE)
-    documents_val = ft.Text("—", **_VALUE_STYLE)
-    index_size_val = ft.Text("—", **_VALUE_STYLE)
-    last_indexed_val = ft.Text("—", **_VALUE_STYLE)
-    active_chunks_val = ft.Text("—", **_VALUE_STYLE)
-    historical_chunks_val = ft.Text("—", **_VALUE_STYLE)
+    documents_val = ft.Text(stat_label("documents"), **_VALUE_STYLE)
+    index_size_val = ft.Text(stat_label("index_size"), **_VALUE_STYLE)
+    last_indexed_val = ft.Text(stat_label("last_indexed"), **_VALUE_STYLE)
+    active_chunks_val = ft.Text(stat_label("active_chunks"), **_VALUE_STYLE)
+    historical_chunks_val = ft.Text(stat_label("historical_chunks"), **_VALUE_STYLE)
     progress_label = ft.Text(
         (
             f"{progress_current} / {progress_total} — {progress_name}"
@@ -60,7 +64,8 @@ def build_rag_settings_tab(*, studio: Any, page: ft.Page) -> ft.Container:
         value=(progress_current / progress_total) if progress_visible and progress_total > 0 else None,
         visible=progress_visible,
     )
-    index_btn = ft.FilledButton("Index workspace", icon=ft.Icons.SYNC, disabled=progress_visible)
+    index_btn = ft.FilledButton("Sync index", icon=ft.Icons.SYNC, disabled=progress_visible)
+    rebuild_btn = ft.OutlinedButton("Rebuild all", icon=ft.Icons.REFRESH, disabled=progress_visible)
 
     studio._rag_settings_status_line_text = status_val
     studio._rag_settings_documents_text = documents_val
@@ -71,6 +76,7 @@ def build_rag_settings_tab(*, studio: Any, page: ft.Page) -> ft.Container:
     studio._rag_settings_progress_bar = progress_bar
     studio._rag_settings_progress_label = progress_label
     studio._rag_settings_reindex_btn = index_btn
+    studio._rag_settings_rebuild_btn = rebuild_btn
     studio._rag_settings_status_text = None
     studio._rag_settings_chunks_text = None
 
@@ -99,7 +105,14 @@ def build_rag_settings_tab(*, studio: Any, page: ft.Page) -> ft.Container:
             focus()
         await studio._rag_reindex_all_from_settings()
 
+    async def on_rag_rebuild(_e: ft.ControlEvent | None = None) -> None:
+        focus = getattr(studio, "_focus_rag_settings_panel", None)
+        if callable(focus):
+            focus()
+        await studio._rag_rebuild_all_from_settings()
+
     index_btn.on_click = lambda e: page.run_task(on_rag_index, e)
+    rebuild_btn.on_click = lambda e: page.run_task(on_rag_rebuild, e)
 
     index_rows = ft.Column(
         [
@@ -131,8 +144,8 @@ def build_rag_settings_tab(*, studio: Any, page: ft.Page) -> ft.Container:
         value=(store_db.settings_get(studio._db, store_db.SETTINGS_RAG_LATEST_VERSION_ONLY) or "true")
         != "false",
         tooltip=(
-            "Search uses the latest PBS snapshot per file; indexing still reads .md from disk "
-            "when no snapshot exists yet"
+            "Search uses the latest saved version per file; indexing still reads .md from disk "
+            "when no saved version exists yet"
         ),
         on_change=lambda e: _safe_rag_settings_set(
             studio,
@@ -168,13 +181,71 @@ def build_rag_settings_tab(*, studio: Any, page: ft.Page) -> ft.Container:
         ),
     )
     studio._rag_settings_reranker_switch = reranker_switch
+
+    def _save_rag_system(enabled: bool) -> None:
+        try:
+            raw = config.read_bootstrap_yaml_text()
+            data = yaml.safe_load(raw)
+            if not isinstance(data, dict):
+                data = {}
+            data["rag_system"] = bool(enabled)
+            text = yaml.safe_dump(
+                data,
+                default_flow_style=False,
+                allow_unicode=True,
+                sort_keys=False,
+                width=88,
+            )
+            config.write_bootstrap_yaml_text(text)
+        except (OSError, ValueError, yaml.YAMLError) as ex:
+            snack = getattr(studio, "_snack", None)
+            if callable(snack):
+                snack(f"Could not save RAG setting: {ex}")
+            return
+        config.refresh()
+        sw = getattr(studio, "_rag_settings_system_switch", None)
+        if sw is not None and bool(sw.value) != config.RAG_SYSTEM:
+            sw.value = config.RAG_SYSTEM
+            if _ctrl_on_page(sw):
+                sw.update()
+        apply_state = getattr(studio, "_apply_active_tab_ui_state", None)
+        if callable(apply_state):
+            apply_state()
+        refresh_strip = getattr(studio, "_refresh_review_subtab_strip", None)
+        if callable(refresh_strip):
+            refresh_strip()
+        snack = getattr(studio, "_snack", None)
+        if callable(snack):
+            if enabled:
+                snack("Impact checks enabled — open Review → Impact.")
+            else:
+                snack("Impact checks disabled.")
+
+    rag_system_switch = ft.Switch(
+        label="Review → Impact checks",
+        value=config.RAG_SYSTEM,
+        tooltip="Show Difference | Impact subtabs and enable cross-file Impact analysis",
+        on_change=lambda e: _save_rag_system(bool(e.control.value)),
+    )
+    studio._rag_settings_system_switch = rag_system_switch
     if progress_visible:
-        for ctrl in (tier_dd, latest_only_switch, enrichment_dd, reranker_switch):
+        for ctrl in (
+            tier_dd,
+            latest_only_switch,
+            enrichment_dd,
+            reranker_switch,
+            rag_system_switch,
+            rebuild_btn,
+        ):
             ctrl.disabled = True
 
     apply_job_ui = getattr(studio, "_apply_rag_job_ui", None)
     if callable(apply_job_ui):
         apply_job_ui()
+
+    present_stats = getattr(studio, "_present_rag_settings_stats", None)
+    if callable(present_stats):
+        present_stats()
 
     rag_disclaimer = ft.Container(
         padding=ft.padding.all(12),
@@ -191,9 +262,9 @@ def build_rag_settings_tab(*, studio: Any, page: ft.Page) -> ft.Container:
                 ),
                 ft.Text(
                     "Workspace markdown is indexed into a local database for semantic search "
-                    "and related context. Indexing uses PBS snapshots when available, otherwise "
-                    "files on disk. Vector embeddings and the optional reranker run locally on "
-                    "your machine.",
+                    "and related context. Indexing uses the latest saved version when one exists, "
+                    "otherwise the file on disk. Vector embeddings and the optional reranker run "
+                    "locally on your machine.",
                     size=12,
                     color=config.ON_SURFACE_VARIANT,
                     selectable=True,
@@ -209,10 +280,9 @@ def build_rag_settings_tab(*, studio: Any, page: ft.Page) -> ft.Container:
                 ),
                 ft.Text(
                     "Enrichment and search query expansion use the model under Enrichment tier "
-                    "(Home = local Ollama; Office/Cloud = remote APIs). Index workspace runs one "
-                    "LLM call per paragraph chunk when enrichment is enabled—large workspaces can "
-                    "incur significant Office/Cloud usage. Set Enrichment to Skip or Home tier to "
-                    "avoid remote charges.",
+                    "(Home = local Ollama; Office/Cloud = remote APIs). Sync index updates only "
+                    "changed files; Rebuild all re-embeds every paragraph. When Enrichment is On, "
+                    "each child gets an LLM summary and three questions included in the embedded text.",
                     size=12,
                     color=config.ON_SURFACE_VARIANT,
                     selectable=True,
@@ -230,7 +300,7 @@ def build_rag_settings_tab(*, studio: Any, page: ft.Page) -> ft.Container:
                 rag_disclaimer,
                 ft.Text("RAG", size=18, weight=ft.FontWeight.W_600),
                 ft.Text("Index", size=14, weight=ft.FontWeight.W_600),
-                index_btn,
+                ft.Row([index_btn, rebuild_btn], spacing=8),
                 progress_bar,
                 progress_label,
                 index_rows,
@@ -239,6 +309,7 @@ def build_rag_settings_tab(*, studio: Any, page: ft.Page) -> ft.Container:
                 chunk_rows,
                 ft.Divider(height=8),
                 ft.Text("Options", size=14, weight=ft.FontWeight.W_600),
+                rag_system_switch,
                 latest_only_switch,
                 tier_dd,
                 enrichment_dd,

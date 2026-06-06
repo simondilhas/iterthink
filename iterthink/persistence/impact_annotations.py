@@ -122,9 +122,11 @@ def set_override(
     content_version_id: int,
     paragraph_index: int,
     prompt_id: str,
+    status: str,
     override_comment: str,
 ) -> None:
     now = time.time()
+    session.flush()
     row = (
         session.execute(
             select(ImpactAnnotation).where(
@@ -142,7 +144,7 @@ def set_override(
                 content_version_id=content_version_id,
                 paragraph_index=paragraph_index,
                 prompt_id=prompt_id,
-                status="stable",
+                status=status,
                 comment="",
                 details_json=None,
                 overridden=True,
@@ -152,9 +154,76 @@ def set_override(
             )
         )
         return
+    if not row.overridden:
+        det = parse_details_dict(row) or {}
+        meta = det.get("_override_meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        meta["model_status"] = str(row.status)
+        det["_override_meta"] = meta
+        row.details_json = json.dumps(det, ensure_ascii=False)
+    row.status = status
     row.overridden = True
     row.override_comment = override_comment
     row.updated_at = now
+
+
+def clear_override(
+    session: Session,
+    *,
+    content_version_id: int,
+    paragraph_index: int,
+    prompt_id: str,
+) -> None:
+    now = time.time()
+    session.flush()
+    row = (
+        session.execute(
+            select(ImpactAnnotation).where(
+                ImpactAnnotation.content_version_id == content_version_id,
+                ImpactAnnotation.paragraph_index == paragraph_index,
+                ImpactAnnotation.prompt_id == prompt_id,
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if row is None:
+        return
+    det = parse_details_dict(row)
+    if isinstance(det, dict):
+        meta = det.get("_override_meta")
+        if isinstance(meta, dict):
+            ms = meta.get("model_status")
+            if isinstance(ms, str) and ms.strip():
+                row.status = ms.strip()
+        det.pop("_override_meta", None)
+        row.details_json = json.dumps(det, ensure_ascii=False) if det else None
+    row.overridden = False
+    row.override_comment = None
+    row.updated_at = now
+
+
+def overridden_indices(
+    session: Session, *, content_version_id: int, prompt_id: str
+) -> set[int]:
+    rows = session.execute(
+        select(ImpactAnnotation.paragraph_index).where(
+            ImpactAnnotation.content_version_id == content_version_id,
+            ImpactAnnotation.prompt_id == prompt_id,
+            ImpactAnnotation.overridden.is_(True),
+        )
+    ).scalars()
+    return {int(i) for i in rows}
+
+
+def row_to_progress_payload(row: ImpactAnnotation) -> dict[str, Any]:
+    return {
+        "status": str(row.status),
+        "comment": effective_comment(row),
+        "details": parse_details_dict(row),
+        "overridden": bool(row.overridden),
+    }
 
 
 def list_for_version(
@@ -209,12 +278,30 @@ def effective_comment(row: ImpactAnnotation) -> str:
     return (row.comment or "").strip()
 
 
+def model_status(row: ImpactAnnotation) -> str:
+    if not row.overridden:
+        return str(row.status)
+    det = parse_details_dict(row)
+    if isinstance(det, dict):
+        meta = det.get("_override_meta")
+        if isinstance(meta, dict):
+            ms = meta.get("model_status")
+            if isinstance(ms, str) and ms.strip():
+                return ms.strip()
+    return str(row.status)
+
+
 def snapshot_row_ui(row: ImpactAnnotation) -> dict[str, Any]:
-    return {
+    snap: dict[str, Any] = {
         "status": str(row.status),
         "effective_comment": effective_comment(row),
         "details": parse_details_dict(row),
         "content_version_id": int(row.content_version_id),
         "paragraph_index": int(row.paragraph_index),
         "prompt_id": str(row.prompt_id),
+        "overridden": bool(row.overridden),
     }
+    if row.overridden:
+        snap["model_comment"] = (row.comment or "").strip()
+        snap["model_status"] = model_status(row)
+    return snap

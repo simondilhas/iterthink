@@ -1461,6 +1461,20 @@ class MarkdownStudioExplorer:
         t = getattr(self, "_tree_file_rename_target", None)
         return t is not None and fpath.resolve() == t
 
+    def _tree_file_is_active(self, fpath: Path) -> bool:
+        cur = getattr(self, "current_path", None)
+        return cur is not None and fpath.resolve() == cur.resolve()
+
+    def _tree_folder_contains_current_path(self, folder_path: Path) -> bool:
+        cur = getattr(self, "current_path", None)
+        if not cur:
+            return False
+        try:
+            cur.resolve().relative_to(folder_path.resolve())
+            return True
+        except ValueError:
+            return False
+
     def _begin_tree_file_inline_rename(self, path: Path) -> None:
         root = config.DOCUMENTS.resolve()
         try:
@@ -1511,6 +1525,7 @@ class MarkdownStudioExplorer:
 
     def _make_tree_file_row(self, fname: str, fpath: Path) -> ft.Control:
         fp = fpath
+        is_active = self._tree_file_is_active(fp)
         menu_btn = ft.PopupMenuButton(
             icon=ft.Icons.MORE_VERT,
             icon_size=18,
@@ -1588,6 +1603,8 @@ class MarkdownStudioExplorer:
                             self._tree_display_name(fp),
                             size=12,
                             font_family="monospace",
+                            weight=ft.FontWeight.W_600 if is_active else None,
+                            color=config.ON_SURFACE,
                         ),
                         padding=ft.Padding.symmetric(horizontal=8, vertical=2),
                     ),
@@ -1602,6 +1619,8 @@ class MarkdownStudioExplorer:
         return ft.Container(
             content=row_inner,
             padding=ft.padding.only(right=2),
+            bgcolor=ft.Colors.with_opacity(0.12, config.PRIMARY_COLOR) if is_active else None,
+            border_radius=4,
             on_hover=lambda e: self._on_tree_file_row_hover(e, menu_wrap),
         )
 
@@ -1680,6 +1699,9 @@ class MarkdownStudioExplorer:
             content=inner_col,
             padding=ft.Padding.only(left=8),
         )
+        should_expand = self._tree_folder_contains_current_path(folder_path)
+        if should_expand:
+            inner_col.controls.extend(self._render_lazy_folder_children(folder_path, depth))
 
         def on_folder_change(e: ft.ControlEvent) -> None:
             if not e.data:
@@ -1693,7 +1715,7 @@ class MarkdownStudioExplorer:
         return ft.ExpansionTile(
             title=self._make_tree_folder_title_row(folder_path.name, folder_path),
             controls=[pad],
-            expanded=False,
+            expanded=should_expand,
             maintain_state=True,
             dense=True,
             affinity=ft.TileAffinity.LEADING,
@@ -1736,7 +1758,7 @@ class MarkdownStudioExplorer:
                                     padding=ft.Padding.only(left=8),
                                 )
                             ],
-                            expanded=False,
+                            expanded=self._tree_folder_contains_current_path(folder_path),
                             maintain_state=True,
                             dense=True,
                             affinity=ft.TileAffinity.LEADING,
@@ -1873,6 +1895,9 @@ class MarkdownStudioExplorer:
         if hasattr(self, "_rebuild_content_tree"):
             self._rebuild_content_tree()
         self._refresh_compose_plan_surface()
+        self._rebuild_tree_ui()
+        if _ctrl_on_page(self.tree_column):
+            self.tree_column.update()
 
         try:
             with session_scope() as s:

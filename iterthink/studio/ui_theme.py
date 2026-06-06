@@ -111,26 +111,58 @@ def compose_preview_horizontal_rule_decoration() -> ft.BoxDecoration:
 
 
 def compose_preview_markdown_style_sheet() -> ft.MarkdownStyleSheet:
-    """Focus preview / help: monospace like the editor; strong = body + weight only."""
+    """Focus preview / help: serif reading face; strong = body + weight only."""
     from .constants import (
         COMPARE_COL_FONT_SIZE,
         COMPARE_COL_LINE_HEIGHT,
         COMPOSE_PREVIEW_BLOCK_GAP_PX,
+        COMPOSE_PREVIEW_PARAGRAPH_BOTTOM_PAD_PX,
     )
 
     fs = int(float(COMPARE_COL_FONT_SIZE))
     lh = float(COMPARE_COL_LINE_HEIGHT)
     ec = editor_text_color()
-    ff = "monospace"
+    ff = "serif"
     base = ft.TextStyle(size=fs, height=lh, color=ec, font_family=ff)
     strong = base.copy(weight=ft.FontWeight.W_700)
     em = base.copy(italic=True)
+
+    def _heading(*, scale: float, top: int, bottom: int) -> tuple[ft.TextStyle, ft.Padding]:
+        style = ft.TextStyle(
+            size=max(fs + 1, int(round(fs * scale))),
+            height=lh,
+            color=ec,
+            font_family=ff,
+            weight=ft.FontWeight.W_700,
+        )
+        pad = ft.padding.only(top=top, bottom=bottom)
+        return style, pad
+
+    h1_style, h1_pad = _heading(scale=1.55, top=12, bottom=0)
+    h2_style, h2_pad = _heading(scale=1.35, top=10, bottom=0)
+    h3_style, h3_pad = _heading(scale=1.2, top=8, bottom=0)
+    h4_style, h4_pad = _heading(scale=1.1, top=6, bottom=0)
+    h5_style, h5_pad = _heading(scale=1.0, top=4, bottom=0)
+    h6_style, h6_pad = _heading(scale=0.95, top=4, bottom=0)
+
     return ft.MarkdownStyleSheet(
         block_spacing=COMPOSE_PREVIEW_BLOCK_GAP_PX,
         p_text_style=base,
+        p_padding=ft.padding.only(bottom=COMPOSE_PREVIEW_PARAGRAPH_BOTTOM_PAD_PX),
+        h1_text_style=h1_style,
+        h1_padding=h1_pad,
+        h2_text_style=h2_style,
+        h2_padding=h2_pad,
+        h3_text_style=h3_style,
+        h3_padding=h3_pad,
+        h4_text_style=h4_style,
+        h4_padding=h4_pad,
+        h5_text_style=h5_style,
+        h5_padding=h5_pad,
+        h6_text_style=h6_style,
+        h6_padding=h6_pad,
         strong_text_style=strong,
         em_text_style=em,
-        # Nested lists read flat when indent is tight; match monospace column feel.
         list_indent=28,
         blockquote_padding=ft.padding.only(left=10, top=2, bottom=2, right=4),
         table_head_text_style=strong,

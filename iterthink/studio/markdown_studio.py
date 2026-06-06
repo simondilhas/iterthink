@@ -90,8 +90,8 @@ class MarkdownStudio(
     MarkdownStudioSidebars,
     MarkdownStudioContentTree,
     MarkdownStudioKiSidebar,
-    MarkdownStudioExplorer,
     MarkdownStudioSearchResults,
+    MarkdownStudioExplorer,
     MarkdownStudioImpactMixin,
     MarkdownStudioChecksUi,
     MarkdownStudioAssetCompare,   # PDF / DOCX compare rendering
@@ -170,6 +170,9 @@ class MarkdownStudio(
         self._compare_newer_version_id: int | None = None
         self._compare_newer_cached_body: str = ""
         self._compare_newer_dropdown_hover: bool = False
+        # Review tab: baseline (left column) — None means live current draft in ``editor``.
+        self._review_baseline_version_id: int | None = None
+        self._review_baseline_cached_body: str = ""
         # Optional: set before switching to History so tab sync picks a specific snapshot (legacy paths).
         self._pending_post_import_history_vid: int | None = None
         self._pending_ai_accept_action_id: str | None = None
@@ -235,6 +238,7 @@ class MarkdownStudio(
         self._fp_export_docx = ft.FilePicker()
         self._fp_export_plan_pdf = ft.FilePicker()
         self._fp_spell_dict = ft.FilePicker()
+        self._fp_knowledge_export = ft.FilePicker()
         self._import_kind: str | None = None
         self._import_flow: str | None = None
         self._import_target_md: Path | None = None
@@ -371,7 +375,6 @@ class MarkdownStudio(
         self._compose_reading_inner = ft.Column(
             [
                 self._compose_plan_host,
-                self._search_results_host,
                 self._compose_writing_slot,
             ],
             expand=True,
@@ -395,7 +398,10 @@ class MarkdownStudio(
         self._compose_tab_body_stack = ft.Container(
             expand=True,
             content=ft.Column(
-                [self._compose_centered_row],
+                [
+                    self._search_results_host,
+                    self._compose_centered_row,
+                ],
                 expand=True,
                 scroll=ft.ScrollMode.AUTO,
             ),
@@ -519,6 +525,29 @@ class MarkdownStudio(
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
             alignment=ft.Alignment.CENTER_LEFT,
             padding=ft.padding.symmetric(horizontal=2, vertical=1),
+        )
+        self._review_baseline_dropdown = ft.Dropdown(
+            expand=True,
+            dense=True,
+            text_style=_tb_dd_text_style,
+            filled=True,
+            fill_color=config.SURFACE,
+            border=ft.InputBorder.NONE,
+            border_width=0,
+            content_padding=ft.padding.symmetric(horizontal=4, vertical=0),
+            menu_style=_dd_menu_style,
+            options=[
+                ft.dropdown.Option(
+                    key=_COMPARE_KEY_CURRENT,
+                    text="Current draft",
+                    style=_dd_opt_st,
+                )
+            ],
+            value=_COMPARE_KEY_CURRENT,
+            disabled=True,
+            visible=False,
+            tooltip="Pick the current draft or a saved version for the left column.",
+            on_select=lambda e: self.page.run_task(self._on_review_baseline_change_async, e),
         )
         self._review_candidate_dropdown = ft.Dropdown(
             expand=True,
@@ -665,6 +694,7 @@ class MarkdownStudio(
         self._review_subtab_change_btn = self._build_review_subtab_button("Difference", 0)
         self._review_subtab_impact_btn = self._build_review_subtab_button("Impact", 1)
         self._review_subtab_strip = ft.Container(
+            visible=config.RAG_SYSTEM,
             bgcolor=config.SURFACE,
             content=ft.Column(
                 [
@@ -840,6 +870,7 @@ class MarkdownStudio(
             border_radius=10,
             shadow=ft.BoxShadow(blur_radius=8, color=ft.Colors.with_opacity(0.18, ft.Colors.BLACK)),
             content=ft.Column([], spacing=4, tight=True, scroll=ft.ScrollMode.AUTO),
+            on_hover=lambda e: self._on_impact_result_card_hover(e),
         )
         self._review_impact_panel = ft.Container(
             expand=False,
@@ -1047,9 +1078,16 @@ class MarkdownStudio(
                     ft.Row(
                         [
                             ft.Container(
-                                content=ft.Text("Current", style=_tb_label_style),
+                                content=ft.Row(
+                                    [
+                                        ft.Text("Current:", style=_tb_label_style),
+                                        self._review_baseline_dropdown,
+                                    ],
+                                    spacing=6,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                    expand=True,
+                                ),
                                 expand=1,
-                                alignment=ft.Alignment(-1, 0),
                             ),
                             ft.Container(
                                 content=ft.Row(
@@ -1087,15 +1125,11 @@ class MarkdownStudio(
             expand=True,
             spacing=0,
         )
-        _future_tab_col_children: list[ft.Control] = []
-        if config.RAG_SYSTEM:
-            _future_tab_col_children.append(self._review_subtab_strip)
-        _future_tab_col_children.extend(
-            [
-                self._review_difference_chrome_row,
-                self._review_subpanels_column,
-            ]
-        )
+        _future_tab_col_children: list[ft.Control] = [
+            self._review_subtab_strip,
+            self._review_difference_chrome_row,
+            self._review_subpanels_column,
+        ]
         self._plan_compare_future.set_bar_visible(False)
         self._future_tab_body = ft.Container(
             expand=True,
@@ -1269,12 +1303,9 @@ class MarkdownStudio(
         )
 
         self.tree_search_field = ft.TextField(
-            hint_text="Search… (/f for filenames)",
+            hint_text="Search… (/f filenames, /p project)",
             dense=True,
-            filled=True,
-            fill_color=config.SURFACE,
-            focused_bgcolor=config.SURFACE,
-            bgcolor=config.SURFACE,
+            filled=False,
             border=ft.InputBorder.NONE,
             text_size=12,
             color=config.ON_SURFACE,
@@ -1287,7 +1318,7 @@ class MarkdownStudio(
         _tree_search_bar = ft.Container(
             expand=True,
             height=float(SIDEBAR_TOOLBAR_ROW_H_PX),
-            bgcolor=config.SURFACE,
+            bgcolor=config.SIDEBAR_SURFACE,
             border_radius=float(SIDEBAR_INNER_BORDER_RADIUS_PX),
             border=ft.Border.all(1, ui_theme.outline_muted()),
             alignment=ft.Alignment.CENTER_LEFT,
@@ -1343,6 +1374,7 @@ class MarkdownStudio(
         self._compare_eval_hosts: list[ft.Container] = []
         # Floating result-card overlay state.
         self._result_card_visible_for: tuple[str, int] | None = None
+        self._result_card_pinned_ui_idx: int | None = None
         self._result_card_hide_gen: int = 0
 
         self._pill_row_discuss = ft.Row(spacing=4, wrap=True, run_spacing=4)
@@ -1831,6 +1863,7 @@ class MarkdownStudio(
             self.page.services.append(self._fp_export_docx)
             self.page.services.append(self._fp_export_plan_pdf)
             self.page.services.append(self._fp_spell_dict)
+            self.page.services.append(self._fp_knowledge_export)
             self.page.update()
 
     def refresh_ollama_client(self) -> None:
@@ -1884,9 +1917,11 @@ class MarkdownStudio(
         dd_ts = ft.TextStyle(size=12, height=1.0, color=config.ON_SURFACE)
         self._compare_candidate_dropdown.text_style = dd_ts
         self._compare_newer_dropdown.text_style = dd_ts
+        self._review_baseline_dropdown.text_style = dd_ts
         self._review_candidate_dropdown.text_style = dd_ts
         self._compare_candidate_dropdown.bgcolor = config.SURFACE
         self._compare_newer_dropdown.bgcolor = config.SURFACE
+        self._review_baseline_dropdown.bgcolor = config.SURFACE
         self._compare_candidate_dropdown.menu_style = ft.MenuStyle(
             bgcolor=config.SURFACE,
             elevation=12,
@@ -1894,6 +1929,7 @@ class MarkdownStudio(
             visual_density=ft.VisualDensity.COMPACT,
         )
         self._compare_newer_dropdown.menu_style = self._compare_candidate_dropdown.menu_style
+        self._review_baseline_dropdown.menu_style = self._compare_candidate_dropdown.menu_style
         self._review_candidate_dropdown.menu_style = self._compare_candidate_dropdown.menu_style
         _lbl = ft.TextStyle(size=12, color=config.ON_SURFACE_VARIANT)
         self._plan_compare.baseline_dd.text_style = dd_ts
@@ -1932,16 +1968,13 @@ class MarkdownStudio(
         self.editor.hint_style = _hs
         self.tree_search_field.color = config.ON_SURFACE
         self.tree_search_field.hint_style = _hs
-        self.tree_search_field.fill_color = config.SURFACE
-        self.tree_search_field.bgcolor = config.SURFACE
-        self.tree_search_field.focused_bgcolor = config.SURFACE
         self._chat_input.color = config.ON_SURFACE
         self._chat_input.hint_style = _hs
         self._chat_input.fill_color = config.SURFACE
         self._chat_input.bgcolor = config.SURFACE
         self._chat_input.focused_bgcolor = config.SURFACE
         self._chat_input.border_color = ui_theme.outline_muted()
-        self._tree_search_bar.bgcolor = config.SURFACE
+        self._tree_search_bar.bgcolor = config.SIDEBAR_SURFACE
         self._sync_rag_search_ui()
         self._sync_content_find_replace_field_theme(_hs)
         self._apply_main_workspace_tab_chrome_theme()
@@ -1973,6 +2006,8 @@ class MarkdownStudio(
                 if _ctrl_on_page(c):
                     c.update()
             self._apply_plan_compare_dropdown_chrome()
+        if self._main_tab_index == TAB_FUTURE and _ctrl_on_page(self._review_baseline_dropdown):
+            self._review_baseline_dropdown.update()
         if self._main_tab_index == TAB_FUTURE and _ctrl_on_page(self._review_candidate_dropdown):
             self._review_candidate_dropdown.update()
         if _ctrl_on_page(self.left_panel):

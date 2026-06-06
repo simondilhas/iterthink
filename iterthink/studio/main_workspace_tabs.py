@@ -103,10 +103,9 @@ class MainWorkspaceTabsMixin:
         the toolbar so the Review chrome only shows on the Change subtab.
         """
         is_active = getattr(self, "_review_subtab_index", 0) == idx
-        display_label = f"{label} (Comming Soon)" if idx == 1 else label
         return ft.Container(
             content=ft.Text(
-                display_label,
+                label,
                 size=13,
                 weight=ft.FontWeight.W_500,
                 color=config.ON_SURFACE if is_active else config.ON_SURFACE_VARIANT,
@@ -124,7 +123,7 @@ class MainWorkspaceTabsMixin:
         )
 
     def _select_review_subtab(self, idx: int) -> None:
-        if not config.RAG_SYSTEM and idx != 0:
+        if not config.RAG_SYSTEM:
             return
         if idx == self._review_subtab_index:
             return
@@ -137,6 +136,7 @@ class MainWorkspaceTabsMixin:
         # Impact → Difference: visibility alone does not always relayout the ListView; rebuild once.
         if self._main_tab_index == TAB_FUTURE and idx == 0:
             self._refresh_compare_diff_immediate()
+        self.page.update()
 
     def _discard_future_tab_loading_spinner(self) -> None:
         """If we bailed out of a Review tab switch after showing the placeholder ring, clear it."""
@@ -156,8 +156,12 @@ class MainWorkspaceTabsMixin:
         if _ctrl_on_page(self._main_tabs):
             self._main_tabs.update()
         on_review = self._main_tab_index == TAB_FUTURE
-        diff_active = on_review and self._review_subtab_index == 0
-        impact_active = on_review and self._review_subtab_index == 1
+        if config.RAG_SYSTEM:
+            diff_active = on_review and self._review_subtab_index == 0
+            impact_active = on_review and self._review_subtab_index == 1
+        else:
+            diff_active = on_review
+            impact_active = False
         self._review_change_panel.visible = diff_active
         self._review_change_panel.expand = diff_active
         self._review_impact_panel.visible = impact_active
@@ -182,7 +186,14 @@ class MainWorkspaceTabsMixin:
             self._sync_ki_topic_strip_after_workspace_tab_change()
 
     def _refresh_review_subtab_strip(self) -> None:
-        """Restyle the active/inactive Difference|Impact buttons."""
+        """Show/hide and restyle the Difference|Impact strip from ``rag_system``."""
+        strip = getattr(self, "_review_subtab_strip", None)
+        if strip is not None:
+            want_strip = config.RAG_SYSTEM
+            if strip.visible != want_strip:
+                strip.visible = want_strip
+                if _ctrl_on_page(strip):
+                    strip.update()
         if not config.RAG_SYSTEM:
             return
         for idx, btn in (
@@ -259,6 +270,10 @@ class MainWorkspaceTabsMixin:
         )
         self._compare_newer_dropdown.visible = md_visible
         self._compare_newer_dropdown.disabled = not md_visible or self.current_path is None
+        self._review_baseline_dropdown.visible = on_review
+        self._review_baseline_dropdown.disabled = (
+            not on_review or self.current_path is None or not bool(self._review_baseline_dropdown.options)
+        )
         self._review_candidate_dropdown.visible = on_review
         self._review_candidate_dropdown.disabled = not on_review or not bool(
             self._review_candidate_dropdown.options
@@ -269,6 +284,8 @@ class MainWorkspaceTabsMixin:
             self._compare_newer_dropdown.update()
         if hasattr(self, "_toolbar_history_md_row") and _ctrl_on_page(self._toolbar_history_md_row):
             self._toolbar_history_md_row.update()
+        if _ctrl_on_page(self._review_baseline_dropdown):
+            self._review_baseline_dropdown.update()
         if _ctrl_on_page(self._review_candidate_dropdown):
             self._review_candidate_dropdown.update()
 

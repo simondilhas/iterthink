@@ -2,19 +2,12 @@
 
 This file lists third-party software typically present when installing **iterthink** with the runtime dependencies declared in `pyproject.toml`, including transitive requirements, using the Python environment that was active when this file was generated.
 
-**Generated:** 2026-05-11  
+**Generated:** 2026-06-06  
 **Regenerate before each release:** run `python scripts/generate_third_party_notices.py` from the repository root with the same interpreter / lockfile you ship.
 
 The **iterthink** application is licensed under the Business Source License 1.1 (see the repository `LICENSE` file). That license is separate from the third-party components listed below.
 
 ---
-
-## Manually noted direct dependencies
-
-These were added to `pyproject.toml` after the last bulk `generate_third_party_notices` run; re-run that script before release to fold them into the table below.
-
-- **langdetect** — Apache License 2.0 — https://github.com/Mimino666/langdetect (language identification for spelling auto-detect).
-- **rapidocr** — Apache License 2.0 — https://github.com/RapidAI/RapidOCR (local ONNX OCR for scanned PDF / image import).
 
 ## Package index
 
@@ -23,12 +16,15 @@ These were added to `pyproject.toml` after the last bulk `generate_third_party_n
 | alembic | 1.18.4 | MIT | https://alembic.sqlalchemy.org |
 | annotated-doc | 0.0.4 | MIT | https://github.com/fastapi/annotated-doc |
 | annotated-types | 0.7.0 | MIT License | https://github.com/annotated-types/annotated-types |
+| antlr4-python3-runtime | 4.9.3 | BSD | http://www.antlr.org |
 | anyio | 4.13.0 | MIT | https://github.com/agronholm/anyio |
 | certifi | 2026.4.22 | MPL-2.0 | https://github.com/certifi/python-certifi |
 | cffi | 2.0.0 | MIT | https://github.com/python-cffi/cffi/releases |
 | charset-normalizer | 3.4.7 | MIT | https://github.com/jawah/charset_normalizer/blob/master/CHANGELOG.md |
 | click | 8.3.3 | BSD-3-Clause | https://github.com/pallets/click/ |
+| colorlog | 6.10.1 | MIT License | https://github.com/borntyping/python-colorlog |
 | cryptography | 48.0.0 | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography |
+| diskcache | 5.6.3 | Apache 2.0 | http://www.grantjenks.com/docs/diskcache/ |
 | fastembed | 0.8.0 | Apache License | https://github.com/qdrant/fastembed |
 | filelock | 3.29.0 | MIT | https://github.com/tox-dev/py-filelock |
 | flatbuffers | 25.12.19 | Apache 2.0 | https://google.github.io/flatbuffers/ |
@@ -45,8 +41,11 @@ These were added to `pyproject.toml` after the last bulk `generate_third_party_n
 | jaraco.context | 6.1.2 | MIT | https://github.com/jaraco/jaraco.context |
 | jaraco.functools | 4.4.0 | MIT | https://github.com/jaraco/jaraco.functools |
 | jeepney | 0.9.0 | MIT | https://gitlab.com/takluyver/jeepney |
+| Jinja2 | 3.1.6 | BSD License | https://github.com/pallets/jinja/ |
 | joblib | 1.5.3 | BSD-3-Clause | https://joblib.readthedocs.io |
 | keyring | 25.7.0 | MIT | https://github.com/jaraco/keyring |
+| langdetect | 1.0.9 | MIT | https://github.com/Mimino666/langdetect |
+| llama_cpp_python | 0.3.25 | MIT | https://github.com/abetlen/llama-cpp-python |
 | loguru | 0.7.3 | MIT License | https://github.com/Delgan/loguru/blob/master/CHANGELOG.rst |
 | lxml | 6.1.0 | BSD-3-Clause | https://lxml.de/ |
 | Mako | 1.3.12 | MIT | https://www.makotemplates.org/ |
@@ -60,7 +59,9 @@ These were added to `pyproject.toml` after the last bulk `generate_third_party_n
 | numpy | 2.4.4 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | https://numpy.org |
 | oauthlib | 3.3.1 | BSD-3-Clause | https://github.com/oauthlib/oauthlib |
 | ollama | 0.6.2 | MIT | https://ollama.com |
+| omegaconf | 2.3.0 | BSD License | https://github.com/omry/omegaconf |
 | onnxruntime | 1.25.1 | MIT License | https://onnxruntime.ai |
+| opencv-python | 4.13.0.92 | Apache 2.0 | https://github.com/opencv/opencv-python |
 | opencv-python-headless | 4.13.0.92 | Apache 2.0 | https://github.com/opencv/opencv-python |
 | packaging | 26.2 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
 | pdfminer.six | 20251230 | MIT | https://github.com/pdfminer/pdfminer.six |
@@ -68,21 +69,25 @@ These were added to `pyproject.toml` after the last bulk `generate_third_party_n
 | pillow | 12.2.0 | MIT-CMU | https://github.com/python-pillow/Pillow/releases |
 | protobuf | 7.34.1 | 3-Clause BSD License | https://developers.google.com/protocol-buffers/ |
 | py_rust_stemmers | 0.1.5 | See distribution metadata / bundled LICENSE in site-packages | — |
+| pyclipper | 1.4.0 | MIT | https://github.com/fonttools/pyclipper |
 | pycparser | 3.0 | BSD-3-Clause | https://github.com/eliben/pycparser |
 | pydantic | 2.13.3 | MIT | https://github.com/pydantic/pydantic |
 | pydantic_core | 2.46.3 | MIT | https://github.com/pydantic/pydantic |
 | Pygments | 2.20.0 | BSD-2-Clause | https://pygments.org |
 | pypdf | 6.11.0 | BSD-3-Clause | https://github.com/py-pdf/pypdf/issues |
 | pypdfium2 | 5.8.0 | BSD-3-Clause, Apache-2.0, dependency licenses | https://github.com/pypdfium2-team/pypdfium2 |
+| pyspellchecker | 0.9.0 | MIT | https://github.com/barrust/pyspellchecker |
 | python-docx | 1.2.0 | MIT | https://github.com/python-openxml/python-docx/blob/master/HISTORY.rst |
 | PyYAML | 6.0.3 | MIT | https://pyyaml.org/ |
 | RapidFuzz | 3.14.5 | MIT | https://github.com/rapidfuzz/RapidFuzz |
+| rapidocr | 3.8.1 | Apache-2.0 | https://github.com/RapidAI/RapidOCR |
 | repath | 0.9.0 | MIT | https://github.com/nickcoutsos/python-repath |
 | requests | 2.33.1 | Apache-2.0 | https://github.com/psf/requests |
 | rich | 15.0.0 | MIT | https://github.com/Textualize/rich |
 | scikit-learn | 1.8.0 | BSD-3-Clause | https://scikit-learn.org |
 | scipy | 1.17.1 | Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers.  All rights reserved.   Redistribution and use in source and binary forms, with or without  modification, are per... | https://scipy.org/ |
 | SecretStorage | 3.5.0 | BSD-3-Clause | https://github.com/mitya57/secretstorage |
+| shapely | 2.1.2 | BSD 3-Clause | https://github.com/shapely/shapely |
 | shellingham | 1.5.4 | ISC License | https://github.com/sarugaku/shellingham |
 | six | 1.17.0 | MIT | https://github.com/benjaminp/six |
 | SQLAlchemy | 2.0.49 | MIT | https://www.sqlalchemy.org |

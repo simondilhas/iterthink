@@ -112,6 +112,11 @@ class _HistoryBuffersMixin:
             return self.editor.value or ""
         return self._compare_newer_cached_body or ""
 
+    def _review_baseline_text(self) -> str:
+        if self._review_baseline_version_id is None:
+            return self.editor.value or ""
+        return self._review_baseline_cached_body or ""
+
     def _history_default_older_version_id(
         self, snaps_all: list[SnapshotInfo], older_slice: list[SnapshotInfo]
     ) -> int | None:
@@ -134,6 +139,8 @@ class _HistoryBuffersMixin:
         self._compare_snapshot_version_id = None
         self._compare_newer_version_id = None
         self._compare_newer_cached_body = ""
+        self._review_baseline_version_id = None
+        self._review_baseline_cached_body = ""
         self._pending_ai_accept_action_id = None
         self._compare_pdf_peer_snapshot_id = None
         self._latest_ai_proposal_vid = None
@@ -152,14 +159,14 @@ class _HistoryBuffersMixin:
 
         - History:  baseline = snapshot (left column)
                     candidate = newer draft or "Current draft" (right column)
-        - Future:   baseline = current editor draft
+        - Future:   baseline = current draft or selected saved version
                     candidate = AI proposal
         - Present:  baseline = latest saved baseline snapshot
                     candidate = compare editor buffer
         """
         if self._main_tab_index == TAB_FUTURE:
             return CompareBuffers(
-                baseline=self.editor.value or "",
+                baseline=self._review_baseline_text(),
                 candidate=self._compare_editor.value or "",
             )
         if self._main_tab_index == TAB_HISTORY:

@@ -8,33 +8,25 @@ import os
 import re
 import sys
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from iterthink.ai.ollama_util import chat_response_text
-from iterthink.compare.paragraph_semantics import embed_texts_cached
+from iterthink import config
 from iterthink.db.session import session_scope
-from iterthink.impact_checks import ImpactCheck
+from iterthink.impact_checks import (
+    FINDINGS_CHECK_IDS,
+    FINDINGS_PARAGRAPH_STATUSES,
+    ImpactCheck,
+    VALID_STATUSES,
+)
 from iterthink.persistence import impact_annotations as impact_ann
 from iterthink.services import impact_prefilter
 from iterthink.services.rag.chunk_type import NORM_COMPLIANCE_RAG_TYPES
-from iterthink.services.rag import impact_rag
+from iterthink.services.rag import impact_override, impact_rag
 
 _FENCE_PREFIX = re.compile(r"^\s*```(?:json)?\s*", re.IGNORECASE)
 _FENCE_SUFFIX = re.compile(r"\s*```\s*$")
-
-VALID_STATUSES = frozenset({"stable", "changed", "risk"})
-
-FINDINGS_CHECK_IDS = frozenset(
-    {
-        "norm_compliance",
-        "impact_consistency",
-        "scope_completeness",
-        "risk_assessment",
-        "design_intent",
-    }
-)
-
-FINDINGS_PARAGRAPH_STATUSES = frozenset({"ok", "warning", "error", "not_applicable"})
 
 NORM_TYPE_SEVERITY: dict[str, str] = {
     "ok": "info",
@@ -58,6 +50,89 @@ CONSISTENCY_TYPE_SEVERITY: dict[str, str] = {
 ProgressCb = Callable[[int, dict | None, str | None], Awaitable[None] | None]
 
 _persist_lock = asyncio.Lock()
+
+
+class ImpactPreflightError(Exception):
+    """Context indexing or retrieval preflight failed before LLM analysis."""
+
+
+@dataclass(frozen=True)
+class ImpactContextReady:
+    labels: dict[int, str]
+    ingest: impact_rag.IngestResult
+    query_cache_key: str
+    doc_title: str
+    project_label: str | None
+    top_k: int
+
+
+def _impact_query_metadata(
+    session: Any,
+    target_document_id: int,
+    target_path: Any | None,
+) -> tuple[str, str, str | None]:
+    from iterthink.db.content_models import Content
+    from iterthink.services.rag.chunking import document_title
+
+    row = session.get(Content, int(target_document_id))
+    lineage_id = row.lineage_id if row is not None else f"doc_{target_document_id}"
+    cache_key = f"impact_q::{lineage_id}"
+    title = "Untitled"
+    if target_path is not None:
+        try:
+            path = target_path.resolve() if hasattr(target_path, "resolve") else target_path
+            if path.is_file():
+                body = path.read_text(encoding="utf-8", errors="replace")
+                title = document_title(body, path.name)
+        except (OSError, TypeError, ValueError):
+            pass
+    return cache_key, title, None
+
+
+async def prepare_impact_context(
+    conn: Any,
+    *,
+    context_document_ids: list[int],
+    sample_paragraph: str,
+    check_id: str,
+    target_document_id: int,
+    target_path: Any | None = None,
+    top_k: int | None = None,
+) -> ImpactContextReady:
+    """Index selected context files and verify retrieval returns excerpts."""
+    k = max(1, int(top_k)) if top_k is not None else config.RAG_IMPACT_TOP_K
+    with session_scope() as session:
+        ingest = await impact_rag.ingest_latest_versions_for_document_ids(
+            session, conn, context_document_ids
+        )
+        ingest_msg = impact_rag.preflight_ingest_message(ingest, conn)
+        if ingest_msg:
+            raise ImpactPreflightError(ingest_msg)
+        labels = impact_rag.document_label_map(session, context_document_ids)
+        cache_key, doc_title, project_label = _impact_query_metadata(
+            session, target_document_id, target_path
+        )
+        retrieval_msg = await impact_rag.preflight_retrieval_message(
+            conn,
+            context_document_ids=context_document_ids,
+            labels=labels,
+            sample_paragraph=sample_paragraph,
+            check_id=check_id,
+            cache_key=cache_key,
+            doc_title=doc_title,
+            project_label=project_label,
+            top_k=k,
+        )
+        if retrieval_msg:
+            raise ImpactPreflightError(retrieval_msg)
+    return ImpactContextReady(
+        labels=labels,
+        ingest=ingest,
+        query_cache_key=cache_key,
+        doc_title=doc_title,
+        project_label=project_label,
+        top_k=k,
+    )
 
 
 def _impact_debug_llm_enabled() -> bool:
@@ -441,22 +516,72 @@ async def run_impact_analysis(
     paragraphs: list[str],
     on_progress: ProgressCb | None = None,
     concurrency: int = 4,
-    top_k: int = 3,
+    top_k: int | None = None,
+    target_path: Any | None = None,
+    context_ready: ImpactContextReady | None = None,
 ) -> list[dict | None]:
     """Run Impact check over each non-empty paragraph with bounded parallelism."""
     n = len(paragraphs)
     results: list[dict | None] = [None] * n
     sem = asyncio.Semaphore(max(1, concurrency))
+    strict_filter = check.id == "norm_compliance"
+    chunk_types = NORM_COMPLIANCE_RAG_TYPES if strict_filter else None
 
-    with session_scope() as s0:
-        await impact_rag.ingest_latest_versions_for_document_ids(s0, conn, context_document_ids)
-        labels = impact_rag.document_label_map(s0, context_document_ids)
+    sample = next((p for p in paragraphs if (p or "").strip()), "")
+    if context_ready is None:
+        context_ready = await prepare_impact_context(
+            conn,
+            context_document_ids=context_document_ids,
+            sample_paragraph=sample,
+            check_id=check.id,
+            target_document_id=target_document_id,
+            target_path=target_path,
+            top_k=top_k,
+        )
+    labels = context_ready.labels
+    effective_top_k = context_ready.top_k
+
+    overridden_set: set[int] = set()
+    overridden_snapshots: dict[int, dict[str, Any]] = {}
+    with session_scope() as s:
+        overridden_set = impact_ann.overridden_indices(
+            s, content_version_id=target_version_id, prompt_id=check.id
+        )
+        if overridden_set:
+            all_rows = impact_ann.list_for_version(
+                s, content_version_id=target_version_id, prompt_id=check.id
+            )
+            for i in overridden_set:
+                row = all_rows.get(i)
+                if row is not None:
+                    overridden_snapshots[i] = {
+                        "status": str(row.status),
+                        "comment": impact_ann.effective_comment(row),
+                        "payload": impact_ann.row_to_progress_payload(row),
+                    }
 
     async def one(idx: int, text: str) -> None:
         if not text.strip():
             await _emit(on_progress, idx, None, None)
             return
         async with sem:
+            if idx in overridden_set:
+                snap = overridden_snapshots.get(idx)
+                if snap is not None:
+                    await impact_override.ensure_override_embedding(
+                        conn,
+                        content_version_id=target_version_id,
+                        paragraph_index=idx,
+                        prompt_id=check.id,
+                        paragraph_text=text,
+                        status=str(snap["status"]),
+                        override_comment=str(snap["comment"]),
+                        doc_title=context_ready.doc_title,
+                    )
+                    payload = snap["payload"]
+                    results[idx] = payload
+                    await _emit(on_progress, idx, payload, None)
+                return
             if check.id == "norm_compliance":
                 skipped = impact_prefilter.norm_compliance_skip_llm(text)
                 if skipped is not None:
@@ -477,10 +602,15 @@ async def run_impact_analysis(
                     await _emit(on_progress, idx, skipped, None)
                     return
             try:
-                vecs = await embed_texts_cached(conn, None, [text])
+                vec = await impact_rag.embed_paragraph_for_retrieval(
+                    conn,
+                    text,
+                    cache_key=context_ready.query_cache_key,
+                    doc_title=context_ready.doc_title,
+                    project_label=context_ready.project_label,
+                )
             except BaseException:  # noqa: BLE001
-                vecs = [[]]
-            vec = vecs[0] if vecs else []
+                vec = []
             ctx = ""
             if vec:
                 ctx = impact_rag.retrieve_context_by_document_ids(
@@ -488,11 +618,19 @@ async def run_impact_analysis(
                     conn,
                     context_document_ids,
                     labels,
-                    top_k=top_k,
-                    chunk_types_include=(
-                        NORM_COMPLIANCE_RAG_TYPES if check.id == "norm_compliance" else None
-                    ),
+                    top_k=effective_top_k,
+                    chunk_types_include=chunk_types,
+                    strict_filter=strict_filter,
                 )
+                prior = impact_override.retrieve_override_context(
+                    vec,
+                    conn,
+                    content_version_id=target_version_id,
+                    prompt_id=check.id,
+                    exclude_paragraph_index=idx,
+                )
+                if prior:
+                    ctx = (ctx + "\n\n" + prior).strip() if ctx.strip() else prior
             payload, err = await _run_one_paragraph(
                 llm_chat, model=model, check=check, paragraph=text, context=ctx
             )

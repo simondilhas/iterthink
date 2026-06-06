@@ -715,8 +715,11 @@ class MarkdownStudioCompose:
         self._after_editor_programmatic_change()
 
     def _kick_debounced_compare_diff_if_main_editor_backs_buffers(self) -> None:
-        """Review baseline and History newer=current draft both read from ``editor``; keep analyse in sync."""
-        if self._main_tab_index == TAB_FUTURE or (
+        """Review baseline=current draft and History newer=current draft read from ``editor``."""
+        review_baseline_is_draft = (
+            self._main_tab_index == TAB_FUTURE and self._review_baseline_version_id is None
+        )
+        if review_baseline_is_draft or (
             self._main_tab_index == TAB_HISTORY and self._compare_newer_version_id is None
         ):
             self._compare_diff_gen += 1

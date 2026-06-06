@@ -121,7 +121,39 @@ class _HistoryDropdownsMixin:
                 self._compare_candidate_dropdown.update()
 
         if self._main_tab_index == TAB_FUTURE:
-            # ── Review dropdown: ai_proposal / legacy ai_staged + manual imports ─
+            # ── Review: baseline (left) + candidate (right) dropdowns ───────────────
+            baseline_opts: list[ft.dropdown.Option] = [
+                ft.dropdown.Option(key=_COMPARE_KEY_CURRENT, text="Current draft", style=_st)
+            ]
+            if self.current_path:
+                with session_scope() as s:
+                    snaps_all = content_repo.list_snapshots(s, self.current_path.resolve())
+                baseline_opts.extend(
+                    build_history_snapshot_dropdown_options(
+                        history_compare_snapshots(snaps_all), _st
+                    )
+                )
+            self._review_baseline_dropdown.options = baseline_opts
+            b_keys = {o.key for o in baseline_opts}
+            if self._review_baseline_version_id is not None:
+                bk = str(self._review_baseline_version_id)
+                if bk in b_keys:
+                    self._review_baseline_dropdown.value = bk
+                else:
+                    self._review_baseline_version_id = None
+                    self._review_baseline_cached_body = ""
+            if self._review_baseline_version_id is None:
+                self._review_baseline_dropdown.value = _COMPARE_KEY_CURRENT
+            if self._review_baseline_version_id is not None:
+                try:
+                    with session_scope() as s:
+                        self._review_baseline_cached_body = content_repo.load_version_body(
+                            s, self._review_baseline_version_id
+                        )
+                except BaseException:
+                    self._review_baseline_cached_body = ""
+
+            # ── Review candidate: ai_proposal / legacy ai_staged + manual imports ─
             snapshot_review_opts: list[ft.dropdown.Option] = []
             if self.current_path:
                 with session_scope() as s:
@@ -199,6 +231,8 @@ class _HistoryDropdownsMixin:
             else:
                 self._review_candidate_dropdown.value = REVIEW_KEY_DRAFT_MIRROR
             self._review_candidate_dropdown.disabled = False
+            if _ctrl_on_page(self._review_baseline_dropdown):
+                self._review_baseline_dropdown.update()
             if _ctrl_on_page(self._review_candidate_dropdown):
                 self._review_candidate_dropdown.update()
 
@@ -218,13 +252,51 @@ class _HistoryDropdownsMixin:
             if has_doc
             else "Open a markdown file from the tree to list versions."
         )
+        self._review_baseline_dropdown.disabled = not has_doc
+        self._review_baseline_dropdown.tooltip = (
+            "Pick the current draft or a saved version for the left column."
+            if has_doc
+            else "Open a markdown file from the tree to list versions."
+        )
         if self._main_tab_index == TAB_HISTORY and _ctrl_on_page(self._compare_newer_dropdown):
             self._compare_newer_dropdown.update()
         if self._main_tab_index == TAB_HISTORY and _ctrl_on_page(self._compare_candidate_dropdown):
             self._compare_candidate_dropdown.update()
+        if self._main_tab_index == TAB_FUTURE and _ctrl_on_page(self._review_baseline_dropdown):
+            self._review_baseline_dropdown.update()
         self._refresh_compare_bulk_buttons()
         if self._main_tab_index == TAB_HISTORY:
             self._refresh_tab_toolbar()
+
+    async def _on_review_baseline_change_async(self, e: ft.ControlEvent) -> None:
+        if e.control is not self._review_baseline_dropdown or self._review_baseline_dropdown.disabled:
+            return
+        if not self.current_path:
+            return
+        v = e.control.value
+        if v == _COMPARE_KEY_CURRENT:
+            self._review_baseline_version_id = None
+            self._review_baseline_cached_body = ""
+        else:
+            try:
+                vid = int(v)
+            except (TypeError, ValueError):
+                return
+            self._review_baseline_version_id = vid
+            try:
+                with session_scope() as s:
+                    self._review_baseline_cached_body = content_repo.load_version_body(s, vid)
+            except BaseException:
+                self._review_baseline_version_id = None
+                self._review_baseline_cached_body = ""
+                self._snack("Could not load that version.")
+                self._refresh_compare_tab_candidate_ui()
+                return
+        self._reset_check_analysis_session()
+        self._refresh_compare_tab_candidate_ui()
+        self._refresh_compare_diff_immediate()
+        self._refresh_compare_bulk_buttons()
+        self._refresh_title_bar()
 
     async def _on_compare_newer_change_async(self, e: ft.ControlEvent) -> None:
         if e.control is not self._compare_newer_dropdown or self._compare_newer_dropdown.disabled:

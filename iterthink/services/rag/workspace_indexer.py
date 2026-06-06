@@ -19,6 +19,7 @@ from iterthink.persistence import content_repo, store_db
 from iterthink.services.rag.chunking import build_parent_child_chunks, document_title
 from iterthink.services.rag.enrichment import enrich_child, enrichment_allowed_for_tier
 from iterthink.services.rag.project_scope import project_scope_from_lineage
+from iterthink.services.rag.index_status import prune_orphan_rag_lineages
 from iterthink.studio.tree import is_excluded_from_doc_tree
 
 ProgressCb = Callable[[int, int, str], Awaitable[None] | None]
@@ -276,6 +277,7 @@ async def index_all_documents(
             skipped_empty += 1
         elif outcome == "no_body":
             skipped_no_body += 1
+    prune_orphan_rag_lineages(conn, session)
     return IndexAllResult(
         updated=updated,
         scanned=total,

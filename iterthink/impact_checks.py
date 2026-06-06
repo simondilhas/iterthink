@@ -31,6 +31,20 @@ class ImpactCheck:
 
 IMPACT_CHECKS: tuple[ImpactCheck, ...] = ()
 
+VALID_STATUSES = frozenset({"stable", "changed", "risk"})
+
+FINDINGS_CHECK_IDS = frozenset(
+    {
+        "norm_compliance",
+        "impact_consistency",
+        "scope_completeness",
+        "risk_assessment",
+        "design_intent",
+    }
+)
+
+FINDINGS_PARAGRAPH_STATUSES = frozenset({"ok", "warning", "error", "not_applicable"})
+
 
 def _impact_checks_path() -> Path:
     return config.STORE_DIR / "impact_checks.yaml"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import traceback
 from pathlib import Path
@@ -10,17 +11,23 @@ from typing import Any
 import flet as ft
 
 from iterthink import config, impact_checks
+from iterthink.impact_checks import (
+    FINDINGS_CHECK_IDS,
+    FINDINGS_PARAGRAPH_STATUSES,
+    VALID_STATUSES,
+)
 from iterthink.compare.layout import aligned_compare_pairs
 from iterthink.compare.margin import split_paragraphs
 from iterthink.db.session import session_scope
 from iterthink.persistence import impact_annotations as impact_ann
 from iterthink.persistence import content_repo
-from iterthink.services import impact_analysis_runner
-from iterthink.services.impact_analysis_runner import (
-    FINDINGS_PARAGRAPH_STATUSES,
-    _impact_debug_llm_enabled,
+from iterthink.services.rag import impact_override
+from iterthink.studio.constants import (
+    KI_PILL_TEXT_SIZE,
+    KI_TOPIC_ANALYSE,
+    RESULT_CARD_HIDE_DELAY_SEC,
+    TAB_FUTURE,
 )
-from iterthink.studio.constants import KI_PILL_TEXT_SIZE, KI_TOPIC_ANALYSE, TAB_FUTURE
 from iterthink.studio.tree import build_md_tree
 from iterthink.studio.util import ctrl_on_page as _ctrl_on_page
 
@@ -40,6 +47,8 @@ class MarkdownStudioImpactMixin:
         self._impact_context_file_cbs: dict[Path, ft.Checkbox] = {}
         self._impact_folder_rows: list[tuple[ft.Checkbox, list[Path]]] = []
         self._impact_run_gen = 0
+        self._impact_result_card_hide_gen = 0
+        self._impact_result_card_visible_for: int | None = None
         self._impact_run_spinner = ft.ProgressRing(
             width=12,
             height=12,
@@ -315,9 +324,13 @@ class MarkdownStudioImpactMixin:
 
     def _on_impact_prompt_click(self, action_id: str) -> None:
         self._active_impact_prompt_id = action_id
+        self._refresh_impact_annotations_ui(action_id)
         self._sync_impact_ki_context_visibility()
         if hasattr(self, "_impact_status_text") and self._impact_status_text:
-            self._impact_status_text.value = "Select context files, then Run analysis."
+            if not (getattr(self, "current_path", None)):
+                self._impact_status_text.value = "Open a note first."
+            else:
+                self._impact_status_text.value = "Select context files, then Run analysis."
             if _ctrl_on_page(self._impact_status_text):
                 self._impact_status_text.update()
 
@@ -406,8 +419,27 @@ class MarkdownStudioImpactMixin:
         cur = getattr(self, "current_path", None)
         if not cur:
             return None
-        snaps = content_repo.list_snapshots(session, cur.resolve())
-        return snaps[0].version_id if snaps else None
+        resolved = cur.resolve()
+        snaps = content_repo.list_snapshots(session, resolved)
+        if snaps:
+            return snaps[0].version_id
+        body = ""
+        if hasattr(self, "editor") and self.editor is not None:
+            body = self.editor.value or ""
+        if not (body or "").strip():
+            try:
+                buffers = self._active_compare_buffers()
+                baseline = buffers.baseline or ""
+                candidate = buffers.candidate or ""
+                body = candidate if (candidate or "").strip() else baseline
+            except Exception:  # noqa: BLE001
+                body = ""
+        if not (body or "").strip():
+            return None
+        vid = content_repo.persist_version_snapshot(
+            session, resolved, body, "manual", skip_if_unchanged_sha=False
+        )
+        return int(vid) if vid is not None else None
 
     def _selected_impact_context_document_ids(self) -> list[int]:
         paths = [p for p, cb in self._impact_context_file_cbs.items() if cb.value is True]
@@ -470,6 +502,7 @@ class MarkdownStudioImpactMixin:
         status: str,
         comment: str,
         details: dict | None,
+        overridden: bool = False,
     ) -> dict[str, Any]:
         """Same keys as impact_ann.snapshot_row_ui for list rows during an in-flight run."""
         return {
@@ -479,6 +512,7 @@ class MarkdownStudioImpactMixin:
             "content_version_id": int(content_version_id),
             "paragraph_index": int(paragraph_index),
             "prompt_id": str(prompt_id),
+            "overridden": bool(overridden),
         }
 
     def _impact_paragraphs_for_display(self) -> tuple[list[str], bool]:
@@ -617,7 +651,10 @@ class MarkdownStudioImpactMixin:
                     no_wrap=True,
                 )
             chip_bg = ft.Colors.with_opacity(0.14, color)
-            chip_border = ft.border.all(1, ft.Colors.with_opacity(0.45, color))
+            if ann_row.get("overridden"):
+                chip_border = ft.border.all(1.5, ft.Colors.with_opacity(0.75, color))
+            else:
+                chip_border = ft.border.all(1, ft.Colors.with_opacity(0.45, color))
         else:
             color = config.OUTLINE
             chip_content = ft.Text("·", size=14, color=color, no_wrap=True)
@@ -671,8 +708,10 @@ class MarkdownStudioImpactMixin:
             right_col = para_ctrl
 
         def _on_hover(e: ft.HoverEvent, i: int = idx) -> None:
-            if e.data == "true":
+            if str(e.data).lower() == "true":
                 self._show_impact_result_card(i)
+            else:
+                self._schedule_hide_impact_result_card()
 
         return ft.Container(
             content=ft.Row(
@@ -684,46 +723,68 @@ class MarkdownStudioImpactMixin:
             on_hover=_on_hover if ann_row is not None else None,
         )
 
-    def _show_impact_result_card(self, idx: int) -> None:
-        overlay = getattr(self, "_impact_result_card_overlay", None)
-        if overlay is None:
-            return
+    def _impact_status_options(self, prompt_id: str) -> tuple[str, ...]:
+        if prompt_id in FINDINGS_CHECK_IDS:
+            return tuple(sorted(FINDINGS_PARAGRAPH_STATUSES))
+        return tuple(sorted(VALID_STATUSES))
 
+    def _load_impact_snap(self, idx: int) -> dict[str, Any] | None:
         prompt_id = self._active_impact_prompt_id
-        if not prompt_id:
-            return
-
         cur = getattr(self, "current_path", None)
-        if not cur:
-            return
-
-        snap: dict[str, Any] | None = None
+        if not prompt_id or not cur:
+            return None
         try:
             with session_scope() as s:
                 doc = content_repo.get_document_by_resolved_path(s, cur.resolve())
-                if doc is not None:
-                    vid = self._resolve_impact_version_id(s)
-                    if vid is not None:
-                        m = impact_ann.list_for_version(
-                            s,
-                            content_version_id=int(vid),
-                            prompt_id=prompt_id,
-                        )
-                        row = m.get(idx)
-                        if row is not None:
-                            snap = impact_ann.snapshot_row_ui(row)
+                if doc is None:
+                    return None
+                vid = self._resolve_impact_version_id(s)
+                if vid is None:
+                    return None
+                m = impact_ann.list_for_version(
+                    s,
+                    content_version_id=int(vid),
+                    prompt_id=prompt_id,
+                )
+                row = m.get(idx)
+                if row is None:
+                    return None
+                return impact_ann.snapshot_row_ui(row)
         except Exception:  # noqa: BLE001
-            pass
+            return None
 
-        if snap is None:
+    def _refresh_impact_para_row(self, idx: int) -> None:
+        para_lv = getattr(self, "_impact_para_listview", None)
+        if para_lv is None or not (0 <= idx < len(para_lv.controls)):
             return
+        paras, _ = self._impact_paragraphs_for_display()
+        pt = paras[idx] if idx < len(paras) else ""
+        snap = self._load_impact_snap(idx)
+        para_lv.controls[idx] = self._build_impact_para_row(idx, pt, snap)
+        if _ctrl_on_page(para_lv):
+            para_lv.update()
 
-        st = str(snap["status"])
-        color = self._impact_status_color(st)
-        eff = str(snap.get("effective_comment", "") or "").strip()
+    def _schedule_hide_impact_result_card(self) -> None:
+        self._impact_result_card_hide_gen += 1
+        gen = self._impact_result_card_hide_gen
+        self.page.run_task(self._hide_impact_result_card_after_delay, gen)
 
+    async def _hide_impact_result_card_after_delay(self, gen: int) -> None:
+        await asyncio.sleep(RESULT_CARD_HIDE_DELAY_SEC)
+        if gen != self._impact_result_card_hide_gen:
+            return
+        self._impact_result_card_visible_for = None
+        self._hide_impact_result_card()
+
+    def _on_impact_result_card_hover(self, e: ft.ControlEvent) -> None:
+        if str(e.data).lower() == "true":
+            self._impact_result_card_hide_gen += 1
+        else:
+            self._schedule_hide_impact_result_card()
+
+    def _impact_status_badge_content(self, st: str, color: str) -> ft.Control:
         if st in FINDINGS_PARAGRAPH_STATUSES:
-            badge_content: ft.Control = ft.Row(
+            return ft.Row(
                 [
                     ft.Icon(self._impact_findings_main_icon(st), size=18, color=color),
                     ft.Text(st, size=12, weight=ft.FontWeight.W_700, color=color),
@@ -732,19 +793,88 @@ class MarkdownStudioImpactMixin:
                 spacing=4,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
-        else:
-            badge_content = ft.Text(st, size=14, weight=ft.FontWeight.W_700, color=color)
+        return ft.Text(st, size=14, weight=ft.FontWeight.W_700, color=color)
+
+    def _build_impact_status_badge(
+        self,
+        idx: int,
+        snap: dict[str, Any],
+        *,
+        st: str,
+        color: str,
+    ) -> ft.Control:
+        badge_inner = self._impact_status_badge_content(st, color)
+        menu_items: list[ft.PopupMenuItem] = []
+        for opt in self._impact_status_options(str(snap.get("prompt_id", ""))):
+            menu_items.append(
+                ft.PopupMenuItem(
+                    content=ft.Text(opt, size=13),
+                    on_click=lambda _e, o=opt: self.page.run_task(
+                        self._persist_impact_override_async,
+                        snap,
+                        o,
+                        None,
+                        idx,
+                    ),
+                )
+            )
+        if snap.get("overridden"):
+            menu_items.append(ft.PopupMenuItem())  # divider
+            menu_items.append(
+                ft.PopupMenuItem(
+                    content=ft.Text("Reset to model", size=13),
+                    on_click=lambda _e: self.page.run_task(
+                        self._clear_impact_override_async,
+                        snap,
+                        idx,
+                    ),
+                )
+            )
+        return ft.PopupMenuButton(
+            content=ft.Container(
+                content=badge_inner,
+                padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                height=28,
+                alignment=ft.Alignment.CENTER,
+                border_radius=6,
+                bgcolor=ft.Colors.with_opacity(0.16, color),
+            ),
+            items=menu_items,
+            tooltip="Change status",
+        )
+
+    def _build_impact_result_card(self, idx: int, snap: dict[str, Any]) -> ft.Control:
+        st = str(snap["status"])
+        color = self._impact_status_color(st)
+        eff = str(snap.get("effective_comment", "") or "").strip()
+
+        rec_tf = ft.TextField(
+            value=eff,
+            dense=True,
+            multiline=True,
+            min_lines=2,
+            max_lines=6,
+            text_size=12,
+            expand=True,
+            on_blur=lambda e, s=snap, i=idx: self.page.run_task(
+                self._persist_impact_override_async,
+                s,
+                None,
+                e.control.value,
+                i,
+            ),
+            on_submit=lambda e, s=snap, i=idx: self.page.run_task(
+                self._persist_impact_override_async,
+                s,
+                None,
+                e.control.value,
+                i,
+            ),
+        )
 
         header = ft.Row(
             [
-                ft.Container(
-                    content=badge_content,
-                    padding=ft.padding.symmetric(horizontal=6, vertical=2),
-                    height=28,
-                    alignment=ft.Alignment.CENTER,
-                    border_radius=6,
-                    bgcolor=ft.Colors.with_opacity(0.16, color),
-                ),
+                self._build_impact_status_badge(idx, snap, st=st, color=color),
                 ft.Column(
                     [
                         ft.Text(
@@ -771,13 +901,57 @@ class MarkdownStudioImpactMixin:
         )
 
         rows: list[ft.Control] = [header]
-        if eff:
+        if snap.get("overridden"):
+            model_st = str(snap.get("model_status", "") or "").strip()
+            model_c = str(snap.get("model_comment", "") or "").strip()
+            model_color = self._impact_status_color(model_st) if model_st else config.ON_SURFACE_VARIANT
+            model_lines: list[ft.Control] = [
+                ft.Text(
+                    "Model suggestion",
+                    size=10,
+                    weight=ft.FontWeight.W_600,
+                    color=config.ON_SURFACE_VARIANT,
+                ),
+            ]
+            if model_st:
+                model_lines.append(
+                    ft.Text(
+                        model_st,
+                        size=12,
+                        weight=ft.FontWeight.W_700,
+                        color=model_color,
+                    )
+                )
+            if model_c:
+                model_lines.append(
+                    ft.Text(model_c, size=11, color=config.ON_SURFACE, selectable=True)
+                )
             rows.append(
                 ft.Container(
-                    content=ft.Text(eff, size=12, color=config.ON_SURFACE, selectable=True),
-                    padding=ft.padding.only(top=6),
+                    content=ft.Column(model_lines, spacing=3, tight=True),
+                    padding=ft.padding.all(8),
+                    bgcolor=ft.Colors.with_opacity(0.06, config.ON_SURFACE),
+                    border_radius=6,
+                    border=ft.border.all(1, ft.Colors.with_opacity(0.2, config.OUTLINE)),
                 )
             )
+        rows.append(
+            ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            "Your override" if snap.get("overridden") else "Recommendation",
+                            size=10,
+                            color=config.ON_SURFACE_VARIANT,
+                        ),
+                        rec_tf,
+                    ],
+                    spacing=4,
+                    tight=True,
+                ),
+                padding=ft.padding.only(top=6),
+            )
+        )
         det = snap.get("details")
         if isinstance(det, dict) and det:
             if det.get("low_confidence") is True:
@@ -932,25 +1106,107 @@ class MarkdownStudioImpactMixin:
                             padding=ft.padding.only(left=8, bottom=2),
                         )
                     )
-        override_btn = ft.TextButton(
-            "Override comment",
-            style=ft.ButtonStyle(
-                text_style=ft.TextStyle(size=11),
-                padding=ft.padding.symmetric(horizontal=0, vertical=0),
-            ),
-            on_click=lambda _e, s=snap: self._on_impact_override_click(s),
-        )
-        rows.append(
-            ft.Container(
-                content=ft.Row([override_btn], tight=True),
-                padding=ft.padding.only(top=4),
-            )
-        )
+        return ft.Column(rows, spacing=2, tight=True, scroll=ft.ScrollMode.AUTO)
 
-        overlay.content = ft.Column(rows, spacing=2, tight=True, scroll=ft.ScrollMode.AUTO)
+    def _show_impact_result_card(self, idx: int) -> None:
+        overlay = getattr(self, "_impact_result_card_overlay", None)
+        if overlay is None:
+            return
+        if not self._active_impact_prompt_id:
+            return
+        snap = self._load_impact_snap(idx)
+        if snap is None:
+            return
+        self._impact_result_card_hide_gen += 1
+        row_pitch = 88.0
+        overlay.top = max(4.0, idx * row_pitch + 4.0)
+        overlay.content = self._build_impact_result_card(idx, snap)
         overlay.visible = True
+        self._impact_result_card_visible_for = idx
         if _ctrl_on_page(overlay):
             overlay.update()
+
+    async def _persist_impact_override_async(
+        self,
+        snap: dict[str, Any],
+        status: str | None,
+        comment: str | None,
+        idx: int,
+    ) -> None:
+        new_status = status if status is not None else str(snap.get("status", ""))
+        new_comment = (
+            comment
+            if comment is not None
+            else str(snap.get("effective_comment", "") or "")
+        )
+        paras, _ = self._impact_paragraphs_for_display()
+        para_text = paras[idx] if 0 <= idx < len(paras) else ""
+        doc_title = "Untitled"
+        cur = getattr(self, "current_path", None)
+        if cur is not None:
+            try:
+                from iterthink.services.rag.chunking import document_title
+
+                body = cur.read_text(encoding="utf-8", errors="replace")
+                doc_title = document_title(body, cur.name)
+            except OSError:
+                pass
+        with session_scope() as s:
+            impact_ann.set_override(
+                s,
+                content_version_id=int(snap["content_version_id"]),
+                paragraph_index=int(snap["paragraph_index"]),
+                prompt_id=str(snap["prompt_id"]),
+                status=new_status,
+                override_comment=new_comment or "",
+            )
+            s.commit()
+        conn = getattr(self, "_db", None)
+        if conn is not None:
+            try:
+                await impact_override.upsert_override_embedding(
+                    conn,
+                    content_version_id=int(snap["content_version_id"]),
+                    paragraph_index=int(snap["paragraph_index"]),
+                    prompt_id=str(snap["prompt_id"]),
+                    paragraph_text=para_text,
+                    status=new_status,
+                    override_comment=new_comment or "",
+                    doc_title=doc_title,
+                )
+            except BaseException:  # noqa: BLE001
+                pass
+        self._refresh_impact_para_row(idx)
+        if self._impact_result_card_visible_for == idx:
+            fresh = self._load_impact_snap(idx)
+            if fresh is not None:
+                self._show_impact_result_card(idx)
+
+    async def _clear_impact_override_async(self, snap: dict[str, Any], idx: int) -> None:
+        with session_scope() as s:
+            impact_ann.clear_override(
+                s,
+                content_version_id=int(snap["content_version_id"]),
+                paragraph_index=int(snap["paragraph_index"]),
+                prompt_id=str(snap["prompt_id"]),
+            )
+            s.commit()
+        conn = getattr(self, "_db", None)
+        if conn is not None:
+            try:
+                impact_override.delete_override_embedding(
+                    conn,
+                    content_version_id=int(snap["content_version_id"]),
+                    paragraph_index=int(snap["paragraph_index"]),
+                    prompt_id=str(snap["prompt_id"]),
+                )
+            except BaseException:  # noqa: BLE001
+                pass
+        self._refresh_impact_para_row(idx)
+        if self._impact_result_card_visible_for == idx:
+            fresh = self._load_impact_snap(idx)
+            if fresh is not None:
+                self._show_impact_result_card(idx)
 
     def _hide_impact_result_card(self) -> None:
         overlay = getattr(self, "_impact_result_card_overlay", None)
@@ -1003,44 +1259,6 @@ class MarkdownStudioImpactMixin:
             if _ctrl_on_page(status_text):
                 status_text.update()
         self._sync_impact_ki_context_visibility()
-
-    def _on_impact_override_click(self, snap: dict[str, Any]) -> None:
-        tf = ft.TextField(
-            value=str(snap.get("effective_comment", "") or ""),
-            dense=True,
-            multiline=True,
-            min_lines=2,
-            max_lines=5,
-            expand=True,
-        )
-
-        def close_dlg() -> None:
-            self.page.pop_dialog()
-
-        def save(_e: ft.ControlEvent | None) -> None:
-            with session_scope() as s:
-                impact_ann.set_override(
-                    s,
-                    content_version_id=int(snap["content_version_id"]),
-                    paragraph_index=int(snap["paragraph_index"]),
-                    prompt_id=str(snap["prompt_id"]),
-                    override_comment=tf.value or "",
-                )
-            close_dlg()
-            self._refresh_impact_annotations_ui(str(snap["prompt_id"]))
-
-        self.page.show_dialog(
-            ft.AlertDialog(
-                modal=True,
-                title=ft.Text("Override comment"),
-                content=tf,
-                actions=[
-                    ft.TextButton("Cancel", on_click=lambda _e: close_dlg()),
-                    ft.FilledButton("Save", on_click=save),
-                ],
-                actions_alignment=ft.MainAxisAlignment.END,
-            )
-        )
 
     async def _run_impact_analysis_async(self) -> None:
         act = impact_checks.get_impact_check(self._active_impact_prompt_id or "")
@@ -1115,7 +1333,9 @@ class MarkdownStudioImpactMixin:
             if _ctrl_on_page(self._impact_status_text):
                 self._impact_status_text.update()
 
-        if _impact_debug_llm_enabled():
+        from iterthink.services import impact_analysis_runner
+
+        if impact_analysis_runner._impact_debug_llm_enabled():
             n_work = sum(1 for p in paragraphs if (p or "").strip())
             print(
                 f"\n[impact] run start check={act.id!r} context_doc_ids={ctx_ids!r} "
@@ -1130,10 +1350,31 @@ class MarkdownStudioImpactMixin:
                 target_did = int(target_doc.id)
                 vid = self._resolve_impact_version_id(s)
                 if vid is None:
-                    self._snack("No saved version for this note — save or switch version first.")
+                    self._snack("No text to analyse in this note.")
                     self._refresh_impact_annotations_ui(act.id)
                     return
                 s.commit()
+
+            sample_para = next((p for p in paragraphs if (p or "").strip()), "")
+            try:
+                context_ready = await impact_analysis_runner.prepare_impact_context(
+                    self._db,
+                    context_document_ids=ctx_ids,
+                    sample_paragraph=sample_para,
+                    check_id=act.id,
+                    target_document_id=target_did,
+                    target_path=cur.resolve(),
+                )
+            except impact_analysis_runner.ImpactPreflightError as exc:
+                self._snack(str(exc))
+                if self._impact_status_text:
+                    self._impact_status_text.value = str(exc)
+                    if _ctrl_on_page(self._impact_status_text):
+                        self._impact_status_text.update()
+                self._impact_run_spinner.visible = False
+                if _ctrl_on_page(self._impact_run_spinner):
+                    self._impact_run_spinner.update()
+                return
 
             async def on_progress(idx: int, payload: dict | None, err: str | None) -> None:
                 if gen != self._impact_run_gen:
@@ -1160,6 +1401,7 @@ class MarkdownStudioImpactMixin:
                         status=str(payload.get("status", "")),
                         comment=str(payload.get("comment", "")),
                         details=det,
+                        overridden=bool(payload.get("overridden")),
                     )
                     lv.controls[idx] = self._build_impact_para_row(idx, pt, ann)
                 elif err:
@@ -1187,6 +1429,8 @@ class MarkdownStudioImpactMixin:
                 context_document_ids=ctx_ids,
                 paragraphs=paragraphs,
                 on_progress=on_progress,
+                target_path=cur.resolve(),
+                context_ready=context_ready,
             )
 
             ann_lines: list[tuple[int, str, str, int]] = []

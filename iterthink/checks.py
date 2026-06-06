@@ -341,4 +341,157 @@ def extract_label(payload: dict | None) -> str:
     return ""
 
 
+_OVERRIDE_KEY = "_override"
+
+
+def _override_block(payload: dict | None) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    ov = payload.get(_OVERRIDE_KEY)
+    return ov if isinstance(ov, dict) else None
+
+
+def is_overridden(payload: dict | None) -> bool:
+    ov = _override_block(payload)
+    return bool(ov and ov.get("active") is True)
+
+
+def _primary_recommendation_raw(payload: dict | None) -> str:
+    recs = extract_recommendations(payload, limit=1)
+    if not recs:
+        return ""
+    item = recs[0]
+    return str(item.get("action") or item.get("recommendation") or "").strip()
+
+
+def effective_symbol(check: Check, payload: dict | None) -> str:
+    ov = _override_block(payload)
+    if ov and ov.get("active") is True:
+        sym = ov.get("symbol")
+        if isinstance(sym, str) and sym.strip():
+            return sym.strip()
+    return extract_symbol(check, payload)
+
+
+def effective_primary_recommendation(payload: dict | None) -> str:
+    ov = _override_block(payload)
+    if ov and ov.get("active") is True:
+        rec = ov.get("recommendation")
+        if isinstance(rec, str):
+            return rec.strip()
+    return _primary_recommendation_raw(payload)
+
+
+def model_symbol(check: Check, payload: dict | None) -> str:
+    ov = _override_block(payload)
+    if ov and isinstance(ov.get("model_symbol"), str) and ov["model_symbol"].strip():
+        return ov["model_symbol"].strip()
+    return extract_symbol(check, payload)
+
+
+def model_primary_recommendation(payload: dict | None) -> str:
+    ov = _override_block(payload)
+    if ov and isinstance(ov.get("model_recommendation"), str):
+        return ov["model_recommendation"].strip()
+    return _primary_recommendation_raw(payload)
+
+
+def model_summary(check: Check, payload: dict | None) -> str:
+    ov = _override_block(payload)
+    if ov and isinstance(ov.get("model_summary"), str):
+        return ov["model_summary"].strip()
+    return extract_summary(check, payload)
+
+
+def model_recommendations(payload: dict | None, *, limit: int = 3) -> list[dict[str, Any]]:
+    """Recommendation list as the model returned them (before user override)."""
+    if not isinstance(payload, dict):
+        return []
+    recs = extract_recommendations(payload, limit=limit)
+    if not is_overridden(payload):
+        return recs
+    primary = model_primary_recommendation(payload)
+    if not primary and not recs:
+        return []
+    if not recs:
+        return [{"action": primary}]
+    first = dict(recs[0])
+    first["action"] = primary
+    return [first, *recs[1:]]
+
+
+def _set_primary_recommendation(out: dict[str, Any], recommendation: str) -> None:
+    rec = (recommendation or "").strip()
+    raw = out.get("recommendations")
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+        first = dict(raw[0])
+        first["action"] = rec
+        out["recommendations"] = [first, *raw[1:]]
+    elif rec:
+        out["recommendations"] = [{"action": rec}]
+
+
+def apply_check_override(
+    payload: dict[str, Any],
+    check: Check,
+    *,
+    symbol: str,
+    recommendation: str,
+) -> dict[str, Any]:
+    import time
+
+    out = dict(payload)
+    sym = str(symbol).strip()
+    rec = str(recommendation or "").strip()
+    ov = _override_block(out) or {}
+    if not ov.get("model_symbol"):
+        ov = {
+            **ov,
+            "model_symbol": extract_symbol(check, out),
+            "model_recommendation": _primary_recommendation_raw(out),
+            "model_summary": extract_summary(check, out),
+        }
+    out[_OVERRIDE_KEY] = {
+        **ov,
+        "active": True,
+        "symbol": sym,
+        "recommendation": rec,
+        "saved_at": time.time(),
+    }
+    out[check.symbol_field] = sym
+    _set_primary_recommendation(out, rec)
+    return out
+
+
+def clear_check_override(payload: dict[str, Any], check: Check) -> dict[str, Any]:
+    ov = _override_block(payload)
+    if not ov or not ov.get("active"):
+        return payload
+    out = dict(payload)
+    ms = ov.get("model_symbol")
+    mr = ov.get("model_recommendation")
+    if isinstance(ms, str) and ms.strip():
+        out[check.symbol_field] = ms.strip()
+    if isinstance(mr, str):
+        _set_primary_recommendation(out, mr.strip())
+    out.pop(_OVERRIDE_KEY, None)
+    return out
+
+
+def format_prior_override_context(
+    check: Check,
+    *,
+    paragraph_index: int,
+    payload: dict[str, Any],
+) -> str:
+    sym = effective_symbol(check, payload)
+    rec = effective_primary_recommendation(payload)
+    if not sym and not rec:
+        return ""
+    line = f"[PRIOR REVIEW] paragraph={paragraph_index + 1} symbol={sym}"
+    if rec:
+        return f"{line}\nrecommendation={rec}"
+    return line
+
+
 reload()
