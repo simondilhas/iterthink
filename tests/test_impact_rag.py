@@ -76,9 +76,15 @@ def test_index_then_retrieve_context_by_document_ids(
     from iterthink.db.session import session_scope
 
     async def _run() -> None:
-        with patch(
-            "iterthink.services.rag.workspace_indexer.embed_texts_cached",
-            side_effect=_mock_embed,
+        with (
+            patch(
+                "iterthink.services.rag.workspace_indexer.embed_texts_cached",
+                side_effect=_mock_embed,
+            ),
+            patch(
+                "iterthink.services.rag.impact_rag.embed_texts_cached",
+                side_effect=_mock_embed,
+            ),
         ):
             with session_scope() as session:
                 anchor = content_repo.get_or_create_lineage(session, ctx_md.resolve())
