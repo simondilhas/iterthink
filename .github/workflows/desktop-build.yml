@@ -35,7 +35,7 @@ env:
   PYTHONUTF8: "1"
   FLET_CLI_NO_RICH_OUTPUT: "1"
   # Set to "true" when macOS signing secrets are ready and macOS should ship on tag pushes / "all".
-  MACOS_RELEASE_ENABLED: "false"
+  MACOS_RELEASE_ENABLED: "true"
 
 concurrency:
   group: desktop-build-${{ github.ref }}
