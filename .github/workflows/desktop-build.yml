@@ -28,6 +28,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 env:
   UV_PYTHON: "3.12"
@@ -646,8 +647,8 @@ jobs:
           generate_release_notes: true
           files: release-assets/*
 
-  merge-dev-to-main:
-    name: Merge dev into main
+  open-dev-to-main-pr:
+    name: "Open PR: dev → main"
     needs: [desktop-build-ok, release]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -678,13 +679,21 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Merge dev into main and push
+      - name: Open PR dev → main
         if: steps.skip.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout main
-          git merge origin/dev --no-edit
-          git push origin main
+          if gh pr list --base main --head dev --state open --json number -q '.[0].number' | grep -q .; then
+            echo "Open dev→main PR already exists; skipping"
+            exit 0
+          fi
+          gh pr create \
+            --base main \
+            --head dev \
+            --title "Release: merge dev into main (${{ github.ref_name }})" \
+            --body "Automated PR after release **${{ github.ref_name }}** (build + GitHub Release succeeded).
+
+          Merge to sync \`main\` with \`dev\`."

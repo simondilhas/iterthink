@@ -44,9 +44,9 @@ git tag v0.0.8
 git push origin v0.0.8
 ```
 
-Pushing a **`v*`** tag starts one pipeline: **pytest → desktop build (all platforms) → GitHub Release → auto-merge `dev` into `main`**.
+Pushing a **`v*`** tag starts one pipeline: **pytest → desktop build (all platforms) → GitHub Release → open a dev → main PR** for manual merge (branch rules block direct pushes).
 
-If any step fails, **`main` is not updated**. Tag a commit on **`dev`** only.
+If build or release fails, **`main` is not updated**. After a green run, open the PR from the Actions log or [pull requests](https://github.com/simondilhas/iterthink/pulls) and merge when ready. Tag a commit on **`dev`** only.
 
 ### Manual desktop build
 
