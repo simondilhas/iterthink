@@ -24,6 +24,20 @@ if [[ ! -f "$ENTITLEMENTS" ]]; then
   exit 1
 fi
 
+sanitize_app_bundle() {
+  # Flet/serious_python leaves site-packages/.pod (dist_macos symlinks) in the bundle.
+  # codesign --strict rejects those as invalid symlink destinations.
+  while IFS= read -r -d '' pod_dir; do
+    echo "Removing Flet build artifact: $pod_dir"
+    rm -rf "$pod_dir"
+  done < <(find "$APP_PATH" -type d -path '*/site-packages/.pod' -print0 2>/dev/null)
+
+  while IFS= read -r -d '' link; do
+    echo "Removing broken symlink: $link"
+    rm -f "$link"
+  done < <(find "$APP_PATH" -type l ! -exec test -e {} \; -print0 2>/dev/null)
+}
+
 sign_file() {
   local target="$1"
   codesign --force --timestamp --options runtime \
@@ -102,6 +116,7 @@ notarize_and_staple() {
   spctl -a -vv -t install "$DMG_PATH"
 }
 
+sanitize_app_bundle
 sign_flet_desktop_package
 sign_app_bundle
 create_signed_dmg
