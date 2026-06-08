@@ -124,11 +124,54 @@ create_signed_dmg() {
 
 notarize_and_staple() {
   echo "Submitting DMG for notarization..."
-  xcrun notarytool submit "$DMG_PATH" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-    --team-id "$APPLE_TEAM_ID" \
-    --wait
+  local submit_json submission_id status attempt
+  submit_json="$(mktemp)"
+  if ! xcrun notarytool submit "$DMG_PATH" \
+      --apple-id "$APPLE_ID" \
+      --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+      --team-id "$APPLE_TEAM_ID" \
+      --output-format json > "$submit_json"; then
+    echo "Notarization upload failed" >&2
+    exit 1
+  fi
+  submission_id="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['id'])" "$submit_json")"
+  rm -f "$submit_json"
+  echo "Submission ID: $submission_id"
+
+  # Poll manually so transient runner network blips do not fail the job.
+  status=""
+  for attempt in $(seq 1 120); do
+    if xcrun notarytool info "$submission_id" \
+        --apple-id "$APPLE_ID" \
+        --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+        --team-id "$APPLE_TEAM_ID" \
+        --output-format json > "$submit_json" 2>/dev/null; then
+      status="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['status'])" "$submit_json")"
+      echo "Notarization status: $status (poll ${attempt}/120)"
+      case "$status" in
+        Accepted) break ;;
+        Invalid|Rejected)
+          echo "Notarization $status" >&2
+          xcrun notarytool log "$submission_id" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" || true
+          rm -f "$submit_json"
+          exit 1
+          ;;
+      esac
+    else
+      echo "Notarization status poll failed (transient network?), retrying (${attempt}/120)..." >&2
+    fi
+    sleep 30
+  done
+  rm -f "$submit_json"
+
+  if [[ "$status" != "Accepted" ]]; then
+    echo "Notarization did not reach Accepted within 60 minutes (submission: $submission_id)" >&2
+    exit 1
+  fi
+
   xcrun stapler staple "$DMG_PATH"
   spctl -a -vv -t install "$DMG_PATH"
 }
