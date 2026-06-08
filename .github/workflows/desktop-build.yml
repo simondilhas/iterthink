@@ -311,11 +311,11 @@ jobs:
           $env:PATH = "$hostedPy;$hostedPy\Scripts;C:\b\bin;C:\Windows\System32;C:\Program Files\Git\cmd;$env:PATH"
           uvx --from flet-cli flet build windows --yes -vv --build-version $env:BUILD_VERSION --build-number $env:GITHUB_RUN_NUMBER
 
-      - name: Cache Flet build template
+      - name: Cache Flet build template zip
         if: matrix.name != 'windows'
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/flet-build-template-cache
+          path: ${{ runner.temp }}/flet-build-template-cache/flet-build-template.zip
           key: flet-build-template-${{ hashFiles('uv.lock') }}
           restore-keys: |
             flet-build-template-
