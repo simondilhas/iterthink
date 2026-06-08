@@ -90,26 +90,27 @@ sign_flet_desktop_package() {
 }
 
 sign_app_bundle() {
+  # Sign inside-out (deepest first). Nested .app bundles (e.g. Python.app inside
+  # Python.framework) must be signed before their parent .framework, or the
+  # framework seal is invalidated ("a sealed resource is missing or invalid").
   echo "Signing nested libraries and executables..."
   while IFS= read -r -d '' file; do
     sign_file "$file" || true
   done < <(
-    find "$APP_PATH" -type f \( -perm -111 -o -name '*.dylib' -o -name '*.so' \) -print0 \
-      | sort -z -r
+    find "$APP_PATH" -depth -type f \( -perm -111 -o -name '*.dylib' -o -name '*.so' \) -print0
   )
-
-  echo "Signing framework bundles..."
-  while IFS= read -r -d '' framework; do
-    sign_file "$framework"
-  done < <(find "$APP_PATH" -depth -type d -name '*.framework' -print0)
 
   echo "Signing helper app bundles..."
   while IFS= read -r -d '' helper; do
     sign_file "$helper"
   done < <(find "$APP_PATH" -depth -type d -name '*.app' ! -path "$APP_PATH" -print0)
 
+  echo "Signing framework bundles..."
+  while IFS= read -r -d '' framework; do
+    sign_file "$framework"
+  done < <(find "$APP_PATH" -depth -type d -name '*.framework' -print0)
+
   echo "Signing main app bundle..."
-  sanitize_app_bundle
   sign_file "$APP_PATH"
   codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 }
