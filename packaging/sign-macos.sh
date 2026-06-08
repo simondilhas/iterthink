@@ -25,12 +25,27 @@ if [[ ! -f "$ENTITLEMENTS" ]]; then
 fi
 
 sanitize_app_bundle() {
-  # Flet/serious_python leaves site-packages/.pod (dist_macos symlinks) in the bundle.
+  # Flet/serious_python leaves site-packages/.pod (symlink → dist_macos) in the bundle.
   # codesign --strict rejects those as invalid symlink destinations.
-  while IFS= read -r -d '' pod_dir; do
-    echo "Removing Flet build artifact: $pod_dir"
-    rm -rf "$pod_dir"
-  done < <(find "$APP_PATH" -type d -path '*/site-packages/.pod' -print0 2>/dev/null)
+  echo "Sanitizing app bundle for codesign..."
+  while IFS= read -r -d '' match; do
+    echo "Removing Flet build artifact: $match"
+    rm -rf "$match"
+  done < <(
+    find "$APP_PATH" \( \
+      -path '*/site-packages/.pod' -o \
+      -path '*/site-packages/.pod/*' -o \
+      -path '*/site-packages/dist_macos' -o \
+      -path '*/site-packages/dist_macos/*' \
+    \) -print0 2>/dev/null
+  )
+
+  while IFS= read -r -d '' site_pkg; do
+    while IFS= read -r -d '' link; do
+      echo "Removing site-packages symlink: $link"
+      rm -f "$link"
+    done < <(find "$site_pkg" -type l -print0 2>/dev/null)
+  done < <(find "$APP_PATH" -type d -path '*/site-packages' -print0 2>/dev/null)
 
   while IFS= read -r -d '' link; do
     echo "Removing broken symlink: $link"
@@ -94,6 +109,7 @@ sign_app_bundle() {
   done < <(find "$APP_PATH" -depth -type d -name '*.app' ! -path "$APP_PATH" -print0)
 
   echo "Signing main app bundle..."
+  sanitize_app_bundle
   sign_file "$APP_PATH"
   codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 }
