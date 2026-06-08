@@ -81,14 +81,14 @@ COMMON_ARGS=(
 )
 
 for attempt in 1 2 3; do
-  extra=()
+  build_args=( "${COMMON_ARGS[@]}" )
   if [[ $attempt -gt 1 ]]; then
     echo "Flet build retry ${attempt}/3 with --clear-cache"
-    extra=(--clear-cache)
+    build_args+=(--clear-cache)
     rm -rf build
     fetch_template
   fi
-  if uv run flet build "$TARGET" "${COMMON_ARGS[@]}" "${extra[@]}"; then
+  if uv run flet build "$TARGET" "${build_args[@]}"; then
     exit 0
   fi
   echo "Flet build attempt ${attempt}/3 failed" >&2
