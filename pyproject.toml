@@ -94,10 +94,6 @@ copyright = "Copyright (c) 2026"
 [tool.flet.macos]
 bundle_id = "dev.iterthink.local.app"
 
-[tool.flet.macos.cleanup]
-packages = true
-package_files = [".pod", ".pod/**", "dist_macos", "dist_macos/**"]
-
 [tool.flet.app]
 path = "."
 exclude = [

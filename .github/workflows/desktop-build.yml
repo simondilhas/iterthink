@@ -34,6 +34,7 @@ env:
   UV_PYTHON: "3.12"
   PYTHONUTF8: "1"
   FLET_CLI_NO_RICH_OUTPUT: "1"
+  UV_NO_PROGRESS: "1"
   # Set to "true" when macOS signing secrets are ready and macOS should ship on tag pushes / "all".
   MACOS_RELEASE_ENABLED: "true"
 
@@ -310,12 +311,22 @@ jobs:
           $env:PATH = "$hostedPy;$hostedPy\Scripts;C:\b\bin;C:\Windows\System32;C:\Program Files\Git\cmd;$env:PATH"
           uvx --from flet-cli flet build windows --yes -vv --build-version $env:BUILD_VERSION --build-number $env:GITHUB_RUN_NUMBER
 
+      - name: Cache Flet build template
+        if: matrix.name != 'windows'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/flet-build-template-cache
+          key: flet-build-template-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            flet-build-template-
+
       - name: Flet build (macOS / Linux)
         if: matrix.name != 'windows'
         working-directory: ${{ env.ITER_REPO }}
         run: |
-          uv run flet build "${{ matrix.flet_target }}" --yes --verbose \
-            --build-version "${BUILD_VERSION}" --build-number "${GITHUB_RUN_NUMBER}"
+          chmod +x packaging/ci-flet-build.sh
+          packaging/ci-flet-build.sh "${{ matrix.flet_target }}" \
+            "${BUILD_VERSION}" "${GITHUB_RUN_NUMBER}"
 
       # ===== PACKAGING =====
       # All final installers/packages go into ./dist (relative to GITHUB_WORKSPACE)
