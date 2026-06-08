@@ -592,6 +592,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_BUILD_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           APP=$(find build/macos -name "*.app" | head -n1)
@@ -601,6 +602,16 @@ jobs:
           fi
           chmod +x packaging/sign-macos.sh
           packaging/sign-macos.sh "$APP" "$BUILD_VERSION" dist
+
+      - name: Upload pending notarization (signed DMG, not yet stapled)
+        if: failure() && matrix.name == 'macos' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-notary-pending
+          path: |
+            dist/*.dmg
+            dist/notarization-pending.json
+          if-no-files-found: ignore
 
       - name: Remove macOS signing keychain
         if: always() && matrix.name == 'macos' && startsWith(github.ref, 'refs/tags/v')

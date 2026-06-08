@@ -123,6 +123,12 @@ create_signed_dmg() {
 }
 
 notarize_and_staple() {
+  # Large Flet bundles (onnxruntime, opencv, …) and first-time Developer ID teams can
+  # sit "In Progress" for hours. Override via NOTARY_POLL_MAX / NOTARY_POLL_INTERVAL.
+  local poll_max="${NOTARY_POLL_MAX:-480}"
+  local poll_interval="${NOTARY_POLL_INTERVAL:-30}"
+  local poll_minutes=$((poll_max * poll_interval / 60))
+
   echo "Submitting DMG for notarization..."
   local submit_json submission_id status attempt
   submit_json="$(mktemp)"
@@ -136,18 +142,18 @@ notarize_and_staple() {
   fi
   submission_id="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['id'])" "$submit_json")"
   rm -f "$submit_json"
-  echo "Submission ID: $submission_id"
+  echo "Submission ID: $submission_id (poll up to ${poll_minutes}m, interval ${poll_interval}s)"
 
   # Poll manually so transient runner network blips do not fail the job.
   status=""
-  for attempt in $(seq 1 120); do
+  for attempt in $(seq 1 "$poll_max"); do
     if xcrun notarytool info "$submission_id" \
         --apple-id "$APPLE_ID" \
         --password "$APPLE_APP_SPECIFIC_PASSWORD" \
         --team-id "$APPLE_TEAM_ID" \
         --output-format json > "$submit_json" 2>/dev/null; then
       status="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['status'])" "$submit_json")"
-      echo "Notarization status: $status (poll ${attempt}/120)"
+      echo "Notarization status: $status (poll ${attempt}/${poll_max})"
       case "$status" in
         Accepted) break ;;
         Invalid|Rejected)
@@ -161,16 +167,24 @@ notarize_and_staple() {
           ;;
       esac
     else
-      echo "Notarization status poll failed (transient network?), retrying (${attempt}/120)..." >&2
+      echo "Notarization status poll failed (transient network?), retrying (${attempt}/${poll_max})..." >&2
     fi
-    sleep 30
+    sleep "$poll_interval"
   done
-  rm -f "$submit_json"
 
   if [[ "$status" != "Accepted" ]]; then
-    echo "Notarization did not reach Accepted within 60 minutes (submission: $submission_id)" >&2
+    cat > "${DIST_DIR}/notarization-pending.json" <<EOF
+{"submission_id":"${submission_id}","dmg_path":"$(basename "$DMG_PATH")","build_version":"${BUILD_VERSION}"}
+EOF
+    echo "Wrote ${DIST_DIR}/notarization-pending.json (staple later via Actions → macOS notary)" >&2
+    echo "Notarization did not reach Accepted within ${poll_minutes} minutes (submission: $submission_id)" >&2
+    echo "Apple may still be processing (common for large apps or new Developer ID accounts)." >&2
+    echo "From GitHub: Actions → macOS notary → Run workflow → check with submission_id $submission_id" >&2
+    echo "After Accepted: staple action with build_run_id=${NOTARY_BUILD_RUN_ID:-<this run id>}" >&2
+    rm -f "$submit_json"
     exit 1
   fi
+  rm -f "$submit_json"
 
   xcrun stapler staple "$DMG_PATH"
   spctl -a -vv -t install "$DMG_PATH"

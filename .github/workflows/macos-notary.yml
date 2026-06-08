@@ -1,0 +1,139 @@
+name: macOS notary
+
+# Check Apple notarization status or staple a pending DMG — no local Mac required.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "check = print status; staple = finish a timed-out build"
+        required: true
+        type: choice
+        options:
+          - check
+          - staple
+      submission_id:
+        description: "Notarization UUID (required for check; optional for staple)"
+        required: false
+        type: string
+      build_run_id:
+        description: "Desktop build run ID that uploaded macos-notary-pending (required for staple)"
+        required: false
+        type: string
+      attach_to_release:
+        description: "Upload stapled DMG to the GitHub Release for that build's tag"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  notary:
+    name: "${{ inputs.action }} notarization"
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check notarization status
+        if: inputs.action == 'check'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          sid="${{ inputs.submission_id }}"
+          if [[ -z "$sid" ]]; then
+            echo "::error::submission_id is required for check"
+            exit 1
+          fi
+          chmod +x packaging/notary-status.sh
+          packaging/notary-status.sh "$sid"
+
+      - name: Download pending macOS artifact
+        if: inputs.action == 'staple'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id="${{ inputs.build_run_id }}"
+          if [[ -z "$run_id" ]]; then
+            echo "::error::build_run_id is required for staple (Actions → failed Desktop build → run number in URL)"
+            exit 1
+          fi
+          mkdir -p pending
+          if ! gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name macos-notary-pending -D pending; then
+            echo "::error::No macos-notary-pending artifact on run $run_id. Build must include the pending-upload step (push this branch first)."
+            exit 1
+          fi
+          ls -la pending/
+
+      - name: Staple DMG
+        if: inputs.action == 'staple'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          meta="pending/notarization-pending.json"
+          if [[ ! -f "$meta" ]]; then
+            echo "::error::Missing $meta in downloaded artifact"
+            exit 1
+          fi
+          dmg_path="$(python3 -c "import json; d=json.load(open('$meta')); print(d['dmg_path'])")"
+          submission_id="$(python3 -c "import json; d=json.load(open('$meta')); print(d['submission_id'])")"
+          input_sid="${{ inputs.submission_id }}"
+          if [[ -n "$input_sid" ]]; then
+            submission_id="$input_sid"
+          fi
+          if [[ ! -f "pending/$dmg_path" && ! -f "$dmg_path" ]]; then
+            dmg_path="$(basename "$dmg_path")"
+          fi
+          if [[ -f "pending/$dmg_path" ]]; then
+            dmg="pending/$dmg_path"
+          elif [[ -f "$dmg_path" ]]; then
+            dmg="$dmg_path"
+          else
+            dmg="$(find pending -name '*.dmg' | head -n1)"
+          fi
+          if [[ -z "$dmg" || ! -f "$dmg" ]]; then
+            echo "::error::No DMG found in pending artifact"
+            exit 1
+          fi
+          chmod +x packaging/staple-macos-dmg.sh
+          packaging/staple-macos-dmg.sh "$dmg" "$submission_id"
+          mkdir -p dist
+          cp "$dmg" "dist/$(basename "$dmg")"
+          echo "DMG_PATH=dist/$(basename "$dmg")" >> "$GITHUB_ENV"
+          echo "BUILD_VERSION=$(python3 -c "import json; print(json.load(open('$meta')).get('build_version',''))")" >> "$GITHUB_ENV"
+
+      - name: Upload stapled DMG
+        if: inputs.action == 'staple'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-package
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: inputs.action == 'staple' && inputs.attach_to_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id="${{ inputs.build_run_id }}"
+          tag="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.head_branch')"
+          if [[ ! "$tag" =~ ^v ]]; then
+            echo "Build run tag '$tag' is not a release tag; skipping release upload"
+            exit 0
+          fi
+          asset="dist/$(basename "$DMG_PATH")"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "No GitHub Release for $tag yet; upload macos-package artifact manually or re-run Desktop build release job"
+            exit 0
+          fi
+          gh release upload "$tag" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
+          echo "Uploaded $asset to release $tag"
