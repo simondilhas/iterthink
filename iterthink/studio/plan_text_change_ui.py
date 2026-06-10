@@ -74,6 +74,56 @@ def _body_spans(old_text: str, new_text: str, *, side: str) -> ft.Text:
     return ft.Text(spans=spans, size=_LABEL_BASE_SIZE, selectable=True)
 
 
+def build_inline_label_text(
+    kind: PlanTextChangeKind,
+    display_text: str,
+    old_text: str | None,
+    new_text: str | None,
+    *,
+    font_size: int,
+) -> ft.Text:
+    """In-place plan label with word-level diff for modified/removed lines."""
+    fg = ui_theme.editor_text_color()
+    old_s = (old_text or "").strip()
+    new_s = (new_text or display_text or "").strip()
+    if kind == "modified" and old_s and new_s:
+        spans = build_new_side_spans(
+            old_s,
+            new_s,
+            base_size=font_size,
+            base_color=fg,
+        )
+        return ft.Text(
+            spans=spans,
+            size=font_size,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            no_wrap=False,
+        )
+    if kind == "removed" and old_s:
+        spans = build_old_side_spans(
+            old_s,
+            "",
+            base_size=font_size,
+            base_color=fg,
+        )
+        return ft.Text(
+            spans=spans,
+            size=font_size,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            no_wrap=False,
+        )
+    return ft.Text(
+        display_text,
+        size=font_size,
+        color=fg,
+        max_lines=2,
+        overflow=ft.TextOverflow.ELLIPSIS,
+        no_wrap=False,
+    )
+
+
 def build_text_change_hover_card(
     old_text: str | None,
     new_text: str | None,

@@ -30,13 +30,16 @@ def test_merge_adds_missing_categories_from_bundled() -> None:
             priority=1,
             placeholder="EMAIL",
             mode="regex",
-            enabled=False,
+            enabled_company=False,
+            enabled_cloud=False,
         )
     }
     merged = _merge_with_bundled(store)
     assert "phone" in merged
-    assert merged["email"].enabled is False
-    assert merged["phone"].enabled is True
+    assert not merged["email"].enabled_company
+    assert not merged["email"].enabled_cloud
+    assert merged["phone"].enabled_company
+    assert merged["phone"].enabled_cloud
 
 
 def test_build_prompt_lists_enabled_llm_categories() -> None:
@@ -48,7 +51,8 @@ def test_build_prompt_lists_enabled_llm_categories() -> None:
                 priority=1,
                 placeholder="EMAIL",
                 mode="regex",
-                enabled=True,
+                enabled_company=True,
+                enabled_cloud=True,
             ),
             "person": PrivacyCategory(
                 id="person",
@@ -56,10 +60,15 @@ def test_build_prompt_lists_enabled_llm_categories() -> None:
                 priority=1,
                 placeholder="PERSON",
                 mode="llm",
-                enabled=True,
+                enabled_company=True,
+                enabled_cloud=False,
             ),
         }
     )
-    prompt = build_redact_system_prompt()
-    assert "{{PERSON_1}}" in prompt or "PERSON_1" in prompt
-    assert "person names" in prompt.lower()
+    prompt_company = build_redact_system_prompt(tier="company")
+    assert "{{PERSON_1}}" in prompt_company or "PERSON_1" in prompt_company
+    assert "person names" in prompt_company.lower()
+
+    prompt_cloud = build_redact_system_prompt(tier="cloud")
+    assert "{{PERSON_1}}" not in prompt_cloud
+    assert "person names" not in prompt_cloud.lower()

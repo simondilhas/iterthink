@@ -21,7 +21,13 @@ from iterthink.compare.margin import split_paragraphs
 from iterthink.db.session import session_scope
 from iterthink.persistence import impact_annotations as impact_ann
 from iterthink.persistence import content_repo
+from iterthink.contract.document_classification import classify_document
+from iterthink.services.impact_context_scope import (
+    default_context_paths,
+    project_scoped_paths,
+)
 from iterthink.services.rag import impact_override
+from iterthink.services.rag.project_scope import project_slug_for_path
 from iterthink.studio.constants import (
     KI_PILL_TEXT_SIZE,
     KI_TOPIC_ANALYSE,
@@ -45,6 +51,7 @@ class MarkdownStudioImpactMixin:
         self._impact_tab_initialized = False
         self._active_impact_prompt_id: str | None = None
         self._impact_context_file_cbs: dict[Path, ft.Checkbox] = {}
+        self._impact_context_manual_overrides: dict[Path, bool] = {}
         self._impact_folder_rows: list[tuple[ft.Checkbox, list[Path]]] = []
         self._impact_run_gen = 0
         self._impact_result_card_hide_gen = 0
@@ -149,6 +156,36 @@ class MarkdownStudioImpactMixin:
                 out.extend(self._files_under_node(sub, exclude_resolved))
         return out
 
+    def _impact_default_paths(self) -> set[Path]:
+        cur = getattr(self, "current_path", None)
+        check_id = self._active_impact_prompt_id
+        if check_id:
+            paths = default_context_paths(check_id=str(check_id), target_path=cur)
+        else:
+            paths = project_scoped_paths(target_path=cur)
+        return {p.resolve() for p in paths}
+
+    def _impact_visible_paths(self) -> set[Path]:
+        cur = getattr(self, "current_path", None)
+        check_id = self._active_impact_prompt_id
+        if check_id:
+            return {p.resolve() for p in default_context_paths(check_id=str(check_id), target_path=cur)}
+        return {p.resolve() for p in project_scoped_paths(target_path=cur)}
+
+    def _impact_path_checked(self, resolved: Path) -> bool:
+        if resolved in self._impact_context_manual_overrides:
+            return self._impact_context_manual_overrides[resolved]
+        return resolved in self._impact_default_paths()
+
+    def _impact_context_tooltip(self, fpath: Path) -> str:
+        cl = classify_document(fpath.resolve())
+        fn = ", ".join(cl.document_functions) if cl.document_functions else "—"
+        bits = [str(fpath)]
+        if cl.kbob_code:
+            bits.append(f"KBOB {cl.kbob_code}")
+        bits.append(fn)
+        return "\n".join(bits)
+
     def _rebuild_impact_context_tree(self) -> None:
         scroll = getattr(self, "_impact_ki_context_scroll", None)
         if scroll is None:
@@ -165,6 +202,22 @@ class MarkdownStudioImpactMixin:
 
         cur = getattr(self, "current_path", None)
         exclude_res = cur.resolve() if cur else None
+        if exclude_res != getattr(self, "_impact_context_scope_path", None):
+            self._impact_context_manual_overrides.clear()
+            self._impact_context_scope_path = exclude_res
+        visible = self._impact_visible_paths()
+
+        title = getattr(self, "_impact_ki_context_title", None)
+        if title is not None:
+            slug = project_slug_for_path(cur) if cur else None
+            check = self._active_impact_prompt_id
+            label = f"Context — {slug or 'workspace'}"
+            if check:
+                label += f" ({check})"
+            if title.value != label:
+                title.value = label
+                if _ctrl_on_page(title):
+                    title.update()
 
         try:
             tree = build_md_tree(root)
@@ -185,6 +238,8 @@ class MarkdownStudioImpactMixin:
             for fname, fpath in files_here:
                 r = fpath.resolve()
                 if exclude_res is not None and r == exclude_res:
+                    continue
+                if r not in visible:
                     continue
                 if r in self._impact_context_file_cbs:
                     rows.append(
@@ -208,13 +263,13 @@ class MarkdownStudioImpactMixin:
                     )
                     continue
                 cb = ft.Checkbox(
-                    value=True,
+                    value=self._impact_path_checked(r),
                     label=fname,
                     label_style=ft.TextStyle(size=11, color=config.ON_SURFACE),
                     fill_color=config.PRIMARY_COLOR,
                     check_color=config.ON_PRIMARY,
                     scale=0.88,
-                    tooltip=str(fpath),
+                    tooltip=self._impact_context_tooltip(fpath),
                     on_change=lambda _e, fp=fpath: self._on_impact_file_checkbox_change(fp),
                 )
                 self._impact_context_file_cbs[r] = cb
@@ -227,7 +282,7 @@ class MarkdownStudioImpactMixin:
                 )
             for key in subdirs:
                 sub = node[key]
-                desc_paths = self._files_under_node(sub, exclude_res)
+                desc_paths = [p for p in self._files_under_node(sub, exclude_res) if p.resolve() in visible]
                 if not desc_paths:
                     continue
                 folder_cb = ft.Checkbox(
@@ -289,7 +344,11 @@ class MarkdownStudioImpactMixin:
             if _ctrl_on_page(folder_cb):
                 folder_cb.update()
 
-    def _on_impact_file_checkbox_change(self, _path: Path) -> None:
+    def _on_impact_file_checkbox_change(self, path: Path) -> None:
+        r = path.resolve()
+        cb = self._impact_context_file_cbs.get(r)
+        if cb is not None:
+            self._impact_context_manual_overrides[r] = cb.value is True
         self._impact_refresh_folder_states()
 
     def _on_impact_folder_checkbox_change(
@@ -324,6 +383,8 @@ class MarkdownStudioImpactMixin:
 
     def _on_impact_prompt_click(self, action_id: str) -> None:
         self._active_impact_prompt_id = action_id
+        if getattr(self, "_impact_tab_initialized", False):
+            self._rebuild_impact_context_tree()
         self._refresh_impact_annotations_ui(action_id)
         self._sync_impact_ki_context_visibility()
         if hasattr(self, "_impact_status_text") and self._impact_status_text:

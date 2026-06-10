@@ -57,6 +57,11 @@ COMPOSE_PREVIEW_PARAGRAPH_BOTTOM_PAD_PX = max(
 COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX = 4
 COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX = 4
 COMPOSE_EDITOR_CONTENT_PAD_TOP_PX = 0
+# Rendered (wysiwyg) scrollbar: track beside content + same right pad as source TextField.
+COMPOSE_EDITOR_SCROLLBAR_TRACK_PX = 8
+COMPOSE_EDITOR_SCROLLBAR_INSET_PX = (
+    COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX + COMPOSE_EDITOR_SCROLLBAR_TRACK_PX
+)
 # Subtracted from editor content width before wrap column count (caret / scrollbar slop heuristic).
 COMPOSE_EDITOR_WRAP_WIDTH_RESERVE_PX = 3
 # Compose TextField uses monospace; heuristic advance for wrap / toolbar X (tuned below generic 0.6em).
@@ -97,7 +102,14 @@ COMPARE_EVAL_COL_W = COMPARE_ACTION_COL_W
 COMPARE_EVAL_COL_W_WIDE = 176
 
 PROJECT_PAGE_URL = "https://www.yourcompanyos.io"
+PROJECT_PAGE_LINK_LABEL = "yourcompanyos.io"
 PROJECT_PAGE_TOOLTIP = "Start workflow on {yourcompany}os."
+YOURCOMPANYOS_DISPLAY = "{yourcompany}os"
+
+
+def yourcompanyos_brand_display(tenant_name: str | None = None) -> str:
+    name = (tenant_name or "").strip() or "yourcompany"
+    return f"{{{name}}}os"
 
 COMPARE_KEY_CURRENT = "__current__"
 COMPARE_KEY_CANDIDATE = "__candidate__"

@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from iterthink.ai.privacy_shield import redact_messages, reinject_response
+from iterthink.ai.privacy_shield import privacy_shield_enabled_for_tier, redact_messages, reinject_response
 from iterthink.db.session import session_scope
 from iterthink.persistence import token_usage
 from iterthink.token_cost_settings import remote_tier_applies
@@ -20,6 +20,7 @@ SECRET_COMPANY_OPENAI = "company_openai"
 SECRET_CLOUD_ANTHROPIC = "cloud_anthropic"
 SECRET_CLOUD_OPENAI = "cloud_openai"
 SECRET_CLOUD_GOOGLE = "cloud_google"
+SECRET_YOURCOMPANYOS_API = "yourcompanyos_api"
 
 DEFAULT_COMPANY_OPENAI_BASE = "https://api.openai.com/v1"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -517,7 +518,6 @@ class LlmChatBackend:
         cloud_openai_model: str,
         cloud_google_model: str,
         secrets: dict[str, str],
-        privacy_shield_enabled: bool = False,
         privacy_shield_reinject: bool = True,
         on_usage_recorded: UsageRecordedCb | None = None,
     ) -> None:
@@ -531,12 +531,11 @@ class LlmChatBackend:
         self._cloud_openai_model = cloud_openai_model
         self._cloud_google_model = cloud_google_model
         self._secrets = secrets
-        self._privacy_shield_enabled = bool(privacy_shield_enabled)
         self._privacy_shield_reinject = bool(privacy_shield_reinject)
         self._on_usage_recorded = on_usage_recorded
 
     def _privacy_shield_applies(self) -> bool:
-        return self._privacy_shield_enabled and self._tier in ("company", "cloud")
+        return privacy_shield_enabled_for_tier(self._tier)
 
     def _maybe_reinject(self, resp: Any, rmap: Any) -> Any:
         if rmap and self._privacy_shield_reinject:
@@ -615,7 +614,7 @@ class LlmChatBackend:
         if self._privacy_shield_applies() and not skip_privacy_redaction:
             # Coerce non-stream so reinject runs on the full assistant text.
             stream = False
-            messages, rmap = await redact_messages(messages)
+            messages, rmap = await redact_messages(messages, self._tier)
 
         if self._tier == "local":
             kwargs: dict[str, Any] = {"model": m, "messages": messages, "stream": stream}

@@ -150,6 +150,7 @@ class _HistoryBuffersMixin:
         clear_spell = getattr(self, "_clear_spell_suggest_cache", None)
         if clear_spell is not None:
             clear_spell()
+        self._text_review_user_layout_mode = None
 
     def _active_compare_buffers(self) -> CompareBuffers:
         """Return the (baseline, candidate) text pair for the active tab.

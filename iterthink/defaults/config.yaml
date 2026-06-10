@@ -66,7 +66,8 @@ rag_context_max_chars: 2400
 rag_impact_top_k: 3
 
 # Privacy shield: redact names, orgs, and API keys locally before Office/Cloud LLM calls.
-privacy_shield_enabled: true
+privacy_shield_company_enabled: true
+privacy_shield_cloud_enabled: true
 # Hugging Face GGUF (streamed into store_dir/privacy_shield/ on first run).
 privacy_shield_hf_repo: Qwen/Qwen2.5-1.5B-Instruct-GGUF
 privacy_shield_hf_file: qwen2.5-1.5b-instruct-q4_k_m.gguf
@@ -84,10 +85,19 @@ privacy_shield_chunk_overlap_paragraphs: 1
 token_cost_period: year
 
 # Layout-aware plan PDF import (experimental; Content and Layout profile).
-plan_pdf_import_enabled: false
+plan_pdf_import_enabled: true
+
+# Review plan compare: LLaVA model for change-region impact narratives.
+plan_region_impact_vision_model: llava:13b
 
 # Focus editor text-selection toolbar: spelling review button and LLM sparkle menu.
 focus_selection_review_actions_enabled: false
+
+# Import document-function autoclassification (contract v0.1.0).
+import_classification_llm_enabled: false
+import_classification_tier: local
+import_classification_model: ""
+import_classification_excerpt_max_chars: 1200
 
 # Scanned PDF / image import OCR (off by default; models download on first use).
 ocr_enabled: false

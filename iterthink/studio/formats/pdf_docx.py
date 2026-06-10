@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 import flet as ft
@@ -12,6 +14,8 @@ from iterthink.persistence import content_repo, plan_pdf_annotations
 from iterthink.services import document_import
 from iterthink.services.plan_pdf_export import export_annotated_pdf
 from iterthink.services.plan_text_diff import diff_plan_geometry, geometry_to_label_views
+from iterthink.services.plan_change_region_sync import sync_detected_change_regions
+from iterthink.studio.plan_region_actions import PlanRegionActionHandlers
 from iterthink.services.plan_text_extract import (
     load_plan_text_sidecar,
     write_plan_text_sidecar,
@@ -26,6 +30,7 @@ from ..constants import (
     COMPARE_COL_FONT_SIZE,
     COMPARE_COL_LINE_HEIGHT,
     COMPOSE_READING_WIDTH_FRAC,
+    KI_TOPIC_COMMENTS,
     READING_MAX_PX,
     TAB_FUTURE,
     TAB_HISTORY,
@@ -34,6 +39,27 @@ from ..util import ctrl_on_page as _ctrl_on_page
 from ..util import safe_list_scroll as _safe_list_scroll
 
 _PDF_COMPARE_SCROLL_SOURCES = ("pdf_original", "docx_original")
+_PLAN_LAYOUT_MODES = frozenset({"single", "overlay", "side_by_side"})
+_PLAN_LAYOUT_ORDER = ("single", "overlay", "side_by_side")
+_PLAN_LAYOUT_META: dict[str, tuple[str, str]] = {
+    "single": ("ARTICLE_OUTLINED", "Single plan"),
+    "overlay": ("LAYERS_OUTLINED", "Overlay old and new"),
+    "side_by_side": ("__side_by_side__", "Old left, new right"),
+}
+_TEXT_LAYOUT_MODES = frozenset({"single", "side_by_side"})
+_TEXT_LAYOUT_ORDER = ("single", "side_by_side")
+_TEXT_LAYOUT_META: dict[str, tuple[str, str]] = {
+    "single": ("ARTICLE_OUTLINED", "Single document"),
+    "side_by_side": ("__side_by_side__", "Compare old and new"),
+}
+
+
+@dataclass(frozen=True)
+class _PlanPageLoad:
+    paths: list[Path] | None
+    page_total: int
+    error: str | None
+    pdf_abs: Path | None
 
 
 class MarkdownStudioAssetCompare:
@@ -50,17 +76,34 @@ class MarkdownStudioAssetCompare:
             return max(200.0, float(wrap.width))
         return 0.0
 
-    def _sync_compose_plan_viewport_width(self, avail: float) -> None:
+    def _compose_column_avail_height(self) -> float:
+        row = getattr(self, "_compose_centered_row", None)
+        if row is not None and float(row.height or 0) > 0:
+            return max(plan_picture_viewer._FOCUS_MIN_VIEWPORT_H, float(row.height))
+        wrap = getattr(self, "_compose_reading_wrap", None)
+        if wrap is not None and float(wrap.height or 0) > 0:
+            return max(plan_picture_viewer._FOCUS_MIN_VIEWPORT_H, float(wrap.height))
+        return 0.0
+
+    def _sync_compose_plan_viewport_size(self, avail_w: float, avail_h: float) -> None:
         viewer = getattr(self, "_compose_plan_focus_viewer", None)
         if viewer is None or not self._compose_plan_viewer_active():
             return
-        min_h = plan_picture_viewer._FOCUS_MIN_VIEWPORT_H
-        vh = float(getattr(viewer, "_viewport_h", 0) or 0)
-        if vh < min_h:
-            frame = getattr(viewer, "_page_frame", None)
-            if frame is not None and float(frame.height or 0) >= min_h:
-                vh = float(frame.height)
-        viewer.sync_viewport(avail, vh if vh >= min_h else None)
+        collapsed = bool(getattr(self, "_compose_plan_editor_collapsed", False))
+        editor_reserve = 0.0 if collapsed else 220.0
+        col_spacing = 0.0 if collapsed else 8.0
+        nav_h = 40.0
+        plan_h = max(
+            plan_picture_viewer._FOCUS_MIN_VIEWPORT_H,
+            float(avail_h) - editor_reserve - col_spacing - nav_h,
+        )
+        viewer.sync_viewport(max(200.0, float(avail_w)), plan_h)
+
+    def _sync_compose_plan_viewport_width(self, avail: float) -> None:
+        avail_h = self._compose_column_avail_height()
+        if avail_h <= 0:
+            avail_h = plan_picture_viewer._FOCUS_MIN_VIEWPORT_H + 48.0
+        self._sync_compose_plan_viewport_size(avail, avail_h)
 
     def _apply_compose_plan_layout_mode(self) -> None:
         """Plan PDF: stretch reading column edge-to-edge; markdown: centered reading width."""
@@ -109,10 +152,10 @@ class MarkdownStudioAssetCompare:
         col = stack.content
         if not isinstance(col, ft.Column):
             return
-        preview_on = getattr(self, "_focus_view_mode", "edit") == "preview"
+        wysiwyg_on = getattr(self, "_focus_view_mode", "wysiwyg") == "wysiwyg"
         want = (
             None
-            if self._compose_plan_viewer_active() or preview_on
+            if self._compose_plan_viewer_active() or wysiwyg_on
             else ft.ScrollMode.AUTO
         )
         if col.scroll != want:
@@ -169,16 +212,42 @@ class MarkdownStudioAssetCompare:
             return None
 
     def _is_plan_pdf_compare(self) -> bool:
+        if self._document_pdf_profile() == "plan":
+            return True
         if self._compare_candidate_source != "pdf_original":
             return False
         vid_prof = self._pdf_profile_for_version(self._compare_snapshot_version_id)
         if vid_prof == "plan":
             return True
-        if self._document_pdf_profile() == "plan":
-            return True
         from iterthink.services.plan_text_extract import is_plan_stub_markdown
 
         return is_plan_stub_markdown(self._compare_editor.value or "")
+
+    def _ensure_plan_pdf_compare_active(self) -> bool:
+        """Route History/Review to plan-PDF panes instead of stub-markdown paragraph diff."""
+        if not self.current_path or self._document_pdf_profile() != "plan":
+            return False
+        if self._compare_candidate_source in (
+            CompareCandidateSource.SPELL_PREVIEW,
+            CompareCandidateSource.DOCX_ORIGINAL,
+            CompareCandidateSource.IFC_ORIGINAL,
+        ):
+            return False
+        if self._compare_candidate_source == CompareCandidateSource.PDF_ORIGINAL:
+            return True
+        with session_scope() as s:
+            latest = content_repo.latest_pdf_version_for_document(s, self.current_path.resolve())
+        if latest is None:
+            return False
+        vid, _rel = latest
+        self._compare_snapshot_version_id = vid
+        self._compare_pdf_peer_snapshot_id = vid
+        self._pending_ai_accept_action_id = None
+        self._compare_candidate_source = CompareCandidateSource.PDF_ORIGINAL
+        with session_scope() as s:
+            self._compare_editor.value = content_repo.load_version_body(s, vid)
+        self._apply_plan_import_open_state()
+        return True
 
     def _plan_pdf_version_count(self) -> int:
         if not self.current_path:
@@ -187,15 +256,212 @@ class MarkdownStudioAssetCompare:
             pairs = content_repo.list_plan_pdf_version_options(s, self.current_path.resolve())
         return len(pairs)
 
-    def _apply_plan_import_open_state(self) -> None:
+    def _apply_plan_import_open_state(self, *, version_import: bool = False) -> None:
         """Focus + compare defaults after importing or selecting a plan PDF."""
         self._compose_plan_editor_collapsed = True
         self._compose_plan_show_labels = False
-        for pc in self._plan_compare_panels():
-            pc.overlay_switch.value = False
-            pc.side_by_side_switch.value = False
-        self._plan_overlay_defaults_set = True
+        self._plan_compare_show_labels = False
+        if version_import:
+            # Review after import version: show the plan viewer, not overlay diff.
+            self._plan_layout_mode = "single"
+        else:
+            self._plan_layout_mode = "overlay"
+            self._plan_overlay_defaults_set = True
         self._sync_plan_overlay_pane_visibility()
+        self._sync_plan_filename_chrome()
+
+    _PLAN_FOCUS_NAV_H = 40.0
+
+    def _on_compare_plan_pdf_layer_size(self, e: ft.LayoutSizeChangeEvent) -> None:
+        self._sync_plan_compare_focus_viewport(float(e.width), float(e.height), future=False)
+
+    def _on_compare_plan_overlay_host_size(self, e: ft.LayoutSizeChangeEvent) -> None:
+        self._sync_plan_compare_focus_viewport(float(e.width), float(e.height), future=False)
+
+    def _on_future_plan_overlay_host_size(self, e: ft.LayoutSizeChangeEvent) -> None:
+        self._sync_plan_compare_focus_viewport(float(e.width), float(e.height), future=True)
+
+    def _on_future_plan_single_host_size(self, e: ft.LayoutSizeChangeEvent) -> None:
+        self._sync_plan_compare_focus_viewport(float(e.width), float(e.height), future=True)
+
+    def _on_future_plan_split_row_size(self, e: ft.LayoutSizeChangeEvent) -> None:
+        self._sync_plan_compare_focus_viewport(float(e.width), float(e.height), future=True)
+
+    def _sync_plan_focus_viewport_from_active_host(self, *, future: bool) -> None:
+        """Best-effort viewport sync from the visible plan focus host after mount."""
+        if future:
+            if getattr(self, "_plan_overlay_mode", False):
+                host = getattr(self, "_future_plan_overlay_host", None)
+            elif getattr(self, "_plan_side_by_side_mode", False):
+                host = getattr(self, "_future_pdf_split_row", None)
+            elif self._review_plan_single_mode():
+                host = getattr(self, "_future_plan_single_host", None)
+            else:
+                host = getattr(self, "_future_plan_single_host", None)
+        elif getattr(self, "_plan_overlay_mode", False):
+            host = getattr(self, "_compare_pdf_overlay_host", None)
+        elif getattr(self, "_plan_side_by_side_mode", False):
+            host = getattr(self, "_compare_pdf_split_row", None)
+        else:
+            host = getattr(self, "_compare_pdf_split_row", None)
+        if host is None:
+            return
+        w = float(getattr(host, "width", 0) or 0)
+        h = float(getattr(host, "height", 0) or 0)
+        if w > 1.0 and h >= plan_picture_viewer._FOCUS_MIN_VIEWPORT_H:
+            self._sync_plan_compare_focus_viewport(w, h, future=future)
+
+    def _plan_focus_slots(self, *, future: bool) -> tuple[tuple[str, str], tuple[str, str], tuple[str, str]]:
+        if future:
+            return (
+                ("_future_plan_focus_left_slot", "_future_plan_focus_left"),
+                ("_future_plan_focus_right_slot", "_future_plan_focus_right"),
+                ("_future_plan_overlay_focus_slot", "_future_plan_overlay_focus"),
+            )
+        return (
+            ("_compare_plan_focus_left_slot", "_compare_plan_focus_left"),
+            ("_compare_plan_focus_right_slot", "_compare_plan_focus_right"),
+            ("_compare_plan_overlay_focus_slot", "_compare_plan_overlay_focus"),
+        )
+
+    def _future_plan_single_slot_pair(self) -> tuple[str, str]:
+        return ("_future_plan_single_slot", "_future_plan_focus_single")
+
+    def _review_plan_single_mode(self) -> bool:
+        if self._main_tab_index != TAB_FUTURE:
+            return False
+        mode = getattr(self, "_plan_layout_mode", "overlay")
+        if self._plan_pdf_version_count() < 2:
+            mode = "single"
+        return mode == "single" and not getattr(self, "_plan_overlay_mode", False)
+
+    def _active_plan_focus_viewers(self, *, future: bool) -> list[tuple[plan_picture_viewer.PlanFocusViewer, int]]:
+        left_s, right_s, overlay_s = self._plan_focus_slots(future=future)
+        out: list[tuple[plan_picture_viewer.PlanFocusViewer, int]] = []
+        if getattr(self, "_plan_overlay_mode", False):
+            viewer = getattr(self, overlay_s[1], None)
+            if viewer is not None:
+                out.append((viewer, 1))
+        elif getattr(self, "_plan_side_by_side_mode", False):
+            pair = getattr(self, "_future_plan_side_by_side_pair", None)
+            if pair is not None:
+                out.append((pair.left, 2))
+                out.append((pair.right, 2))
+                return out
+            for store in (left_s[1], right_s[1]):
+                viewer = getattr(self, store, None)
+                if viewer is not None:
+                    out.append((viewer, 2))
+        elif future and self._review_plan_single_mode():
+            _, single_store = self._future_plan_single_slot_pair()
+            viewer = getattr(self, single_store, None)
+            if viewer is not None:
+                out.append((viewer, 1))
+        else:
+            viewer = getattr(self, left_s[1], None)
+            if viewer is not None:
+                out.append((viewer, 1))
+        return out
+
+    def _sync_plan_compare_focus_viewport(
+        self, layer_w: float, layer_h: float, *, future: bool
+    ) -> None:
+        active = self._active_plan_focus_viewers(future=future)
+        if not active:
+            return
+        viewport_h = max(
+            plan_picture_viewer._FOCUS_MIN_VIEWPORT_H,
+            float(layer_h) - self._PLAN_FOCUS_NAV_H,
+        )
+        layer_w = max(200.0, float(layer_w))
+        cols = active[0][1]
+        spacing = 8.0 if cols > 1 else 0.0
+        col_w = max(200.0, (layer_w - spacing) / cols)
+        for viewer, _ in active:
+            if bool(getattr(viewer, "_viewer_interacting", False)):
+                continue
+            if (
+                viewer._viewport_w > 0
+                and abs(col_w - viewer._viewport_w) <= 0.5
+                and abs(viewport_h - viewer._viewport_h) <= 0.5
+                and float(viewer._image.width or 0) > 0
+            ):
+                continue
+            viewer.sync_viewport(col_w, viewport_h)
+
+    def _clear_plan_focus_pane(self, slot: ft.Container, store_name: str) -> None:
+        setattr(self, store_name, None)
+        slot.content = None
+
+    def _mount_plan_focus_viewer(
+        self,
+        slot: ft.Container,
+        store_name: str,
+        viewer: plan_picture_viewer.PlanFocusViewer,
+        *,
+        future: bool = False,
+        annotatable: bool = False,
+        defer_viewport_sync: bool = False,
+    ) -> None:
+        if future and annotatable:
+            viewer._on_place_comment = self._on_review_plan_place_comment
+            viewer._on_revision_cloud = self._on_review_plan_revision_cloud
+            orig_page_change = viewer._on_page_change
+
+            def _on_page(ix: int) -> None:
+                if orig_page_change is not None:
+                    orig_page_change(ix)
+                self._refresh_review_plan_annotations_overlay()
+
+            viewer._on_page_change = _on_page
+        setattr(self, store_name, viewer)
+        slot.content = viewer.root
+        pg = getattr(self, "page", None)
+        if pg is not None and not defer_viewport_sync:
+            pg.run_task(viewer.ensure_viewport_sync)
+        if future and annotatable:
+            self._refresh_review_plan_annotations_overlay()
+            if hasattr(self, "_sync_plan_review_comment_nav_btn"):
+                self._sync_plan_review_comment_nav_btn()
+        if hasattr(self, "_sync_plan_compare_labels_nav_btn"):
+            self._sync_plan_compare_labels_nav_btn()
+
+    def _mount_plan_focus_message(
+        self, slot: ft.Container, store_name: str, message: str
+    ) -> None:
+        self._clear_plan_focus_pane(slot, store_name)
+        slot.content = ft.Container(
+            padding=ft.padding.all(12),
+            content=ft.Text(message, color=ft.Colors.ORANGE_200, size=13),
+            expand=True,
+        )
+
+    def _clear_plan_focus_context(self, *, future: bool) -> None:
+        for slot_name, store_name in self._plan_focus_slots(future=future):
+            slot = getattr(self, slot_name, None)
+            if slot is not None:
+                self._clear_plan_focus_pane(slot, store_name)
+        if future:
+            single_slot_name, single_store = self._future_plan_single_slot_pair()
+            single_slot = getattr(self, single_slot_name, None)
+            if single_slot is not None:
+                self._clear_plan_focus_pane(single_slot, single_store)
+
+    def _plan_compare_label_options(
+        self,
+        base: tuple[int, str] | None,
+        cand: tuple[int, str] | None,
+    ) -> tuple[list, bool, bool]:
+        show_labels = bool(getattr(self, "_plan_compare_show_labels", False))
+        doc_path = self.current_path.resolve() if self.current_path else None
+        base_vid = int(base[0]) if base is not None else None
+        cand_vid = int(cand[0]) if cand is not None else None
+        text_changes: list = []
+        if doc_path is not None:
+            text_changes = self._plan_text_changes_for_versions(doc_path, base_vid, cand_vid)
+            self._plan_compare_text_changes = list(text_changes)
+        pg = getattr(self, "page", None)
+        return text_changes, show_labels, plan_hover_enabled(pg)
 
     @staticmethod
     def _plan_raw_pages_blocking(pdf_abs: Path) -> list[Path]:
@@ -261,13 +527,19 @@ class MarkdownStudioAssetCompare:
             )
 
     def _apply_compose_plan_editor_layout(self) -> None:
-        if getattr(self, "_focus_view_mode", "edit") == "preview":
+        if getattr(self, "_focus_view_mode", "wysiwyg") == "wysiwyg":
             return
         writing_slot = getattr(self, "_compose_writing_slot", None)
+        inner = getattr(self, "_compose_reading_inner", None)
         collapsed = bool(getattr(self, "_compose_plan_editor_collapsed", False))
         if not self._compose_plan_host.visible:
             if writing_slot is not None:
                 writing_slot.content = self._compose_editor_shell_wrapped
+                writing_slot.expand = True
+                writing_slot.height = None
+                writing_slot.visible = True
+            if inner is not None:
+                inner.spacing = 8
             self._compose_editor_shell_wrapped.visible = True
             self._compose_editor_shell_wrapped.expand = True
             self._compose_editor_shell_wrapped.height = None
@@ -277,18 +549,33 @@ class MarkdownStudioAssetCompare:
         self._compose_plan_host.expand = True
         if writing_slot is not None:
             writing_slot.content = self._compose_editor_shell_wrapped
-        if collapsed:
-            self._compose_editor_shell_wrapped.visible = False
-            self._compose_editor_shell_wrapped.height = 0
-        else:
-            self._compose_editor_shell_wrapped.visible = True
-            self._compose_editor_shell_wrapped.expand = False
-            self._compose_editor_shell_wrapped.height = 220
+            writing_slot.expand = False
+            if collapsed:
+                writing_slot.height = 0
+                writing_slot.visible = False
+                self._compose_editor_shell_wrapped.visible = False
+                self._compose_editor_shell_wrapped.height = 0
+            else:
+                writing_slot.height = 220
+                writing_slot.visible = True
+                self._compose_editor_shell_wrapped.visible = True
+                self._compose_editor_shell_wrapped.expand = False
+                self._compose_editor_shell_wrapped.height = 220
+        if inner is not None:
+            inner.spacing = 0 if collapsed else 8
         if writing_slot is not None and _ctrl_on_page(writing_slot):
             writing_slot.update()
+        if inner is not None and _ctrl_on_page(inner):
+            inner.update()
+        avail_w = self._compose_column_avail_width()
+        avail_h = self._compose_column_avail_height()
+        if avail_w > 0 and avail_h > 0:
+            self._sync_compose_plan_viewport_size(avail_w, avail_h)
 
     def _release_pdf_compare_disk_refs(self) -> None:
         """Drop rendered PDF page controls (``Image`` src may reference store/cache paths)."""
+        self._clear_plan_focus_context(future=False)
+        self._clear_plan_focus_context(future=True)
         for name in (
             "_compare_pdf_left_lv",
             "_compare_pdf_right_lv",
@@ -300,17 +587,6 @@ class MarkdownStudioAssetCompare:
                 lv.controls.clear()
                 if _ctrl_on_page(lv):
                     lv.update()
-        for pc in self._plan_compare_panels():
-            ov = getattr(pc, "overlay_list", None)
-            if ov is not None and isinstance(ov, ft.ListView):
-                ov.controls.clear()
-                if _ctrl_on_page(ov):
-                    ov.update()
-        fut_ov = getattr(self, "_future_plan_overlay_list", None)
-        if fut_ov is not None and isinstance(fut_ov, ft.ListView):
-            fut_ov.controls.clear()
-            if _ctrl_on_page(fut_ov):
-                fut_ov.update()
 
     def _detach_pdf_import_ui_for_store_delete(self) -> None:
         """Release viewers before ``purge_document_store_dirs`` removes PDF assets under STORE."""
@@ -318,6 +594,7 @@ class MarkdownStudioAssetCompare:
         if hasattr(self, "_pending_post_import_history_vid"):
             self._pending_post_import_history_vid = None
         self._compare_candidate_source = "draft"
+        self._cancel_and_teardown_compose_plan_viewer()
         self._release_pdf_compare_disk_refs()
         self._sync_compare_pdf_layers_visibility()
         self._sync_future_pdf_layers_visibility()
@@ -336,6 +613,8 @@ class MarkdownStudioAssetCompare:
 
     def _pdf_compare_paired_scroll_active(self) -> bool:
         """Cross-pane sync only when two scrollable columns are shown."""
+        if hasattr(self, "_is_plan_pdf_compare") and self._is_plan_pdf_compare():
+            return False
         if getattr(self, "_plan_overlay_mode", False) and not getattr(
             self, "_plan_side_by_side_mode", False
         ):
@@ -361,9 +640,6 @@ class MarkdownStudioAssetCompare:
         if not self._pdf_compare_paired_scroll_active():
             return None
         if self._main_tab_index == TAB_FUTURE:
-            fut_ov = getattr(self, "_future_plan_overlay_list", None)
-            if fut_ov is not None and fut_ov.visible:
-                return fut_ov
             lv = getattr(self, "_future_pdf_right_lv", None)
             return lv if lv is not None and lv.visible else None
         lv = getattr(self, "_compare_pdf_right_lv", None)
@@ -487,6 +763,13 @@ class MarkdownStudioAssetCompare:
         if fut_pc is not None:
             show_plan_bar = show and self._is_plan_pdf_compare()
             fut_pc.set_bar_visible(show_plan_bar)
+        chrome = getattr(self, "_review_difference_chrome_row", None)
+        if chrome is not None:
+            on_diff = self._main_tab_index == TAB_FUTURE and sub == 0
+            show_plan_pdf = show and self._is_plan_pdf_compare()
+            chrome.visible = on_diff and not show_plan_pdf
+            if _ctrl_on_page(chrome):
+                chrome.update()
         if _ctrl_on_page(self._future_pdf_layer):
             self._future_pdf_layer.update()
         if _ctrl_on_page(self._future_paragraph_layer):
@@ -531,9 +814,39 @@ class MarkdownStudioAssetCompare:
             if _ctrl_on_page(self._plan_compare.candidate_wrap):
                 self._plan_compare.candidate_wrap.update()
 
-    def _hide_compose_plan_surface(self) -> None:
-        self._compose_plan_host.visible = False
+    def _release_compose_plan_viewer_refs(self) -> None:
+        """Drop compose plan controls that reference PDF/PNG paths under STORE."""
         self._compose_plan_load_inflight_key = None
+        self._compose_plan_surface_key = None
+        self._compose_plan_focus_viewer = None
+        self._compose_plan_document_id = None
+        self._compose_plan_version_id = None
+        host = getattr(self, "_compose_plan_host", None)
+        if host is not None:
+            host.content = None
+
+    def _cancel_compose_plan_load(self) -> None:
+        self._compose_plan_load_gen = int(getattr(self, "_compose_plan_load_gen", 0)) + 1
+
+    def _cancel_and_teardown_compose_plan_viewer(self) -> None:
+        """Abort async plan load and unmount viewer before store assets are removed."""
+        self._cancel_compose_plan_load()
+        self._release_compose_plan_viewer_refs()
+        host = getattr(self, "_compose_plan_host", None)
+        if host is not None:
+            host.visible = False
+
+    def _hide_compose_plan_surface(self) -> None:
+        self._release_compose_plan_viewer_refs()
+        self._compose_plan_host.visible = False
+        writing_slot = getattr(self, "_compose_writing_slot", None)
+        if writing_slot is not None:
+            writing_slot.expand = True
+            writing_slot.height = None
+            writing_slot.visible = True
+        inner = getattr(self, "_compose_reading_inner", None)
+        if inner is not None:
+            inner.spacing = 8
         self._compose_editor_shell_wrapped.expand = True
         self._compose_editor_shell_wrapped.height = None
         self._apply_compose_plan_layout_mode()
@@ -600,20 +913,27 @@ class MarkdownStudioAssetCompare:
             )
         markers: list[plan_picture_viewer.PlanMarkerView] = []
         for a in anns:
-            bbox = (
-                a.cloud_bbox_norm()
-                if a.annotation_kind == plan_pdf_annotations.KIND_REVISION_CLOUD
-                else None
-            )
-            markers.append(
-                plan_picture_viewer.PlanMarkerView(
-                    kind=a.annotation_kind,
-                    page_index=int(a.plan_page_index),
-                    norm_x=float(a.plan_norm_x or 0.5),
-                    norm_y=float(a.plan_norm_y or 0.5),
-                    bbox=bbox,
+            if a.annotation_kind == plan_pdf_annotations.KIND_PIN:
+                markers.append(
+                    plan_picture_viewer.PlanMarkerView(
+                        kind=a.annotation_kind,
+                        page_index=int(a.plan_page_index),
+                        norm_x=float(a.plan_norm_x or 0.5),
+                        norm_y=float(a.plan_norm_y or 0.5),
+                        bbox=None,
+                    )
                 )
-            )
+            elif a.annotation_kind == plan_pdf_annotations.KIND_REVISION_CLOUD:
+                bbox = a.cloud_bbox_norm()
+                markers.append(
+                    plan_picture_viewer.PlanMarkerView(
+                        kind=a.annotation_kind,
+                        page_index=int(a.plan_page_index),
+                        norm_x=float(a.plan_norm_x or 0.5),
+                        norm_y=float(a.plan_norm_y or 0.5),
+                        bbox=bbox,
+                    )
+                )
         viewer.set_markers(markers)
 
     def _on_compose_plan_place_comment(self, u: float, v: float) -> None:
@@ -640,6 +960,8 @@ class MarkdownStudioAssetCompare:
             slot = int(ann.paragraph_index)
         self._compose_plan_document_id = doc_id
         self._compose_plan_version_id = vid
+        if hasattr(self, "_set_ki_comment_pick_mode"):
+            self._set_ki_comment_pick_mode(False)
         self._refresh_compose_plan_annotations_overlay()
         if hasattr(self, "_rebuild_ki_comments_list"):
             self._rebuild_ki_comments_list()
@@ -744,8 +1066,6 @@ class MarkdownStudioAssetCompare:
         self._compose_plan_focus_viewer = focus_viewer
         focus_viewer._on_page_change = self._on_compose_plan_viewer_page_changed
         focus_viewer._on_place_comment = self._on_compose_plan_place_comment
-        focus_viewer._on_revision_cloud = self._on_compose_plan_revision_cloud
-        focus_viewer._on_export_pdf = self._on_compose_plan_export_pdf
         focus_viewer.set_page(page_ix)
         self._compose_plan_page_index = focus_viewer.current_index
         self._compose_plan_surface_key = surface_key
@@ -768,6 +1088,7 @@ class MarkdownStudioAssetCompare:
         pg = getattr(self, "page", None)
         if pg is not None:
             pg.update()
+            pg.run_task(focus_viewer.ensure_viewport_sync)
 
     async def _refresh_compose_plan_surface_async(self) -> None:
         """Show zoom/pan PDF strip on Compose when latest stored PDF is profile ``plan``."""
@@ -825,40 +1146,43 @@ class MarkdownStudioAssetCompare:
         if pg is not None:
             pg.update()
 
-        def _load_base() -> tuple[list[Path], dict, list]:
-            pages = document_import.render_pdf_to_png_pages(pdf_abs, pdf_profile="plan")
+        def _load_first_page() -> tuple[list[Path], int, dict, list]:
+            total = document_import.count_pdf_pages(pdf_abs)
+            pages = document_import.render_pdf_to_png_pages(
+                pdf_abs, pdf_profile="plan", max_pages=1
+            )
             geometry = load_plan_text_sidecar(doc_path, vid) or {"pages": []}
             text_changes = self._compose_plan_text_changes(doc_path, vid, geometry)
-            return pages, geometry, text_changes
+            return pages, total, geometry, text_changes
 
         try:
-            base_pages, geometry, text_changes = await asyncio.to_thread(_load_base)
+            base_pages, page_total, geometry, text_changes = await asyncio.to_thread(
+                _load_first_page
+            )
         except BaseException as ex:
             if gen != getattr(self, "_compose_plan_load_gen", 0):
                 return
             self._hide_compose_plan_surface()
             self._snack(f"Could not load plan PDF: {ex}")
             return
-        finally:
-            if getattr(self, "_compose_plan_load_inflight_key", None) == surface_key:
-                self._compose_plan_load_inflight_key = None
 
         if gen != getattr(self, "_compose_plan_load_gen", 0):
+            if getattr(self, "_compose_plan_load_inflight_key", None) == surface_key:
+                self._compose_plan_load_inflight_key = None
             return
         if not base_pages:
-            if gen == getattr(self, "_compose_plan_load_gen", 0):
-                self._hide_compose_plan_surface()
-                self._snack("Plan PDF has no pages.")
+            if getattr(self, "_compose_plan_load_inflight_key", None) == surface_key:
+                self._compose_plan_load_inflight_key = None
+            self._hide_compose_plan_surface()
+            self._snack("Plan PDF has no pages.")
             return
 
         try:
             focus_viewer = plan_picture_viewer.build_plan_focus_viewer(
                 base_pages,
                 initial_page_index=page_ix,
+                expected_page_count=page_total,
                 on_page_change=self._on_compose_plan_viewer_page_changed,
-                on_place_comment=self._on_compose_plan_place_comment,
-                on_revision_cloud=self._on_compose_plan_revision_cloud,
-                on_export_pdf=self._on_compose_plan_export_pdf,
             )
             pg = getattr(self, "page", None)
             focus_viewer.set_text_changes(
@@ -872,14 +1196,65 @@ class MarkdownStudioAssetCompare:
                     self._show_compose_plan_page_async, self._compose_plan_page_index
                 )
         except BaseException as ex:
+            if getattr(self, "_compose_plan_load_inflight_key", None) == surface_key:
+                self._compose_plan_load_inflight_key = None
             if gen != getattr(self, "_compose_plan_load_gen", 0):
                 return
             self._hide_compose_plan_surface()
             self._snack(f"Could not load plan PDF: {ex}")
             return
+        finally:
+            if getattr(self, "_compose_plan_load_inflight_key", None) == surface_key:
+                self._compose_plan_load_inflight_key = None
 
         if gen != getattr(self, "_compose_plan_load_gen", 0):
             return
+
+        if page_total > len(base_pages):
+            self.page.run_task(
+                self._finish_compose_plan_pages_async,
+                gen,
+                pdf_abs,
+                page_total,
+                len(base_pages),
+            )
+
+    async def _finish_compose_plan_pages_async(
+        self,
+        gen: int,
+        pdf_abs: Path,
+        page_total: int,
+        rendered_count: int,
+    ) -> None:
+        """Rasterize remaining plan pages after the first page is on screen."""
+        if gen != getattr(self, "_compose_plan_load_gen", 0):
+            return
+        import_progress = getattr(self, "_import_plan_progress", None)
+
+        def _render_rest() -> list[Path]:
+            return document_import.render_pdf_to_png_pages(pdf_abs, pdf_profile="plan")
+
+        try:
+            if import_progress is not None:
+                await import_progress.set_message(
+                    f"Rendering page {rendered_count + 1}/{page_total}…"
+                )
+            all_pages = await asyncio.to_thread(_render_rest)
+        except BaseException as ex:
+            if gen == getattr(self, "_compose_plan_load_gen", 0):
+                self._snack(f"Could not finish rendering plan pages: {ex}")
+            return
+
+        if gen != getattr(self, "_compose_plan_load_gen", 0):
+            return
+        viewer = getattr(self, "_compose_plan_focus_viewer", None)
+        if viewer is None:
+            return
+        if len(all_pages) > rendered_count:
+            viewer.append_rendered_pages(all_pages[rendered_count:])
+        viewer.set_expected_page_count(page_total)
+        if import_progress is not None:
+            await import_progress.set_message(f"Rendered {page_total} pages.")
 
     async def _show_compose_plan_page_async(self, page_index: int) -> None:
         host = getattr(self, "_compose_plan_host", None)
@@ -930,13 +1305,8 @@ class MarkdownStudioAssetCompare:
         is_plan = self._is_plan_pdf_compare()
         show_bar = len(opts) >= 2 and is_plan
         for pc in self._plan_compare_panels():
-            if not show_bar:
-                pc.overlay_switch.value = False
-                pc.side_by_side_switch.value = False
             pc.baseline_dd.disabled = not show_bar
             pc.candidate_dd.disabled = not show_bar
-            pc.overlay_switch.disabled = not show_bar
-            pc.side_by_side_switch.disabled = not show_bar
         hist_show = show_bar and self._main_tab_index == TAB_HISTORY
         self._plan_compare.set_bar_visible(hist_show)
         fut_pc = getattr(self, "_plan_compare_future", None)
@@ -944,56 +1314,909 @@ class MarkdownStudioAssetCompare:
             fut_show = show_bar and self._main_tab_index == TAB_FUTURE
             fut_pc.set_bar_visible(fut_show)
         if is_plan and show_bar and not getattr(self, "_plan_overlay_defaults_set", False):
-            for pc in self._plan_compare_panels():
-                pc.overlay_switch.value = False
+            self._plan_layout_mode = "overlay"
             self._plan_overlay_defaults_set = True
         self._sync_plan_overlay_pane_visibility()
+        self._sync_plan_filename_chrome()
+        self._sync_plan_compare_labels_nav_btn()
         for pc in self._plan_compare_panels():
             if _ctrl_on_page(pc.baseline_dd):
                 pc.baseline_dd.update()
             if _ctrl_on_page(pc.candidate_dd):
                 pc.candidate_dd.update()
-            if _ctrl_on_page(pc.overlay_switch):
-                pc.overlay_switch.update()
-            if _ctrl_on_page(pc.side_by_side_switch):
-                pc.side_by_side_switch.update()
 
     def _active_plan_compare_panel(self):
         if self._main_tab_index == TAB_FUTURE:
             return getattr(self, "_plan_compare_future", None) or self._plan_compare
         return self._plan_compare
 
-    def _sync_plan_overlay_pane_visibility(self) -> None:
-        pc = self._active_plan_compare_panel()
-        side = bool(pc.side_by_side_switch.value)
-        multi_version = self._plan_pdf_version_count() >= 2
-        if multi_version:
-            self._plan_overlay_mode = not side
-            self._plan_side_by_side_mode = side
-            self._compare_pdf_left_lv.visible = self._plan_side_by_side_mode
-            self._compare_pdf_right_lv.visible = self._plan_side_by_side_mode
+    def _is_review_text_compare(self) -> bool:
+        return (
+            self._main_tab_index == TAB_FUTURE
+            and int(getattr(self, "_review_subtab_index", 0)) == 0
+            and self._compare_candidate_source != CompareCandidateSource.PDF_ORIGINAL
+        )
+
+    def _review_text_single_mode(self) -> bool:
+        if not self._is_review_text_compare():
+            return False
+        mode = getattr(self, "_plan_layout_mode", "side_by_side")
+        if mode not in _TEXT_LAYOUT_MODES:
+            mode = "side_by_side"
+        return mode == "single"
+
+    def _active_compare_layout_order(self) -> tuple[str, ...]:
+        if self._is_review_text_compare():
+            return _TEXT_LAYOUT_ORDER
+        return _PLAN_LAYOUT_ORDER
+
+    def _layout_mode_meta(self, mode: str) -> tuple[str, str]:
+        if self._is_review_text_compare():
+            return _TEXT_LAYOUT_META.get(mode, _TEXT_LAYOUT_META["side_by_side"])
+        return _PLAN_LAYOUT_META.get(mode, _PLAN_LAYOUT_META["overlay"])
+
+    def _compare_layout_multi(self) -> bool:
+        if self._is_review_text_compare():
+            return True
+        return self._plan_pdf_version_count() >= 2 if self.current_path else False
+
+    def _normalized_compare_layout_mode(self) -> str:
+        mode = getattr(self, "_plan_layout_mode", "overlay")
+        if self._is_review_text_compare():
+            if mode not in _TEXT_LAYOUT_MODES:
+                mode = "side_by_side"
+                self._plan_layout_mode = mode
+            return mode
+        multi = self._plan_pdf_version_count() >= 2 if self.current_path else False
+        if not multi:
+            mode = "single"
+            self._plan_layout_mode = "single"
+        return mode
+
+    def _plan_layout_chrome_active(self) -> bool:
+        if self._is_review_text_compare():
+            return True
+        return (
+            self._is_plan_pdf_compare()
+            and self._main_tab_index in (TAB_HISTORY, TAB_FUTURE)
+        )
+
+    def _review_plan_comment_nav_host(
+        self,
+    ) -> plan_picture_viewer.PlanFocusViewer | plan_picture_viewer.PlanFocusPairViewer | None:
+        if not self._review_plan_comment_placement_enabled():
+            return None
+        if getattr(self, "_plan_side_by_side_mode", False):
+            return getattr(self, "_future_plan_side_by_side_pair", None)
+        return self._review_plan_comment_viewer()
+
+    def _sync_plan_review_comment_nav_btn(self) -> None:
+        """Attach Review place-comment control to the active plan viewer bottom nav."""
+        btn = getattr(self, "_plan_review_comment_btn", None)
+        if btn is None:
+            return
+        show = self._plan_layout_chrome_active() and self._main_tab_index == TAB_FUTURE
+        enabled = show and self._review_plan_comment_placement_enabled()
+        nav_host = self._review_plan_comment_nav_host() if show else None
+        prev_host = getattr(self, "_plan_comment_nav_host", None)
+        if prev_host is not None and prev_host is not nav_host:
+            prev_host.set_nav_trailing([])
+        if nav_host is not None and enabled:
+            nav_host.set_nav_trailing([btn])
+            self._plan_comment_nav_host = nav_host
+            btn.visible = True
+            btn.disabled = False
         else:
-            # Single version (e.g. fresh import): full-width plan stack only.
-            self._plan_overlay_mode = False
-            self._plan_side_by_side_mode = False
-            self._compare_pdf_left_lv.visible = True
-            self._compare_pdf_right_lv.visible = False
+            if prev_host is not None:
+                prev_host.set_nav_trailing([])
+            self._plan_comment_nav_host = None
+            btn.visible = False
+            btn.disabled = True
+        if _ctrl_on_page(btn):
+            btn.update()
+
+    def _plan_compare_labels_nav_host(
+        self,
+    ) -> plan_picture_viewer.PlanFocusViewer | plan_picture_viewer.PlanFocusPairViewer | None:
+        if not self._is_plan_pdf_compare():
+            return None
+        future = self._main_tab_index == TAB_FUTURE
+        if getattr(self, "_plan_side_by_side_mode", False):
+            if future:
+                return getattr(self, "_future_plan_side_by_side_pair", None)
+            return None
+        if getattr(self, "_plan_overlay_mode", False):
+            _, overlay_store = self._plan_focus_slots(future=future)[2]
+            return getattr(self, overlay_store, None)
+        if future and self._review_plan_single_mode():
+            _, single_store = self._future_plan_single_slot_pair()
+            return getattr(self, single_store, None)
+        left_store = self._plan_focus_slots(future=future)[0][1]
+        return getattr(self, left_store, None)
+
+    def _sync_plan_compare_labels_nav_btn(self) -> None:
+        """Attach extracted-text toggle to the active plan compare bottom nav."""
+        btn = getattr(self, "_plan_compare_labels_btn", None)
+        if btn is None:
+            return
+        show = self._plan_layout_chrome_active() and self._is_plan_pdf_compare()
+        enabled = show and self._plan_pdf_version_count() >= 2
+        active = bool(getattr(self, "_plan_compare_show_labels", False))
+        btn.icon_color = config.PRIMARY_COLOR if active else config.ON_SURFACE_VARIANT
+        prev_hosts: list = list(getattr(self, "_plan_compare_labels_nav_hosts", []) or [])
+        for host in prev_hosts:
+            host.set_nav_trailing([])
+        hosts: list = []
+        if enabled:
+            nav_host = self._plan_compare_labels_nav_host()
+            if nav_host is not None:
+                nav_host.set_nav_trailing([btn])
+                hosts.append(nav_host)
+            elif getattr(self, "_plan_side_by_side_mode", False):
+                future = self._main_tab_index == TAB_FUTURE
+                right_store = self._plan_focus_slots(future=future)[1][1]
+                right_viewer = getattr(self, right_store, None)
+                if right_viewer is not None and hasattr(right_viewer, "set_nav_trailing"):
+                    right_viewer.set_nav_trailing([btn])
+                    hosts.append(right_viewer)
+            btn.visible = True
+            btn.disabled = False
+        else:
+            btn.visible = False
+            btn.disabled = True
+        self._plan_compare_labels_nav_hosts = hosts
+        if _ctrl_on_page(btn):
+            btn.update()
+
+    def _on_plan_compare_toggle_labels(self, _e: ft.ControlEvent) -> None:
+        self._plan_compare_show_labels = not bool(
+            getattr(self, "_plan_compare_show_labels", False)
+        )
+        self._sync_plan_compare_labels_nav_btn()
+        self._refresh_plan_compare_text_overlays()
+
+    def _refresh_plan_compare_text_overlays(self) -> None:
+        if not self._is_plan_pdf_compare() or self._plan_pdf_version_count() < 2:
+            return
+        show = bool(getattr(self, "_plan_compare_show_labels", False))
+        changes = list(getattr(self, "_plan_compare_text_changes", []) or []) if show else []
+        hover = plan_hover_enabled(getattr(self, "page", None))
+        future = self._main_tab_index == TAB_FUTURE
+        if getattr(self, "_plan_side_by_side_mode", False):
+            pair = getattr(self, "_future_plan_side_by_side_pair", None)
+            if pair is not None:
+                pair.left.set_text_changes(
+                    changes,
+                    overlay_mode="baseline",
+                    visible=bool(changes),
+                    hover_enabled=hover,
+                )
+                pair.right.set_text_changes(
+                    changes,
+                    overlay_mode="candidate",
+                    visible=bool(changes),
+                    hover_enabled=hover,
+                )
+                return
+            left_store, right_store = (
+                self._plan_focus_slots(future=future)[0][1],
+                self._plan_focus_slots(future=future)[1][1],
+            )
+            left_viewer = getattr(self, left_store, None)
+            right_viewer = getattr(self, right_store, None)
+            if left_viewer is not None:
+                left_viewer.set_text_changes(
+                    changes,
+                    overlay_mode="baseline",
+                    visible=bool(changes),
+                    hover_enabled=hover,
+                )
+            if right_viewer is not None:
+                right_viewer.set_text_changes(
+                    changes,
+                    overlay_mode="candidate",
+                    visible=bool(changes),
+                    hover_enabled=hover,
+                )
+            return
+        for viewer, _cols in self._active_plan_focus_viewers(future=future):
+            viewer.set_text_changes(
+                changes,
+                overlay_mode="candidate",
+                visible=bool(changes),
+                hover_enabled=hover,
+            )
+
+    def _plan_layout_menu_icon(self, mode: str) -> str:
+        icon_name, _label = self._layout_mode_meta(mode)
+        if icon_name == "__side_by_side__":
+            return ft.Icons.VIEW_COLUMN
+        return getattr(ft.Icons, icon_name, ft.Icons.LAYERS_OUTLINED)
+
+    def _plan_layout_mode_icon_control(self, layout_mode: str, *, size: int = 16) -> ft.Control:
+        icon_name, _ = self._layout_mode_meta(layout_mode)
+        if icon_name == "__side_by_side__":
+            return plan_picture_viewer.build_plan_side_by_side_icon(size=size)
+        return ft.Icon(
+            getattr(ft.Icons, icon_name, ft.Icons.LAYERS_OUTLINED),
+            size=size,
+            color=config.ON_SURFACE_VARIANT,
+        )
+
+    def _build_plan_layout_menu_items(self, mode: str, *, multi: bool) -> list[ft.PopupMenuItem]:
+        items: list[ft.PopupMenuItem] = []
+        for layout_mode in self._active_compare_layout_order():
+            if not multi and layout_mode != "single":
+                continue
+            _icon_name, label = self._layout_mode_meta(layout_mode)
+            active = layout_mode == mode
+            items.append(
+                ft.PopupMenuItem(
+                    content=ft.Row(
+                        [
+                            ft.Icon(
+                                ft.Icons.CHECK,
+                                size=16,
+                                color=config.PRIMARY_COLOR if active else ft.Colors.TRANSPARENT,
+                            ),
+                            self._plan_layout_mode_icon_control(layout_mode, size=16),
+                            ft.Text(label, size=13),
+                        ],
+                        spacing=8,
+                        tight=True,
+                    ),
+                    on_click=lambda _e, m=layout_mode: self._set_plan_layout_mode(
+                        m, user_chosen=True
+                    ),
+                )
+            )
+        return items
+
+    def _sync_plan_layout_menu_btn(self, *, multi: bool | None = None) -> None:
+        btn = getattr(self, "_plan_layout_menu_btn", None)
+        if btn is None:
+            return
+        if multi is None:
+            multi = self._compare_layout_multi()
+        mode = self._normalized_compare_layout_mode()
+        if not multi:
+            mode = "single"
+            self._plan_layout_mode = "single"
+        _icon_name, label = self._layout_mode_meta(mode)
+        if mode == "side_by_side":
+            btn.icon = None
+            btn.content = plan_picture_viewer.build_plan_side_by_side_icon(size=18)
+        else:
+            btn.content = None
+            btn.icon = self._plan_layout_menu_icon(mode)
+        btn.tooltip = label
+        btn.items = self._build_plan_layout_menu_items(mode, multi=multi)
+        if _ctrl_on_page(btn):
+            btn.update()
+
+    def _sync_plan_compare_baseline_chrome(self) -> None:
+        fut_pc = getattr(self, "_plan_compare_future", None)
+        if fut_pc is None:
+            return
+        hide = self._review_plan_single_mode()
+        for ctrl in (
+            getattr(fut_pc, "baseline_label", None),
+            getattr(fut_pc, "baseline_wrap", None),
+        ):
+            if ctrl is not None:
+                ctrl.visible = not hide
+                if _ctrl_on_page(ctrl):
+                    ctrl.update()
+
+    def _sync_review_text_layout_chrome(self) -> None:
+        hide_current = self._review_text_single_mode()
+        col = getattr(self, "_review_baseline_chrome_col", None)
+        if col is not None:
+            col.visible = not hide_current
+            if _ctrl_on_page(col):
+                col.update()
+
+    def _sync_plan_filename_chrome(self) -> None:
+        show_layout = self._plan_layout_chrome_active()
+        multi = self._compare_layout_multi()
+        menu_btn = getattr(self, "_plan_layout_menu_btn", None)
+        if menu_btn is not None:
+            menu_btn.visible = show_layout
+            if show_layout:
+                self._sync_plan_layout_menu_btn(multi=multi)
+            elif _ctrl_on_page(menu_btn):
+                menu_btn.update()
+        impact_btn = getattr(self, "_plan_region_impact_btn", None)
+        if impact_btn is not None:
+            impact_enabled = (
+                show_layout
+                and self._main_tab_index == TAB_FUTURE
+                and self._review_plan_change_regions_enabled()
+            )
+            impact_btn.visible = impact_enabled
+            impact_btn.disabled = not impact_enabled
+            if _ctrl_on_page(impact_btn):
+                impact_btn.update()
+        self._sync_plan_compare_baseline_chrome()
+        self._sync_review_text_layout_chrome()
+        self._sync_plan_review_comment_nav_btn()
+
+    def _set_plan_layout_mode(
+        self, mode: str, *, rebuild: bool = True, user_chosen: bool = False
+    ) -> None:
+        if self._is_review_text_compare():
+            if mode not in _TEXT_LAYOUT_MODES:
+                mode = "side_by_side"
+            self._plan_layout_mode = mode
+            if user_chosen:
+                self._text_review_user_layout_mode = mode
+            self._sync_plan_layout_menu_btn()
+            self._sync_plan_filename_chrome()
+            if rebuild and hasattr(self, "_rebuild_future_paragraph_ui"):
+                self._rebuild_future_paragraph_ui()
+            return
+        if mode not in _PLAN_LAYOUT_MODES:
+            mode = "overlay"
+        multi = self._plan_pdf_version_count() >= 2
+        if not multi:
+            mode = "single"
+        self._plan_layout_mode = mode
+        self._sync_plan_layout_menu_btn(multi=multi)
+        self._sync_plan_overlay_pane_visibility()
+        if mode == "overlay":
+            self._reset_review_plan_annotation_tool_modes()
+        self._sync_plan_filename_chrome()
+        if hasattr(self, "_sync_plan_compare_labels_nav_btn"):
+            self._sync_plan_compare_labels_nav_btn()
+        if not rebuild:
+            return
+        pg = getattr(self, "page", None)
+        if pg is None:
+            return
+        if self._main_tab_index == TAB_HISTORY:
+            pg.run_task(self._rebuild_compare_plan_pdf_panes_async)
+        elif self._main_tab_index == TAB_FUTURE:
+            pg.run_task(self._rebuild_future_plan_pdf_panes_async)
+
+    def _review_plan_annotations_enabled(self) -> bool:
+        if self._main_tab_index != TAB_FUTURE or not self._is_plan_pdf_compare():
+            return False
+        mode = getattr(self, "_plan_layout_mode", "overlay")
+        if self._plan_pdf_version_count() < 2:
+            mode = "single"
+        return mode in ("single", "side_by_side")
+
+    def _review_plan_change_regions_enabled(self) -> bool:
+        if self._main_tab_index != TAB_FUTURE or not self._is_plan_pdf_compare():
+            return False
+        if self._plan_pdf_version_count() < 2:
+            return False
+        # Region/impact overlay disabled in Review until stable across all layout
+        # modes (overlay, single, side-by-side). The boxes fight page nav and zoom.
+        return False
+
+    @staticmethod
+    def _snapshot_plan_page_paths(
+        paths: list[Path],
+        *,
+        mount_key: int,
+        prefix: str = "page",
+        label: str = "",
+        start_index: int = 0,
+        mount_dir: Path | None = None,
+    ) -> list[Path]:
+        """Copy plan PNGs to a viewer-local dir so cache rebuilds cannot unlink active src."""
+        if not paths:
+            return []
+        if mount_dir is None:
+            dir_name = f"viewer_{int(mount_key)}"
+            if label:
+                dir_name = f"{dir_name}_{label}"
+            mount_dir = paths[0].parent / dir_name
+        mount_dir.mkdir(parents=True, exist_ok=True)
+        stable: list[Path] = []
+        for i, src in enumerate(paths):
+            dest = mount_dir / f"{prefix}_{start_index + i + 1:04d}.png"
+            if (
+                not dest.is_file()
+                or dest.stat().st_mtime_ns < src.stat().st_mtime_ns
+                or dest.stat().st_size != src.stat().st_size
+            ):
+                shutil.copy2(src, dest)
+            stable.append(dest)
+        return stable
+
+    @staticmethod
+    def _snapshot_plan_overlay_paths(paths: list[Path], *, mount_key: int) -> list[Path]:
+        return MarkdownStudioAssetCompare._snapshot_plan_page_paths(
+            paths, mount_key=mount_key, prefix="overlay"
+        )
+
+    def _clear_stale_plan_slots_for_single(self, *, future: bool) -> None:
+        left_slot_name, left_store = self._plan_focus_slots(future=future)[0]
+        right_slot_name, right_store = self._plan_focus_slots(future=future)[1]
+        overlay_slot_name, overlay_store = self._plan_focus_slots(future=future)[2]
+        for slot_name, store_name in (
+            (left_slot_name, left_store),
+            (right_slot_name, right_store),
+            (overlay_slot_name, overlay_store),
+        ):
+            slot = getattr(self, slot_name, None)
+            if slot is not None:
+                self._clear_plan_focus_pane(slot, store_name)
+
+    def _clear_stale_plan_slots_for_side_by_side(self, *, future: bool) -> None:
+        overlay_slot_name, overlay_store = self._plan_focus_slots(future=future)[2]
+        overlay_slot = getattr(self, overlay_slot_name, None)
+        if overlay_slot is not None:
+            self._clear_plan_focus_pane(overlay_slot, overlay_store)
+        if future:
+            single_slot_name, single_store = self._future_plan_single_slot_pair()
+            single_slot = getattr(self, single_slot_name, None)
+            if single_slot is not None:
+                self._clear_plan_focus_pane(single_slot, single_store)
+            pair_slot = getattr(self, "_future_plan_side_by_side_slot", None)
+            if pair_slot is not None:
+                setattr(self, "_future_plan_side_by_side_pair", None)
+                setattr(self, "_future_plan_focus_left", None)
+                setattr(self, "_future_plan_focus_right", None)
+                pair_slot.content = None
+
+    def _plan_region_action_factory(
+        self, region: object
+    ) -> PlanRegionActionHandlers:
+        from iterthink.services.plan_change_regions import PlanChangeRegionView
+
+        assert isinstance(region, PlanChangeRegionView)
+        pg = getattr(self, "page", None)
+        rid = int(region.region_id)
+        pi = int(region.paragraph_index)
+
+        def _run_task(coro_fn, *args: object) -> None:
+            if pg is not None:
+                pg.run_task(coro_fn, *args)
+
+        return PlanRegionActionHandlers(
+            on_approve=lambda: _run_task(self._on_plan_region_approve_async, rid),
+            on_reject=lambda: _run_task(self._on_plan_region_reject_async, rid),
+            on_comment=lambda: _run_task(
+                self._open_ki_comments_for_paragraph_async, pi, False
+            ),
+            on_act=lambda: _run_task(self._on_plan_region_act_async, rid),
+        )
+
+    async def _reload_review_change_regions_from_db_async(self) -> None:
+        if not self._review_plan_change_regions_enabled():
+            await self._apply_change_regions_to_all_review_viewers_async([])
+            return
+        cand = self._compare_resolve_pdf_asset_right()
+        if cand is None:
+            await self._apply_change_regions_to_all_review_viewers_async([])
+            return
+        cand_vid, _rel = cand
+        with session_scope() as s:
+            anns = plan_pdf_annotations.list_change_regions_for_version(
+                s, content_version_id=int(cand_vid)
+            )
+            views = plan_pdf_annotations.annotations_to_region_views(anns)
+        await self._apply_change_regions_to_all_review_viewers_async(views)
+
+    async def _apply_change_regions_to_all_review_viewers_async(
+        self, views: list
+    ) -> None:
+        if not self._review_plan_change_regions_enabled():
+            return
+        factory = self._plan_region_action_factory
+        action_factory = factory if views else None
+
+        if getattr(self, "_plan_side_by_side_mode", False):
+            left_store = self._plan_focus_slots(future=True)[0][1]
+            right_store = self._plan_focus_slots(future=True)[1][1]
+            left_viewer = getattr(self, left_store, None)
+            right_viewer = getattr(self, right_store, None)
+            if left_viewer is not None:
+                left_viewer.set_change_regions([])
+                if _ctrl_on_page(left_viewer.root):
+                    left_viewer.root.update()
+            if right_viewer is not None:
+                await right_viewer.ensure_viewport_sync()
+                right_viewer.set_change_regions(views, action_factory=action_factory)
+                if _ctrl_on_page(right_viewer.root):
+                    right_viewer.root.update()
+            return
+
+        if self._review_plan_single_mode():
+            _, single_store = self._future_plan_single_slot_pair()
+            viewer = getattr(self, single_store, None)
+            if viewer is not None:
+                await viewer.ensure_viewport_sync()
+                viewer.set_change_regions(views, action_factory=action_factory)
+                if _ctrl_on_page(viewer.root):
+                    viewer.root.update()
+            return
+
+        for viewer, _cols in self._active_plan_focus_viewers(future=True):
+            await viewer.ensure_viewport_sync()
+            viewer.set_change_regions(views, action_factory=action_factory)
+            if _ctrl_on_page(viewer.root):
+                viewer.root.update()
+
+    async def _sync_review_change_regions_async(
+        self, *, snack_on_detect: bool = False
+    ) -> None:
+        if not self._review_plan_change_regions_enabled() or not self.current_path:
+            await self._apply_change_regions_to_all_review_viewers_async([])
+            return
+        base = self._compare_resolve_pdf_asset_baseline()
+        cand = self._compare_resolve_pdf_asset_right()
+        if base is None or cand is None:
+            await self._apply_change_regions_to_all_review_viewers_async([])
+            return
+        base_vid, _base_rel = base
+        cand_vid, _cand_rel = cand
+        if int(base_vid) == int(cand_vid):
+            await self._apply_change_regions_to_all_review_viewers_async([])
+            return
+        doc_path = self.current_path.resolve()
+
+        def _sync() -> tuple[int | None, list]:
+            with session_scope() as s:
+                doc = content_repo.get_document_by_resolved_path(s, doc_path)
+                if doc is None:
+                    return None, []
+                anns = sync_detected_change_regions(
+                    s,
+                    doc_path=doc_path,
+                    baseline_version_id=int(base_vid),
+                    candidate_version_id=int(cand_vid),
+                )
+                views = plan_pdf_annotations.annotations_to_region_views(anns)
+                return int(doc.id), views
+
+        doc_id, views = await asyncio.to_thread(_sync)
+        if doc_id is None:
+            return
+        self._review_plan_document_id = int(doc_id)
+        self._review_plan_version_id = int(cand_vid)
+        await self._apply_change_regions_to_all_review_viewers_async(views)
+        if hasattr(self, "_rebuild_ki_comments_list"):
+            self._rebuild_ki_comments_list()
+        if snack_on_detect:
+            active = sum(1 for v in views if not v.dismissed)
+            if active:
+                self._snack(f"Detected {active} changed area{'s' if active != 1 else ''}.")
+
+    async def _on_plan_region_approve_async(self, region_id: int) -> None:
+        with session_scope() as s:
+            plan_pdf_annotations.update_change_region_flags(
+                s, annotation_id=int(region_id), reviewed=True
+            )
+        await self._reload_review_change_regions_from_db_async()
+
+    async def _on_plan_region_reject_async(self, region_id: int) -> None:
+        with session_scope() as s:
+            plan_pdf_annotations.update_change_region_flags(
+                s, annotation_id=int(region_id), dismissed=True
+            )
+        await self._reload_review_change_regions_from_db_async()
+        if hasattr(self, "_rebuild_ki_comments_list"):
+            self._rebuild_ki_comments_list()
+
+    async def _run_plan_region_impact_batch_async(self) -> None:
+        await self._analyze_plan_regions_impact_async(region_ids=None)
+
+    async def _on_plan_region_act_async(self, region_id: int) -> None:
+        await self._analyze_plan_regions_impact_async(region_ids=[int(region_id)])
+
+    async def _analyze_plan_regions_impact_async(
+        self, *, region_ids: list[int] | None
+    ) -> None:
+        if not self._review_plan_change_regions_enabled() or not self.current_path:
+            self._snack("Plan compare with change regions is not active.")
+            return
+        base = self._compare_resolve_pdf_asset_baseline()
+        cand = self._compare_resolve_pdf_asset_right()
+        if base is None or cand is None:
+            self._snack("Select baseline and candidate plan versions.")
+            return
+        base_vid, _ = base
+        cand_vid, _ = cand
+        if int(base_vid) == int(cand_vid):
+            self._snack("Baseline and candidate must differ.")
+            return
+        ollama = getattr(self, "ollama", None)
+        if ollama is None:
+            self._snack("Ollama client is not available.")
+            return
+        from iterthink.services.plan_region_impact_runner import analyze_plan_change_regions
+
+        doc_path = self.current_path.resolve()
+        self._snack("Analyzing region impact…")
+
+        try:
+            with session_scope() as s:
+                results = await analyze_plan_change_regions(
+                    ollama,
+                    s,
+                    doc_path=doc_path,
+                    baseline_version_id=int(base_vid),
+                    candidate_version_id=int(cand_vid),
+                    region_ids=region_ids,
+                )
+        except BaseException as ex:
+            self._snack(f"Region impact failed: {ex}")
+            return
+        if hasattr(self, "_rebuild_ki_comments_list"):
+            self._rebuild_ki_comments_list()
+        await self._reload_review_change_regions_from_db_async()
+        if not results:
+            self._snack("No regions analyzed.")
+            return
+        self._snack(f"Analyzed {len(results)} changed area{'s' if len(results) != 1 else ''}.")
+
+    def _focus_review_plan_region(self, paragraph_index: int) -> None:
+        if not self._review_plan_change_regions_enabled():
+            return
+        ki_ctx = self._active_plan_ki_context()
+        if ki_ctx is None:
+            return
+        _doc_id, vid = ki_ctx
+        with session_scope() as s:
+            ann = plan_pdf_annotations.get_by_paragraph_index(
+                s,
+                content_version_id=int(vid),
+                paragraph_index=int(paragraph_index),
+            )
+        if ann is None or ann.annotation_kind != plan_pdf_annotations.KIND_CHANGE_REGION:
+            return
+        page_ix = int(ann.plan_page_index)
+        region_id = int(ann.id)
+        for viewer, _cols in self._active_plan_focus_viewers(future=True):
+            if int(viewer.current_index) != page_ix:
+                viewer.set_page(page_ix)
+            viewer.set_highlighted_region(region_id)
+
+    def _review_plan_comment_placement_enabled(self) -> bool:
+        return self._main_tab_index == TAB_FUTURE and self._is_plan_pdf_compare()
+
+    def _review_plan_comment_viewer(
+        self,
+    ) -> plan_picture_viewer.PlanFocusViewer | None:
+        """Active Review plan pane for pin placement (overlay, single, side-by-side)."""
+        if not self._review_plan_comment_placement_enabled():
+            return None
+        if getattr(self, "_plan_overlay_mode", False):
+            return getattr(self, "_future_plan_overlay_focus", None)
+        if self._plan_side_by_side_mode:
+            return getattr(self, "_future_plan_focus_right", None)
+        if self._review_plan_single_mode():
+            _, single_store = self._future_plan_single_slot_pair()
+            return getattr(self, single_store, None)
+        return getattr(self, "_future_plan_focus_left", None)
+
+    def _review_plan_annotatable_viewer(
+        self,
+    ) -> plan_picture_viewer.PlanFocusViewer | None:
+        if not self._review_plan_annotations_enabled():
+            return None
+        if self._plan_side_by_side_mode:
+            return getattr(self, "_future_plan_focus_right", None)
+        if self._review_plan_single_mode():
+            _, single_store = self._future_plan_single_slot_pair()
+            return getattr(self, single_store, None)
+        return getattr(self, "_future_plan_focus_left", None)
+
+    def _active_plan_ki_context(self) -> tuple[int, int] | None:
+        """``(document_id, version_id)`` for plan pins/clouds in KI Comments."""
+        if self._compose_plan_viewer_active():
+            doc_id = getattr(self, "_compose_plan_document_id", None)
+            vid = getattr(self, "_compose_plan_version_id", None)
+            if doc_id is not None and vid is not None:
+                return int(doc_id), int(vid)
+            ctx = self._compose_plan_version_context()
+            if ctx is not None:
+                return ctx[0], ctx[1]
+            return None
+        if self._main_tab_index == TAB_FUTURE and self._is_plan_pdf_compare():
+            doc_id = getattr(self, "_review_plan_document_id", None)
+            vid = getattr(self, "_review_plan_version_id", None)
+            if doc_id is not None and vid is not None:
+                return int(doc_id), int(vid)
+            ctx = self._review_plan_version_context()
+            if ctx is not None:
+                return ctx[0], ctx[1]
+        return None
+
+    def _review_plan_version_context(self) -> tuple[int, int, Path] | None:
+        if not self.current_path:
+            return None
+        resolved = self._compare_resolve_pdf_asset_right()
+        if resolved is None:
+            return None
+        vid, rel = resolved
+        try:
+            pdf_abs = content_repo.pdf_asset_abs_path(rel)
+        except (ValueError, OSError):
+            return None
+        if not pdf_abs.is_file():
+            return None
+        with session_scope() as s:
+            doc = content_repo.get_document_by_resolved_path(s, self.current_path.resolve())
+            if doc is None:
+                return None
+            doc_id = int(doc.id)
+        return doc_id, int(vid), pdf_abs
+
+    def _refresh_review_plan_annotations_overlay(self) -> None:
+        viewer = self._review_plan_comment_viewer()
+        ctx = self._review_plan_version_context()
+        if viewer is None or ctx is None:
+            return
+        _doc_id, vid, _pdf = ctx
+        with session_scope() as s:
+            anns = plan_pdf_annotations.list_for_plan_version(
+                s, content_version_id=vid
+            )
+        markers: list[plan_picture_viewer.PlanMarkerView] = []
+        for a in anns:
+            if a.annotation_kind == plan_pdf_annotations.KIND_PIN:
+                markers.append(
+                    plan_picture_viewer.PlanMarkerView(
+                        kind=a.annotation_kind,
+                        page_index=int(a.plan_page_index),
+                        norm_x=float(a.plan_norm_x or 0.5),
+                        norm_y=float(a.plan_norm_y or 0.5),
+                        bbox=None,
+                    )
+                )
+            elif a.annotation_kind == plan_pdf_annotations.KIND_REVISION_CLOUD:
+                bbox = a.cloud_bbox_norm()
+                markers.append(
+                    plan_picture_viewer.PlanMarkerView(
+                        kind=a.annotation_kind,
+                        page_index=int(a.plan_page_index),
+                        norm_x=float(a.plan_norm_x or 0.5),
+                        norm_y=float(a.plan_norm_y or 0.5),
+                        bbox=bbox,
+                    )
+                )
+        viewer.set_markers(markers)
+
+    def _on_review_plan_place_comment(self, u: float, v: float) -> None:
+        pg = getattr(self, "page", None)
+        if pg is not None:
+            pg.run_task(self._review_plan_place_comment_async, float(u), float(v))
+
+    async def _review_plan_place_comment_async(self, u: float, v: float) -> None:
+        ctx = self._review_plan_version_context()
+        viewer = self._review_plan_comment_viewer()
+        if ctx is None or viewer is None:
+            return
+        doc_id, vid, _pdf = ctx
+        page_ix = int(viewer.current_index)
+        with session_scope() as s:
+            ann = plan_pdf_annotations.insert_pin(
+                s,
+                content_version_id=vid,
+                plan_page_index=page_ix,
+                plan_norm_x=u,
+                plan_norm_y=v,
+                body="",
+            )
+            slot = int(ann.paragraph_index)
+        self._review_plan_document_id = doc_id
+        self._review_plan_version_id = vid
+        if hasattr(self, "_set_ki_comment_pick_mode"):
+            self._set_ki_comment_pick_mode(False)
+        self._refresh_review_plan_annotations_overlay()
+        if hasattr(self, "_rebuild_ki_comments_list"):
+            self._rebuild_ki_comments_list()
+        await self._open_ki_comments_for_paragraph_async(slot, True)
+
+    def _on_review_plan_revision_cloud(
+        self, x0: float, y0: float, x1: float, y1: float
+    ) -> None:
+        pg = getattr(self, "page", None)
+        if pg is not None:
+            pg.run_task(
+                self._review_plan_revision_cloud_async,
+                float(x0),
+                float(y0),
+                float(x1),
+                float(y1),
+            )
+
+    async def _review_plan_revision_cloud_async(
+        self, x0: float, y0: float, x1: float, y1: float
+    ) -> None:
+        ctx = self._review_plan_version_context()
+        viewer = self._review_plan_annotatable_viewer()
+        if ctx is None or viewer is None:
+            return
+        doc_id, vid, _pdf = ctx
+        page_ix = int(viewer.current_index)
+        with session_scope() as s:
+            plan_pdf_annotations.insert_revision_cloud(
+                s,
+                content_version_id=vid,
+                plan_page_index=page_ix,
+                x0=x0,
+                y0=y0,
+                x1=x1,
+                y1=y1,
+            )
+        self._review_plan_document_id = doc_id
+        self._review_plan_version_id = vid
+        self._refresh_review_plan_annotations_overlay()
+        if hasattr(self, "_rebuild_ki_comments_list"):
+            self._rebuild_ki_comments_list()
+        self._reset_review_plan_annotation_tool_modes()
+
+    def _reset_review_plan_annotation_tool_modes(self) -> None:
+        if hasattr(self, "_set_ki_comment_pick_mode"):
+            self._set_ki_comment_pick_mode(False)
+            return
+        viewer = self._review_plan_annotatable_viewer()
+        if viewer is not None:
+            viewer.set_interaction_mode("idle")
+        comment_btn = getattr(self, "_plan_review_comment_btn", None)
+        if comment_btn is not None:
+            comment_btn.icon_color = config.ON_SURFACE_VARIANT
+            if _ctrl_on_page(comment_btn):
+                comment_btn.update()
+
+    def _on_plan_review_comment_toggle(self, _e: ft.ControlEvent) -> None:
+        if self._review_plan_comment_viewer() is None and (
+            not hasattr(self, "_ki_comment_plan_viewer") or self._ki_comment_plan_viewer() is None
+        ):
+            return
+        active = not getattr(self, "_ki_comment_pick_mode", False)
+        if active:
+            if not self.right_open:
+                self.toggle_right()
+            if hasattr(self, "_set_ki_topic"):
+                self._set_ki_topic(KI_TOPIC_COMMENTS)
+            self._set_ki_comment_pick_mode(True)
+            self._snack("Click the plan to place a comment.")
+        else:
+            self._set_ki_comment_pick_mode(False)
+
+    def _ensure_text_review_compare_layout_default(self) -> None:
+        """Review markdown text defaults to side-by-side compare unless the user chose Single."""
+        if not self._is_review_text_compare():
+            return
+        user_mode = getattr(self, "_text_review_user_layout_mode", None)
+        target = user_mode if user_mode in _TEXT_LAYOUT_MODES else "side_by_side"
+        if getattr(self, "_plan_layout_mode", "overlay") != target:
+            self._set_plan_layout_mode(target, rebuild=False)
+
+    def _sync_plan_overlay_pane_visibility(self) -> None:
+        multi_version = self._plan_pdf_version_count() >= 2
+        mode = getattr(self, "_plan_layout_mode", "overlay")
+        plan_compare = self._is_plan_pdf_compare() or (
+            self._compare_candidate_source == CompareCandidateSource.PDF_ORIGINAL
+        )
+        if not multi_version and plan_compare:
+            mode = "single"
+            self._plan_layout_mode = "single"
+        elif self._is_review_text_compare():
+            mode = self._normalized_compare_layout_mode()
+        self._plan_overlay_mode = multi_version and mode == "overlay"
+        self._plan_side_by_side_mode = multi_version and mode == "side_by_side"
+        single_mode = mode == "single"
         right_col = getattr(self, "_compare_pdf_right_column", None)
         if right_col is not None:
-            right_col.visible = self._compare_pdf_right_lv.visible
-        fut_right = getattr(self, "_future_pdf_right_lv", None)
-        if fut_right is not None and self._main_tab_index == TAB_FUTURE:
-            fut_right.visible = self._plan_side_by_side_mode
-        self._plan_compare.overlay_list.visible = (
-            self._plan_overlay_mode and self._main_tab_index == TAB_HISTORY
-        )
+            right_col.visible = self._plan_side_by_side_mode
+        on_fut = self._main_tab_index == TAB_FUTURE
+        fut_single_host = getattr(self, "_future_plan_single_host", None)
+        if fut_single_host is not None:
+            fut_single_host.visible = on_fut and single_mode
         fut_host = getattr(self, "_future_plan_overlay_host", None)
         fut_split = getattr(self, "_future_pdf_split_row", None)
-        on_fut = self._main_tab_index == TAB_FUTURE
         if fut_host is not None:
             fut_host.visible = self._plan_overlay_mode and on_fut
         if fut_split is not None:
-            fut_split.visible = on_fut and not self._plan_overlay_mode
+            fut_split.visible = on_fut and self._plan_side_by_side_mode
         hist_host = getattr(self, "_compare_pdf_overlay_host", None)
         split = getattr(self, "_compare_pdf_split_row", None)
         if hist_host is not None:
@@ -1001,28 +2224,14 @@ class MarkdownStudioAssetCompare:
         if split is not None:
             split.visible = self._main_tab_index == TAB_HISTORY and not self._plan_overlay_mode
 
-    def _on_plan_overlay_changed(self, e: ft.ControlEvent | None = None) -> None:
-        pc = self._active_plan_compare_panel()
-        for other in self._plan_compare_panels():
-            if other is not pc:
-                other.overlay_switch.value = pc.overlay_switch.value
-                other.side_by_side_switch.value = pc.side_by_side_switch.value
-        self._sync_plan_overlay_pane_visibility()
-        if self._main_tab_index == TAB_HISTORY:
-            self._rebuild_compare_pdf_panes()
-        else:
-            self._rebuild_future_pdf_import_panes()
-        self.page.run_task(self._refresh_plan_overlay_async)
-
-    def _on_plan_side_by_side_changed(self, _e: ft.ControlEvent | None = None) -> None:
-        pc = self._active_plan_compare_panel()
-        if pc.side_by_side_switch.value:
-            pc.overlay_switch.value = False
-        self._on_plan_overlay_changed()
-
     async def _on_plan_pdf_baseline_async(self, _e: ft.ControlEvent | None = None) -> None:
         if self._plan_overlay_mode:
             await self._refresh_plan_overlay_async()
+        elif self._is_plan_pdf_compare():
+            if self._main_tab_index == TAB_FUTURE:
+                await self._rebuild_future_plan_pdf_panes_async()
+            else:
+                await self._rebuild_compare_plan_pdf_panes_async()
         else:
             self._rebuild_compare_pdf_panes()
 
@@ -1031,7 +2240,7 @@ class MarkdownStudioAssetCompare:
             await self._refresh_plan_overlay_async()
         elif self._is_plan_pdf_compare():
             if self._main_tab_index == TAB_FUTURE:
-                self._rebuild_future_plan_pdf_panes()
+                await self._rebuild_future_plan_pdf_panes_async()
             else:
                 await self._rebuild_compare_plan_pdf_panes_async()
         else:
@@ -1067,30 +2276,39 @@ class MarkdownStudioAssetCompare:
             return diff_pdfs_to_overlay_paths(pa, pb, pdf_profile="plan")
 
         paths, warn, confidences = await asyncio.to_thread(_run)
-        if gen != self._plan_overlay_gen:
+        if gen != self._plan_overlay_gen or not self._plan_overlay_mode:
             return
         self._plan_overlay_confidences = confidences
-        target_lv = self._plan_compare.overlay_list
-        if self._main_tab_index == TAB_FUTURE:
-            target_lv = getattr(self, "_future_plan_overlay_list", None) or target_lv
+        future = self._main_tab_index == TAB_FUTURE
+        _, _, overlay_slot = self._plan_focus_slots(future=future)
+        slot = getattr(self, overlay_slot[0])
         if not paths:
+            # Only the current (non-stale) build may tear down the live overlay.
+            if gen != self._plan_overlay_gen or not self._plan_overlay_mode:
+                return
             self._snack("Visual diff failed; showing side-by-side.")
-            pc = self._active_plan_compare_panel()
-            pc.side_by_side_switch.value = True
-            self._on_plan_side_by_side_changed()
+            self._set_plan_layout_mode("side_by_side")
             return
-        plan_compare_panel.populate_overlay_list(target_lv, paths)
+        display_paths = self._snapshot_plan_overlay_paths(paths, mount_key=gen)
+        base = self._compare_resolve_pdf_asset_baseline()
+        cand = self._compare_resolve_pdf_asset_right()
+        text_changes, show_labels, hover = self._plan_compare_label_options(base, cand)
+        viewer = plan_picture_viewer.build_plan_compare_focus_viewer(
+            display_paths,
+            text_changes=text_changes if show_labels else None,
+            text_overlay_visible=show_labels,
+            hover_enabled=hover,
+        )
+        self._mount_plan_focus_viewer(
+            slot, overlay_slot[1], viewer, future=future, annotatable=future
+        )
+        self._sync_plan_focus_viewport_from_active_host(future=future)
         if confidences and min(confidences) < 0.35:
             warn = (warn + " " if warn else "") + "Weak alignment on some pages."
-            pc = self._active_plan_compare_panel()
-            if not pc.side_by_side_switch.value:
-                pc.side_by_side_switch.value = True
-                self._sync_plan_overlay_pane_visibility()
-                self._rebuild_compare_pdf_panes() if self._main_tab_index == TAB_HISTORY else self._rebuild_future_pdf_import_panes()
         if warn:
             self._snack(warn)
-        if _ctrl_on_page(target_lv):
-            target_lv.update()
+        if _ctrl_on_page(slot):
+            slot.update()
 
     def _compare_resolve_pdf_asset(self) -> tuple[int, str] | None:
         """PDF version id and store relpath for the current Compare context."""
@@ -1179,6 +2397,164 @@ class MarkdownStudioAssetCompare:
             return None
         return pdf_abs
 
+    @staticmethod
+    def _plan_first_page_load_blocking(pdf_abs: Path) -> tuple[list[Path], int]:
+        total = document_import.count_pdf_pages(pdf_abs)
+        pages = document_import.render_pdf_to_png_pages(
+            pdf_abs, pdf_profile="plan", max_pages=1
+        )
+        return pages, total
+
+    async def _plan_first_page_load_async(
+        self, resolved: tuple[int, str] | None
+    ) -> _PlanPageLoad:
+        if resolved is None:
+            return _PlanPageLoad(None, 0, "No PDF asset for this comparison.", None)
+        pdf_abs = self._pdf_abs_for_resolved(resolved)
+        if pdf_abs is None:
+            return _PlanPageLoad(None, 0, "PDF file missing on disk.", None)
+        try:
+            pages, total = await asyncio.to_thread(
+                self._plan_first_page_load_blocking, pdf_abs
+            )
+        except BaseException as ex:
+            return _PlanPageLoad(None, 0, f"Could not render PDF: {ex}", pdf_abs)
+        if not pages:
+            return _PlanPageLoad(None, total, "PDF file missing on disk.", pdf_abs)
+        return _PlanPageLoad(pages, total, None, pdf_abs)
+
+    def _schedule_side_by_side_plan_finish(
+        self,
+        *,
+        mount_gen: int,
+        future: bool,
+        base_load: _PlanPageLoad,
+        cand_load: _PlanPageLoad,
+        base_mount_dir: Path | None,
+        cand_mount_dir: Path | None,
+        base_rendered: int,
+        cand_rendered: int,
+    ) -> None:
+        need_base = (
+            base_load.pdf_abs is not None
+            and base_mount_dir is not None
+            and base_load.page_total > base_rendered
+        )
+        need_cand = (
+            cand_load.pdf_abs is not None
+            and cand_mount_dir is not None
+            and cand_load.page_total > cand_rendered
+        )
+        if not need_base and not need_cand:
+            return
+        pg = getattr(self, "page", None)
+        if pg is None:
+            return
+        pg.run_task(
+            self._finish_side_by_side_plan_pages_async,
+            mount_gen,
+            future,
+            base_load.pdf_abs if need_base else None,
+            cand_load.pdf_abs if need_cand else None,
+            base_mount_dir,
+            cand_mount_dir,
+            base_rendered,
+            cand_rendered,
+            base_load.page_total if need_base else 0,
+            cand_load.page_total if need_cand else 0,
+        )
+
+    async def _finish_side_by_side_plan_pages_async(
+        self,
+        mount_gen: int,
+        future: bool,
+        base_pdf_abs: Path | None,
+        cand_pdf_abs: Path | None,
+        base_mount_dir: Path | None,
+        cand_mount_dir: Path | None,
+        base_rendered: int,
+        cand_rendered: int,
+        base_page_total: int,
+        cand_page_total: int,
+    ) -> None:
+        if mount_gen != int(getattr(self, "_plan_viewer_mount_gen", 0)):
+            return
+        if not getattr(self, "_plan_side_by_side_mode", False):
+            return
+
+        async def _render_full(pdf_abs: Path | None) -> list[Path] | None:
+            if pdf_abs is None:
+                return None
+            return await asyncio.to_thread(
+                document_import.render_pdf_to_png_pages, pdf_abs, pdf_profile="plan"
+            )
+
+        base_all, cand_all = await asyncio.gather(
+            _render_full(base_pdf_abs),
+            _render_full(cand_pdf_abs),
+        )
+        if mount_gen != int(getattr(self, "_plan_viewer_mount_gen", 0)):
+            return
+        if not getattr(self, "_plan_side_by_side_mode", False):
+            return
+
+        if future:
+            pair = getattr(self, "_future_plan_side_by_side_pair", None)
+            left_viewer = pair.left if pair is not None else None
+            right_viewer = pair.right if pair is not None else None
+        else:
+            _, left_store = self._plan_focus_slots(future=False)[0]
+            _, right_store = self._plan_focus_slots(future=False)[1]
+            left_viewer = getattr(self, left_store, None)
+            right_viewer = getattr(self, right_store, None)
+
+        if (
+            base_all
+            and base_mount_dir is not None
+            and left_viewer is not None
+            and base_rendered < len(base_all)
+        ):
+            extra = self._snapshot_plan_page_paths(
+                base_all[base_rendered:],
+                mount_key=mount_gen,
+                mount_dir=base_mount_dir,
+                start_index=base_rendered,
+            )
+            left_viewer.append_rendered_pages(extra)
+            if base_page_total > 0:
+                left_viewer.set_expected_page_count(base_page_total)
+
+        if (
+            cand_all
+            and cand_mount_dir is not None
+            and right_viewer is not None
+            and cand_rendered < len(cand_all)
+        ):
+            extra = self._snapshot_plan_page_paths(
+                cand_all[cand_rendered:],
+                mount_key=mount_gen,
+                mount_dir=cand_mount_dir,
+                start_index=cand_rendered,
+            )
+            right_viewer.append_rendered_pages(extra)
+            if cand_page_total > 0:
+                right_viewer.set_expected_page_count(cand_page_total)
+
+        if future and pair is not None:
+            pair.controller.sync_nav_chrome()
+
+    def _schedule_active_plan_viewport_sync(self, *, future: bool) -> None:
+        pg = getattr(self, "page", None)
+        if pg is None:
+            return
+        if future and getattr(self, "_plan_side_by_side_mode", False):
+            pair = getattr(self, "_future_plan_side_by_side_pair", None)
+            if pair is not None:
+                pg.run_task(pair.ensure_viewport_sync)
+                return
+        for viewer, _ in self._active_plan_focus_viewers(future=future):
+            pg.run_task(viewer.ensure_viewport_sync)
+
     def _plan_paths_for_resolved(
         self, resolved: tuple[int, str] | None
     ) -> tuple[list[Path] | None, str | None]:
@@ -1206,81 +2582,180 @@ class MarkdownStudioAssetCompare:
             return None, "PDF file missing on disk."
         return display, None
 
-    def _append_plan_side_by_side_panes(
+    async def _mount_plan_focus_side_by_side_async(
         self,
-        left_lv: ft.ListView,
-        right_lv: ft.ListView,
+        *,
+        future: bool,
         base: tuple[int, str] | None,
         cand: tuple[int, str] | None,
     ) -> None:
-        """Two columns: baseline left, candidate right; synced zoom/pan per page."""
-        left_lv.controls.clear()
-        right_lv.controls.clear()
-        base_paths, base_err = self._plan_paths_for_resolved(base)
-        cand_paths, cand_err = self._plan_paths_for_resolved(cand)
-        if base_paths is None and cand_paths is None:
-            msg = base_err or cand_err or "No PDF to compare."
-            left_lv.controls.append(
-                ft.Container(
+        self._clear_stale_plan_slots_for_side_by_side(future=future)
+        if future:
+            await self._mount_review_plan_side_by_side_pair_async(base=base, cand=cand)
+            return
+        left_slot_name, left_store = self._plan_focus_slots(future=future)[0]
+        right_slot_name, right_store = self._plan_focus_slots(future=future)[1]
+        left_slot = getattr(self, left_slot_name)
+        right_slot = getattr(self, right_slot_name)
+        base_load, cand_load = await asyncio.gather(
+            self._plan_first_page_load_async(base),
+            self._plan_first_page_load_async(cand),
+        )
+        mount_key = int(getattr(self, "_plan_viewer_mount_gen", 0))
+        if base_load.paths is None and cand_load.paths is None:
+            msg = base_load.error or cand_load.error or "No PDF to compare."
+            self._mount_plan_focus_message(left_slot, left_store, msg)
+            self._clear_plan_focus_pane(right_slot, right_store)
+            return
+        text_changes, show_labels, hover = self._plan_compare_label_options(base, cand)
+        base_mount_dir: Path | None = None
+        cand_mount_dir: Path | None = None
+        if base_load.paths is None:
+            self._mount_plan_focus_message(
+                left_slot, left_store, base_load.error or "No PDF."
+            )
+        else:
+            stable_base = self._snapshot_plan_page_paths(
+                base_load.paths, mount_key=mount_key, label="base"
+            )
+            base_mount_dir = stable_base[0].parent if stable_base else None
+            left_viewer = plan_picture_viewer.build_plan_compare_focus_viewer(
+                stable_base,
+                expected_page_count=base_load.page_total,
+                text_changes=text_changes if show_labels else None,
+                overlay_mode="baseline",
+                text_overlay_visible=show_labels,
+                hover_enabled=hover,
+            )
+            self._mount_plan_focus_viewer(
+                left_slot,
+                left_store,
+                left_viewer,
+                future=future,
+                defer_viewport_sync=True,
+            )
+        if cand_load.paths is None:
+            self._mount_plan_focus_message(
+                right_slot, right_store, cand_load.error or "No PDF."
+            )
+        else:
+            stable_cand = self._snapshot_plan_page_paths(
+                cand_load.paths, mount_key=mount_key, label="cand"
+            )
+            cand_mount_dir = stable_cand[0].parent if stable_cand else None
+            right_viewer = plan_picture_viewer.build_plan_compare_focus_viewer(
+                stable_cand,
+                expected_page_count=cand_load.page_total,
+                text_changes=text_changes if show_labels else None,
+                overlay_mode="candidate",
+                text_overlay_visible=show_labels,
+                hover_enabled=hover,
+            )
+            self._mount_plan_focus_viewer(
+                right_slot,
+                right_store,
+                right_viewer,
+                future=future,
+                annotatable=future,
+                defer_viewport_sync=True,
+            )
+        left_viewer = getattr(self, left_store, None)
+        right_viewer = getattr(self, right_store, None)
+        pg = getattr(self, "page", None)
+        if pg is not None and left_viewer is not None and right_viewer is not None:
+            plan_picture_viewer.wire_synced_focus_viewer_pair(
+                left_viewer, right_viewer, pg
+            )
+        self._schedule_side_by_side_plan_finish(
+            mount_gen=mount_key,
+            future=False,
+            base_load=base_load,
+            cand_load=cand_load,
+            base_mount_dir=base_mount_dir,
+            cand_mount_dir=cand_mount_dir,
+            base_rendered=len(base_load.paths or []),
+            cand_rendered=len(cand_load.paths or []),
+        )
+        self._sync_plan_focus_viewport_from_active_host(future=future)
+
+    async def _mount_review_plan_side_by_side_pair_async(
+        self,
+        *,
+        base: tuple[int, str] | None,
+        cand: tuple[int, str] | None,
+    ) -> None:
+        slot = getattr(self, "_future_plan_side_by_side_slot", None)
+        base_load, cand_load = await asyncio.gather(
+            self._plan_first_page_load_async(base),
+            self._plan_first_page_load_async(cand),
+        )
+        mount_key = int(getattr(self, "_plan_viewer_mount_gen", 0))
+        if base_load.paths is None and cand_load.paths is None:
+            msg = base_load.error or cand_load.error or "No PDF to compare."
+            if slot is not None:
+                setattr(self, "_future_plan_side_by_side_pair", None)
+                setattr(self, "_future_plan_focus_left", None)
+                setattr(self, "_future_plan_focus_right", None)
+                slot.content = ft.Container(
                     padding=ft.padding.all(12),
                     content=ft.Text(msg, color=ft.Colors.ORANGE_200, size=13),
+                    expand=True,
                 )
-            )
             return
-
-        show_labels = bool(getattr(self, "_compose_plan_show_labels", True))
-        doc_path = self.current_path.resolve() if self.current_path else None
-        base_vid = int(base[0]) if base is not None else None
-        cand_vid = int(cand[0]) if cand is not None else None
-        text_changes: list = []
-        if doc_path is not None and show_labels:
-            text_changes = self._plan_text_changes_for_versions(doc_path, base_vid, cand_vid)
-
-        pg = getattr(self, "page", None)
-        hover = plan_hover_enabled(pg)
-
-        def _append_column(
-            lv: ft.ListView,
-            paths: list[Path] | None,
-            err: str | None,
-            *,
-            iv_out: list[ft.InteractiveViewer],
-            overlay_mode: plan_picture_viewer.PlanTextOverlayMode,
-        ) -> None:
-            if paths is None:
-                lv.controls.append(
-                    ft.Container(
-                        padding=ft.padding.all(12),
-                        content=ft.Text(err or "No PDF.", color=ft.Colors.ORANGE_200, size=13),
-                    )
-                )
-                return
-            col, ivs, _overlays = plan_picture_viewer.plan_picture_compare_column(
-                paths,
-                text_changes=text_changes if show_labels else None,
-                overlay_mode=overlay_mode,
-                hover_enabled=hover,
-                text_overlay_visible=show_labels,
+        text_changes, show_labels, hover = self._plan_compare_label_options(base, cand)
+        stable_base: list[Path] = []
+        stable_cand: list[Path] = []
+        base_mount_dir: Path | None = None
+        cand_mount_dir: Path | None = None
+        if base_load.paths is not None:
+            stable_base = self._snapshot_plan_page_paths(
+                base_load.paths, mount_key=mount_key, label="base"
             )
-            iv_out.extend(ivs)
-            lv.controls.append(ft.Container(content=col, expand=True))
-
-        left_ivs: list[ft.InteractiveViewer] = []
-        right_ivs: list[ft.InteractiveViewer] = []
-        _append_column(left_lv, base_paths, base_err, iv_out=left_ivs, overlay_mode="baseline")
-        _append_column(right_lv, cand_paths, cand_err, iv_out=right_ivs, overlay_mode="candidate")
-
-        if pg is not None:
-            for i in range(min(len(left_ivs), len(right_ivs))):
-                plan_picture_viewer.wire_synced_interactive_viewer_pair(
-                    left_ivs[i], right_ivs[i], pg
-                )
-            pg.run_task(
-                self._seed_pdf_pair_scroll_metrics_async,
-                left_lv,
-                right_lv,
-                0.06,
+            base_mount_dir = stable_base[0].parent if stable_base else None
+        if cand_load.paths is not None:
+            stable_cand = self._snapshot_plan_page_paths(
+                cand_load.paths, mount_key=mount_key, label="cand"
             )
+            cand_mount_dir = stable_cand[0].parent if stable_cand else None
+
+        def _on_pair_page(_ix: int) -> None:
+            self._refresh_review_plan_annotations_overlay()
+
+        pair = plan_picture_viewer.build_plan_side_by_side_pair(
+            stable_base,
+            stable_cand,
+            left_expected_page_count=base_load.page_total if base_load.paths else None,
+            right_expected_page_count=cand_load.page_total if cand_load.paths else None,
+            left_text_changes=text_changes if show_labels else None,
+            right_text_changes=text_changes if show_labels else None,
+            left_overlay_mode="baseline",
+            right_overlay_mode="candidate",
+            text_overlay_visible=show_labels,
+            hover_enabled=hover,
+            on_page_change=_on_pair_page,
+            page=getattr(self, "page", None),
+        )
+        pair.right._on_place_comment = self._on_review_plan_place_comment
+        pair.right._on_revision_cloud = self._on_review_plan_revision_cloud
+        setattr(self, "_future_plan_side_by_side_pair", pair)
+        setattr(self, "_future_plan_focus_left", pair.left)
+        setattr(self, "_future_plan_focus_right", pair.right)
+        if slot is not None:
+            slot.content = pair.root
+        self._schedule_side_by_side_plan_finish(
+            mount_gen=mount_key,
+            future=True,
+            base_load=base_load,
+            cand_load=cand_load,
+            base_mount_dir=base_mount_dir,
+            cand_mount_dir=cand_mount_dir,
+            base_rendered=len(base_load.paths or []),
+            cand_rendered=len(cand_load.paths or []),
+        )
+        self._refresh_review_plan_annotations_overlay()
+        if hasattr(self, "_sync_plan_review_comment_nav_btn"):
+            self._sync_plan_review_comment_nav_btn()
+        self._sync_plan_focus_viewport_from_active_host(future=True)
 
     def _append_pdf_pages_to_list(
         self,
@@ -1425,17 +2900,24 @@ class MarkdownStudioAssetCompare:
             return
         self._compare_pdf_left_max_scroll = 1.0
         self._compare_pdf_right_max_scroll = 1.0
+        self._clear_plan_focus_context(future=True)
         self._future_pdf_left_lv.controls.clear()
         self._future_pdf_right_lv.controls.clear()
+        self._future_plan_focus_left_slot.content = self._future_pdf_left_lv
+        self._future_plan_focus_right_slot.content = self._future_pdf_right_lv
         body = self.editor.value or ""
         self._compare_editor.value = body
         resolved = self._compare_resolve_pdf_asset_right()
         self._append_pdf_pages_to_left_list(self._future_pdf_left_lv, resolved, pdf_profile="text")
         self._append_markdown_to_right_list(self._future_pdf_right_lv, body, editable_right=True)
-        if _ctrl_on_page(self._future_pdf_left_lv):
-            self._future_pdf_left_lv.update()
-        if _ctrl_on_page(self._future_pdf_right_lv):
-            self._future_pdf_right_lv.update()
+        for c in (
+            self._future_plan_focus_left_slot,
+            self._future_plan_focus_right_slot,
+            self._future_pdf_left_lv,
+            self._future_pdf_right_lv,
+        ):
+            if _ctrl_on_page(c):
+                c.update()
         if _ctrl_on_page(self._future_pdf_import_md_tf):
             self._future_pdf_import_md_tf.update()
         pg = getattr(self, "page", None)
@@ -1448,29 +2930,37 @@ class MarkdownStudioAssetCompare:
             )
 
     def _rebuild_future_plan_pdf_panes(self) -> None:
+        pg = getattr(self, "page", None)
+        if pg is not None:
+            pg.run_task(self._rebuild_future_plan_pdf_panes_async)
+
+    async def _rebuild_future_plan_pdf_panes_async(self) -> None:
         self._sync_plan_overlay_pane_visibility()
         self._refresh_plan_compare_bar()
-        self._future_pdf_left_lv.controls.clear()
-        self._future_pdf_right_lv.controls.clear()
-        fut_ov = getattr(self, "_future_plan_overlay_list", None)
-        if fut_ov is not None:
-            fut_ov.controls.clear()
+        self._plan_viewer_mount_gen = int(getattr(self, "_plan_viewer_mount_gen", 0)) + 1
         if self._plan_overlay_mode and self._plan_pdf_version_count() >= 2:
-            self.page.run_task(self._refresh_plan_overlay_async)
+            await self._refresh_plan_overlay_async()
         elif self._plan_side_by_side_mode:
             base = self._compare_resolve_pdf_asset_baseline()
             cand = self._compare_resolve_pdf_asset_right()
-            self._append_plan_side_by_side_panes(
-                self._future_pdf_left_lv, self._future_pdf_right_lv, base, cand
-            )
+            await self._mount_plan_focus_side_by_side_async(future=True, base=base, cand=cand)
         else:
             resolved = self._compare_resolve_pdf_asset_right()
-            self._append_pdf_pages_to_list(self._future_pdf_left_lv, resolved, pdf_profile="plan")
-        for lv in (self._future_pdf_left_lv, self._future_pdf_right_lv):
-            if _ctrl_on_page(lv):
-                lv.update()
-        if fut_ov is not None and _ctrl_on_page(fut_ov):
-            fut_ov.update()
+            await self._mount_plan_focus_single_async(future=True, resolved=resolved)
+        for slot_name, _ in self._plan_focus_slots(future=True):
+            slot = getattr(self, slot_name, None)
+            if slot is not None and _ctrl_on_page(slot):
+                slot.update()
+        pair_slot = getattr(self, "_future_plan_side_by_side_slot", None)
+        if pair_slot is not None and _ctrl_on_page(pair_slot):
+            pair_slot.update()
+        pg = getattr(self, "page", None)
+        if pg is not None:
+            pg.update()
+        if getattr(self, "_plan_side_by_side_mode", False):
+            self._schedule_active_plan_viewport_sync(future=True)
+        if self._review_plan_change_regions_enabled():
+            await self._sync_review_change_regions_async()
 
     def _rebuild_compare_pdf_panes(self) -> None:
         if self._compare_candidate_source == "docx_original":
@@ -1482,16 +2972,23 @@ class MarkdownStudioAssetCompare:
         self._sync_plan_overlay_pane_visibility()
         self._compare_pdf_left_max_scroll = 1.0
         self._compare_pdf_right_max_scroll = 1.0
+        self._clear_plan_focus_context(future=False)
         self._compare_pdf_left_lv.controls.clear()
         self._compare_pdf_right_lv.controls.clear()
+        self._compare_plan_focus_left_slot.content = self._compare_pdf_left_lv
+        self._compare_plan_focus_right_slot.content = self._compare_pdf_right_lv
         body = self._compare_editor.value or ""
         resolved = self._compare_resolve_pdf_asset_right()
         self._append_pdf_pages_to_left_list(self._compare_pdf_left_lv, resolved, pdf_profile="text")
         self._append_markdown_to_right_list(self._compare_pdf_right_lv, body, editable_right=False)
-        if _ctrl_on_page(self._compare_pdf_left_lv):
-            self._compare_pdf_left_lv.update()
-        if _ctrl_on_page(self._compare_pdf_right_lv):
-            self._compare_pdf_right_lv.update()
+        for c in (
+            self._compare_plan_focus_left_slot,
+            self._compare_plan_focus_right_slot,
+            self._compare_pdf_left_lv,
+            self._compare_pdf_right_lv,
+        ):
+            if _ctrl_on_page(c):
+                c.update()
         pg = getattr(self, "page", None)
         if pg is not None:
             pg.run_task(
@@ -1502,160 +2999,81 @@ class MarkdownStudioAssetCompare:
             )
 
     def _rebuild_compare_plan_pdf_panes(self) -> None:
-        self._sync_plan_overlay_pane_visibility()
-        self._refresh_plan_compare_bar()
-        self._compare_pdf_left_max_scroll = 1.0
-        self._compare_pdf_right_max_scroll = 1.0
-        self._compare_pdf_left_lv.controls.clear()
-        self._compare_pdf_right_lv.controls.clear()
-        if self._plan_overlay_mode and self._plan_pdf_version_count() >= 2:
-            self.page.run_task(self._refresh_plan_overlay_async)
-        elif self._plan_side_by_side_mode:
-            base = self._compare_resolve_pdf_asset_baseline()
-            cand = self._compare_resolve_pdf_asset_right()
-            self._append_plan_side_by_side_panes(
-                self._compare_pdf_left_lv, self._compare_pdf_right_lv, base, cand
-            )
-        else:
-            resolved = self._compare_resolve_pdf_asset_right()
-            self._append_pdf_pages_to_list(self._compare_pdf_left_lv, resolved, pdf_profile="plan")
-        for lv in (self._compare_pdf_left_lv, self._compare_pdf_right_lv):
-            if _ctrl_on_page(lv):
-                lv.update()
-
-    async def _append_plan_side_by_side_panes_async(
-        self,
-        left_lv: ft.ListView,
-        right_lv: ft.ListView,
-        base: tuple[int, str] | None,
-        cand: tuple[int, str] | None,
-    ) -> None:
-        left_lv.controls.clear()
-        right_lv.controls.clear()
-        base_paths, base_err = await self._plan_paths_for_resolved_async(base)
-        cand_paths, cand_err = await self._plan_paths_for_resolved_async(cand)
-        if base_paths is None and cand_paths is None:
-            msg = base_err or cand_err or "No PDF to compare."
-            left_lv.controls.append(
-                ft.Container(
-                    padding=ft.padding.all(12),
-                    content=ft.Text(msg, color=ft.Colors.ORANGE_200, size=13),
-                )
-            )
-            return
-
-        show_labels = bool(getattr(self, "_compose_plan_show_labels", True))
-        doc_path = self.current_path.resolve() if self.current_path else None
-        base_vid = int(base[0]) if base is not None else None
-        cand_vid = int(cand[0]) if cand is not None else None
-        text_changes: list = []
-        if doc_path is not None and show_labels:
-            text_changes = self._plan_text_changes_for_versions(doc_path, base_vid, cand_vid)
-
         pg = getattr(self, "page", None)
-        hover = plan_hover_enabled(pg)
-
-        def _append_column(
-            lv: ft.ListView,
-            paths: list[Path] | None,
-            err: str | None,
-            *,
-            iv_out: list[ft.InteractiveViewer],
-            overlay_mode: plan_picture_viewer.PlanTextOverlayMode,
-        ) -> None:
-            if paths is None:
-                lv.controls.append(
-                    ft.Container(
-                        padding=ft.padding.all(12),
-                        content=ft.Text(err or "No PDF.", color=ft.Colors.ORANGE_200, size=13),
-                    )
-                )
-                return
-            col, ivs, _overlays = plan_picture_viewer.plan_picture_compare_column(
-                paths,
-                text_changes=text_changes if show_labels else None,
-                overlay_mode=overlay_mode,
-                hover_enabled=hover,
-                text_overlay_visible=show_labels,
-            )
-            iv_out.extend(ivs)
-            lv.controls.append(ft.Container(content=col, expand=True))
-
-        left_ivs: list[ft.InteractiveViewer] = []
-        right_ivs: list[ft.InteractiveViewer] = []
-        _append_column(left_lv, base_paths, base_err, iv_out=left_ivs, overlay_mode="baseline")
-        _append_column(right_lv, cand_paths, cand_err, iv_out=right_ivs, overlay_mode="candidate")
         if pg is not None:
-            for i in range(min(len(left_ivs), len(right_ivs))):
-                plan_picture_viewer.wire_synced_interactive_viewer_pair(
-                    left_ivs[i], right_ivs[i], pg
-                )
-            pg.run_task(
-                self._seed_pdf_pair_scroll_metrics_async,
-                left_lv,
-                right_lv,
-                0.06,
-            )
+            pg.run_task(self._rebuild_compare_plan_pdf_panes_async)
 
-    async def _append_plan_pdf_list_async(
+    async def _mount_plan_focus_single_async(
         self,
-        lv: ft.ListView,
+        *,
+        future: bool,
         resolved: tuple[int, str] | None,
     ) -> None:
+        self._clear_stale_plan_slots_for_single(future=future)
+        if future:
+            slot_name, store_name = self._future_plan_single_slot_pair()
+        else:
+            slot_name, store_name = self._plan_focus_slots(future=False)[0]
+            right_slot_name, right_store = self._plan_focus_slots(future=False)[1]
+            self._clear_plan_focus_pane(
+                getattr(self, right_slot_name), right_store
+            )
+        slot = getattr(self, slot_name)
         if resolved is None:
-            lv.controls.append(
-                ft.Container(
-                    padding=ft.padding.all(12),
-                    content=ft.Text(
-                        "No PDF asset for this comparison.",
-                        color=ft.Colors.ORANGE_200,
-                        size=13,
-                    ),
-                )
+            self._mount_plan_focus_message(
+                slot, store_name, "No PDF asset for this comparison."
             )
             return
         try:
             display = await self._plan_display_pages_for_resolved_async(resolved)
         except BaseException as ex:
-            lv.controls.append(
-                ft.Container(
-                    padding=ft.padding.all(12),
-                    content=ft.Text(f"Could not render PDF: {ex}", color=ft.Colors.RED_200, size=12),
-                )
-            )
+            self._mount_plan_focus_message(slot, store_name, f"Could not render PDF: {ex}")
             return
         if not display:
-            lv.controls.append(
-                ft.Container(
-                    padding=ft.padding.all(12),
-                    content=ft.Text("PDF file missing on disk.", color=ft.Colors.RED_200, size=13),
-                )
-            )
+            self._mount_plan_focus_message(slot, store_name, "PDF file missing on disk.")
             return
-        pic_col = plan_picture_viewer.plan_picture_column(display, inner_scroll=False)
-        lv.controls.append(ft.Container(content=pic_col, expand=True))
+        mount_key = int(getattr(self, "_plan_viewer_mount_gen", 0))
+        stable = self._snapshot_plan_page_paths(display, mount_key=mount_key, label="single")
+        base = self._compare_resolve_pdf_asset_baseline()
+        cand = self._compare_resolve_pdf_asset_right()
+        text_changes, show_labels, hover = self._plan_compare_label_options(base, cand)
+        viewer = plan_picture_viewer.build_plan_compare_focus_viewer(
+            stable,
+            text_changes=text_changes if show_labels else None,
+            text_overlay_visible=show_labels,
+            hover_enabled=hover,
+        )
+        self._mount_plan_focus_viewer(
+            slot,
+            store_name,
+            viewer,
+            future=future,
+            annotatable=future,
+        )
+        self._sync_plan_focus_viewport_from_active_host(future=future)
 
     async def _rebuild_compare_plan_pdf_panes_async(self) -> None:
         self._sync_plan_overlay_pane_visibility()
         self._refresh_plan_compare_bar()
-        self._compare_pdf_left_max_scroll = 1.0
-        self._compare_pdf_right_max_scroll = 1.0
-        self._compare_pdf_left_lv.controls.clear()
-        self._compare_pdf_right_lv.controls.clear()
+        self._plan_viewer_mount_gen = int(getattr(self, "_plan_viewer_mount_gen", 0)) + 1
         if self._plan_overlay_mode and self._plan_pdf_version_count() >= 2:
-            self.page.run_task(self._refresh_plan_overlay_async)
+            await self._refresh_plan_overlay_async()
         elif self._plan_side_by_side_mode:
             base = self._compare_resolve_pdf_asset_baseline()
             cand = self._compare_resolve_pdf_asset_right()
-            await self._append_plan_side_by_side_panes_async(
-                self._compare_pdf_left_lv, self._compare_pdf_right_lv, base, cand
-            )
+            await self._mount_plan_focus_side_by_side_async(future=False, base=base, cand=cand)
         else:
             resolved = self._compare_resolve_pdf_asset_right()
-            await self._append_plan_pdf_list_async(self._compare_pdf_left_lv, resolved)
-        for lv in (self._compare_pdf_left_lv, self._compare_pdf_right_lv):
-            if _ctrl_on_page(lv):
-                lv.update()
+            await self._mount_plan_focus_single_async(future=False, resolved=resolved)
+        for slot_name, _ in self._plan_focus_slots(future=False):
+            slot = getattr(self, slot_name, None)
+            if slot is not None and _ctrl_on_page(slot):
+                slot.update()
+        pg = getattr(self, "page", None)
+        if pg is not None:
+            pg.update()
+        if getattr(self, "_plan_side_by_side_mode", False):
+            self._schedule_active_plan_viewport_sync(future=False)
 
     async def _rebuild_compare_view_async(self) -> None:
         source = self._compare_candidate_source
@@ -1696,6 +3114,8 @@ class MarkdownStudioAssetCompare:
             if bool(getattr(self, "_compose_plan_show_labels", False)):
                 self._compose_plan_surface_key = None
                 self._refresh_compose_plan_surface()
+            if self._review_plan_change_regions_enabled():
+                await self._sync_review_change_regions_async(snack_on_detect=True)
 
     def _rebuild_compare_docx_panes(self) -> None:
         """History: older snapshot extraction left, History newer-side text right."""

@@ -36,6 +36,7 @@ SETTINGS_SPELLCHECK_LANGUAGE = "spellcheck_language"
 SETTINGS_PROMPTS_BUNDLED_DISMISSED = "prompts_bundled_dismissed"
 SETTINGS_PROMPTS_REMOVED_IDS = "prompts_removed_ids"
 SETTINGS_TOKEN_COST_PERIOD = "token_cost_period"
+SETTINGS_YOURCOMPANYOS_API_BASE_URL = "yourcompanyos_api_base_url"
 
 
 def ensure_store_dir() -> None:

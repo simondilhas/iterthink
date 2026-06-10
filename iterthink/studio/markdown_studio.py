@@ -58,7 +58,12 @@ from .constants import (
 from .explorer import MarkdownStudioExplorer, first_markdown_in_tree
 from .search_results_ui import MarkdownStudioSearchResults
 from .focus_area import MarkdownStudioCompose
-from .history import CompareCandidateSource, MarkdownStudioCompareText
+from .history import (
+    CompareCandidateSource,
+    MarkdownStudioCompareText,
+    build_history_snapshot_dropdown_options,
+    history_compare_snapshots,
+)
 from .ki_comments import paragraph_comment_label, plan_comment_list_label, sorted_comment_rows
 from .ki_sidebar import KI_TOPIC_STRIP_DISCUSS_ICON, MarkdownStudioKiSidebar
 from .llm_backend import MarkdownStudioLlmBackend, build_llm_tier_tabs, sync_privacy_shield_icon
@@ -68,6 +73,7 @@ from .main_workspace_tabs import MainWorkspaceTabsMixin
 from .shell import MarkdownStudioShell
 from .content_tree import MarkdownStudioContentTree
 from .sidebars import MarkdownStudioSidebars
+from .components import action_rail_icon_button_style
 from .util import (
     KI_TIERS,
     ctrl_on_page as _ctrl_on_page,
@@ -126,6 +132,9 @@ class MarkdownStudio(
         self.company_openai_base_url: str = (
             store_db.settings_get(self._db, store_db.SETTINGS_COMPANY_OPENAI_BASE_URL) or "https://api.openai.com/v1"
         )
+        self.yourcompanyos_api_base_url: str = (
+            store_db.settings_get(self._db, store_db.SETTINGS_YOURCOMPANYOS_API_BASE_URL) or ""
+        ).strip()
         self.cloud_anthropic_model: str = (
             (store_db.settings_get(self._db, store_db.SETTINGS_CLOUD_ANTHROPIC_MODEL) or "").strip()
         )
@@ -226,9 +235,16 @@ class MarkdownStudio(
         self._plan_overlay_gen: int = 0
         self._plan_overlay_confidences: list[float] = []
         self._plan_side_by_side_mode: bool = False
+        self._plan_layout_mode: str = "overlay"
         self._plan_overlay_defaults_set: bool = False
+        self._text_review_user_layout_mode: str | None = None
+        self._review_plan_document_id: int | None = None
+        self._review_plan_version_id: int | None = None
         self._compose_plan_editor_collapsed: bool = False
         self._compose_plan_show_labels: bool = True
+        self._plan_compare_show_labels: bool = False
+        self._plan_compare_text_changes: list = []
+        self._plan_compare_labels_nav_hosts: list = []
         self._skip_compose_plan_refresh_on_tab: bool = False
         self._compose_plan_page_index: int = 0
         self._compose_plan_focus_viewer = None
@@ -346,27 +362,15 @@ class MarkdownStudio(
             content=self._compose_editor_and_actions_stack,
             expand=True,
         )
-        self._focus_view_mode: Literal["edit", "preview"] = "edit"
+        self._focus_view_mode: Literal["wysiwyg", "source"] = "wysiwyg"
+        self._wysiwyg_controller = None
+        self._compose_wysiwyg_host = None
         self._compose_preview_md = ft.Markdown(
             value="",
             selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_FLAVORED,
             soft_line_break=True,
             md_style_sheet=ui_theme.compose_preview_markdown_style_sheet(),
-        )
-        self._compose_preview_host = ft.Container(
-            expand=True,
-            padding=ft.padding.only(
-                left=COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX,
-                right=COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX,
-                top=COMPOSE_EDITOR_CONTENT_PAD_TOP_PX,
-                bottom=0,
-            ),
-            content=ft.Column(
-                [self._compose_preview_md],
-                scroll=ft.ScrollMode.AUTO,
-                expand=True,
-            ),
         )
         self._compose_writing_slot = ft.Container(
             expand=True,
@@ -429,8 +433,6 @@ class MarkdownStudio(
         self._plan_compare = plan_compare_panel.build_plan_compare_panel(
             on_baseline=lambda e: self.page.run_task(self._on_plan_pdf_baseline_async, e),
             on_candidate=lambda e: self.page.run_task(self._on_plan_pdf_candidate_async, e),
-            on_overlay=self._on_plan_overlay_changed,
-            on_side_by_side=self._on_plan_side_by_side_changed,
             on_hover_baseline=self._on_plan_baseline_dropdown_hover,
             on_hover_candidate=self._on_plan_candidate_dropdown_hover,
             on_baseline_focus=lambda _e: self._set_plan_compare_dropdown_focused(True),
@@ -446,8 +448,6 @@ class MarkdownStudio(
         self._plan_compare_future = plan_compare_panel.build_plan_compare_panel(
             on_baseline=lambda e: self.page.run_task(self._on_plan_pdf_baseline_async, e),
             on_candidate=lambda e: self.page.run_task(self._on_plan_pdf_candidate_async, e),
-            on_overlay=self._on_plan_overlay_changed,
-            on_side_by_side=self._on_plan_side_by_side_changed,
             on_hover_baseline=self._on_plan_baseline_dropdown_hover,
             on_hover_candidate=self._on_plan_candidate_dropdown_hover,
             on_baseline_focus=lambda _e: self._set_plan_compare_dropdown_focused(True),
@@ -611,22 +611,27 @@ class MarkdownStudio(
             padding=ft.padding.all(8),
             on_scroll=self._on_compare_pdf_scroll_right,
         )
+        self._compare_plan_focus_left: object | None = None
+        self._compare_plan_focus_right: object | None = None
+        self._compare_plan_overlay_focus: object | None = None
+        self._compare_plan_focus_left_slot = ft.Container(expand=True)
+        self._compare_plan_focus_right_slot = ft.Container(expand=True)
+        self._compare_plan_overlay_focus_slot = ft.Container(expand=True)
         self._plan_compare.overlay_list.visible = False
-        self._plan_compare.overlay_list.on_scroll = self._on_compare_pdf_scroll_right
-        self._compare_pdf_right_column = ft.Column(
-            [self._compare_pdf_right_lv],
+        self._compare_pdf_right_column = ft.Container(
+            content=self._compare_plan_focus_right_slot,
             expand=True,
-            spacing=0,
         )
         self._compare_pdf_overlay_host = ft.Container(
-            content=self._plan_compare.overlay_list,
+            content=self._compare_plan_overlay_focus_slot,
             expand=True,
             visible=False,
+            on_size_change=self._on_compare_plan_overlay_host_size,
         )
         self._compare_pdf_split_row = ft.Row(
             [
                 ft.Container(
-                    content=self._compare_pdf_left_lv,
+                    content=self._compare_plan_focus_left_slot,
                     expand=True,
                     border=ft.border.all(1, ui_theme.outline_muted(alpha=0.38)),
                     border_radius=8,
@@ -649,6 +654,7 @@ class MarkdownStudio(
             ),
             expand=True,
             visible=False,
+            on_size_change=self._on_compare_plan_pdf_layer_size,
         )
         self._compare_editor_holder = ft.Container(content=self._compare_editor, visible=False, height=0)
         def _make_result_card_overlay() -> ft.Container:
@@ -733,40 +739,38 @@ class MarkdownStudio(
             padding=ft.padding.all(8),
             on_scroll=self._on_future_pdf_scroll_right,
         )
-        self._future_plan_overlay_list = ft.ListView(
+        self._future_plan_focus_left: object | None = None
+        self._future_plan_focus_right: object | None = None
+        self._future_plan_side_by_side_pair: object | None = None
+        self._future_plan_focus_single: object | None = None
+        self._future_plan_overlay_focus: object | None = None
+        self._future_plan_focus_left_slot = ft.Container(expand=True)
+        self._future_plan_focus_right_slot = ft.Container(expand=True)
+        self._future_plan_side_by_side_slot = ft.Container(expand=True)
+        self._future_plan_single_slot = ft.Container(expand=True)
+        self._future_plan_overlay_focus_slot = ft.Container(expand=True)
+        self._future_plan_single_host = ft.Container(
+            content=self._future_plan_single_slot,
             expand=True,
-            spacing=8,
-            padding=ft.padding.all(8),
             visible=False,
-            on_scroll=self._on_compare_pdf_scroll_right,
+            on_size_change=self._on_future_plan_single_host_size,
         )
         self._future_plan_overlay_host = ft.Container(
-            content=self._future_plan_overlay_list,
+            content=self._future_plan_overlay_focus_slot,
             expand=True,
             visible=False,
+            on_size_change=self._on_future_plan_overlay_host_size,
         )
-        self._future_pdf_split_row = ft.Row(
-            [
-                ft.Container(
-                    content=self._future_pdf_left_lv,
-                    expand=True,
-                    border=ft.border.all(1, ui_theme.outline_muted(alpha=0.38)),
-                    border_radius=8,
-                ),
-                ft.Container(
-                    content=self._future_pdf_right_lv,
-                    expand=True,
-                    border=ft.border.all(1, ui_theme.outline_muted(alpha=0.38)),
-                    border_radius=8,
-                ),
-            ],
+        self._future_pdf_split_row = ft.Container(
+            content=self._future_plan_side_by_side_slot,
             expand=True,
-            spacing=8,
+            on_size_change=self._on_future_plan_split_row_size,
         )
         self._future_pdf_layer = ft.Container(
             content=ft.Column(
                 [
                     self._plan_compare_future.host,
+                    self._future_plan_single_host,
                     self._future_pdf_split_row,
                     self._future_plan_overlay_host,
                 ],
@@ -940,28 +944,50 @@ class MarkdownStudio(
             visible=False,
         )
         self._focus_preview_toggle_btn = ft.IconButton(
-            icon=ft.Icons.VISIBILITY_OUTLINED,
+            icon=ft.Icons.CODE,
             icon_size=18,
             icon_color=config.ON_SURFACE_VARIANT,
-            tooltip="Preview rendered markdown",
+            tooltip="Markdown source",
             style=ft.ButtonStyle(padding=ft.padding.all(2)),
             visible=False,
-            on_click=lambda _e: self._toggle_focus_preview_mode(),
+            on_click=lambda _e: self._toggle_focus_compose_mode(),
         )
-        self._compose_current_file_menu_btn = ft.PopupMenuButton(
-            icon=ft.Icons.MORE_VERT,
+        self._plan_layout_menu_btn = ft.PopupMenuButton(
+            icon=ft.Icons.LAYERS_OUTLINED,
             icon_size=18,
             icon_color=config.ON_SURFACE_VARIANT,
-            tooltip="File actions",
+            tooltip="Overlay old and new",
             style=ft.ButtonStyle(padding=ft.padding.all(2)),
             visible=False,
             menu_position=ft.PopupMenuPosition.UNDER,
-            items=[
-                ft.PopupMenuItem(
-                    content=ft.Text("Export…", size=13),
-                    on_click=lambda _e: self.page.run_task(self.begin_export_to_word, None),
-                ),
-            ],
+            items=[],
+        )
+        _plan_annot_btn_style = action_rail_icon_button_style()
+        self._plan_review_comment_btn = ft.IconButton(
+            icon=ft.Icons.CHAT_BUBBLE_OUTLINE,
+            icon_size=18,
+            icon_color=config.ON_SURFACE_VARIANT,
+            tooltip="Place comment",
+            style=_plan_annot_btn_style,
+            visible=False,
+            disabled=True,
+            on_click=self._on_plan_review_comment_toggle,
+        )
+        self._plan_compare_labels_btn = ft.IconButton(
+            icon=ft.Icons.TEXT_FIELDS,
+            icon_size=18,
+            icon_color=config.ON_SURFACE_VARIANT,
+            tooltip="Extracted text",
+            style=_plan_annot_btn_style,
+            visible=False,
+            disabled=True,
+            on_click=self._on_plan_compare_toggle_labels,
+        )
+        self._plan_region_impact_btn = ft.TextButton(
+            "Region impact",
+            visible=False,
+            disabled=True,
+            on_click=lambda _e: self.page.run_task(self._run_plan_region_impact_batch_async),
         )
         # Stable height: preview IconButton is taller than the filename text; toggling
         # it must not resize this row or the label shifts when changing main tabs.
@@ -973,7 +999,8 @@ class MarkdownStudio(
                     self._compose_tab_filename_hit,
                     self._compose_tab_filename_field,
                     self._compose_tab_filename_suffix_text,
-                    self._compose_current_file_menu_btn,
+                    self._plan_layout_menu_btn,
+                    self._plan_region_impact_btn,
                     self._focus_preview_toggle_btn,
                 ],
                 tight=True,
@@ -1069,6 +1096,18 @@ class MarkdownStudio(
                 tight=True,
             ),
         )
+        self._review_baseline_chrome_col = ft.Container(
+            expand=1,
+            content=ft.Row(
+                [
+                    ft.Text("Current:", style=_tb_label_style),
+                    self._review_baseline_dropdown,
+                ],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                expand=True,
+            ),
+        )
         self._review_difference_chrome_row = ft.Container(
             visible=True,
             bgcolor=config.SURFACE,
@@ -1077,18 +1116,7 @@ class MarkdownStudio(
                 [
                     ft.Row(
                         [
-                            ft.Container(
-                                content=ft.Row(
-                                    [
-                                        ft.Text("Current:", style=_tb_label_style),
-                                        self._review_baseline_dropdown,
-                                    ],
-                                    spacing=6,
-                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                    expand=True,
-                                ),
-                                expand=1,
-                            ),
+                            self._review_baseline_chrome_col,
                             ft.Container(
                                 content=ft.Row(
                                     [
@@ -1249,7 +1277,6 @@ class MarkdownStudio(
         self._disk_autosave_gen: int = 0
         self._snapshot_autosave_gen: int = 0
         self._content_tree_gen: int = 0
-        self._compose_preview_gen: int = 0
 
         self.tree_column = ft.Column(spacing=0, tight=True, scroll=ft.ScrollMode.AUTO, expand=True)
         self.content_tree_column = ft.Column(
@@ -1356,6 +1383,7 @@ class MarkdownStudio(
         self._ki_topic_index: int = 1
         self._comment_para_index: int | None = None
         self._comment_edit_mode: bool = False
+        self._ki_comment_pick_mode: bool = False
         self._chat_api_messages: list[dict[str, str]] = []
         self._init_sidebar_llm_control()
 
@@ -1392,34 +1420,16 @@ class MarkdownStudio(
                 tight=True,
             ),
         )
-        self._ki_act_panel = ft.Column(
-            [
-                
-                ft.Text(
-                    "Connect {yourcompany}os to turn document changes into automated workflows and decisions.",
-                    size=12,
-                    color=config.ON_SURFACE_VARIANT,
-                    selectable=True,
-                ),
-                ft.TextButton(
-                    content="Connect {yourcompany}os \u2192",
-                    url="https://www.yourcompanyos.io",
-                    tooltip="https://www.yourcompanyos.io",
-                    style=ft.ButtonStyle(
-                        color=config.PRIMARY_COLOR,
-                        padding=ft.padding.symmetric(horizontal=0, vertical=0),
-                    ),
-                ),
-            ],
-            spacing=10,
-            tight=True,
-        )
+        from .ki_act_workflows import build_ki_act_panel
+
+        self._ki_act_panel = build_ki_act_panel(studio=self, page=self.page)
         self._ki_act_container = ft.Container(
             padding=ft.padding.symmetric(
                 horizontal=4,
                 vertical=KI_TAB_PAGE_PAD_V_PX,
             ),
             content=self._ki_act_panel,
+            expand=True,
         )
         self._comment_heading = ft.Text(
             "",
@@ -1506,6 +1516,32 @@ class MarkdownStudio(
         self._comment_edit_btn.on_click = _on_comment_edit
         self._comment_save_btn.on_click = lambda _e: self.page.run_task(self._save_ki_paragraph_comment_async)
         self._comment_cancel_btn.on_click = _on_comment_cancel
+        self._ki_comment_add_btn = ft.IconButton(
+            ft.Icons.ADD,
+            icon_size=18,
+            tooltip="Add comment",
+            icon_color=config.ON_SURFACE_VARIANT,
+            style=ft.ButtonStyle(
+                padding=ft.padding.all(2),
+                visual_density=ft.VisualDensity.COMPACT,
+            ),
+            on_click=self._on_ki_comment_add_click,
+        )
+        self._ki_comments_header = ft.Row(
+            [
+                ft.Text(
+                    "Comments",
+                    size=13,
+                    weight=ft.FontWeight.W_600,
+                    color=config.ON_SURFACE,
+                    expand=True,
+                ),
+                self._ki_comment_add_btn,
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            tight=True,
+        )
         self._ki_comments_list = ft.ListView(
             expand=True,
             spacing=12,
@@ -1527,7 +1563,7 @@ class MarkdownStudio(
             visible=False,
         )
         self._ki_comments_panel = ft.Column(
-            [self._ki_comments_list, self._ki_comments_detail],
+            [self._ki_comments_header, self._ki_comments_detail, self._ki_comments_list],
             spacing=8,
             expand=True,
         )
@@ -1686,7 +1722,6 @@ class MarkdownStudio(
         )
         sync_privacy_shield_icon(
             self._privacy_shield_icon,
-            enabled=config.PRIVACY_SHIELD_ENABLED,
             tier=self.ki_tier,
             reinject=config.PRIVACY_SHIELD_REINJECT,
         )
@@ -2024,10 +2059,10 @@ class MarkdownStudio(
             self._chat_input.update()
         if self._header_shell and _ctrl_on_page(self._header_shell):
             self._header_shell.update()
-        if getattr(self, "_focus_view_mode", "edit") == "preview" and hasattr(
-            self, "_sync_compose_preview_md"
+        if getattr(self, "_focus_view_mode", "wysiwyg") == "wysiwyg" and hasattr(
+            self, "_sync_wysiwyg_from_editor"
         ):
-            self._sync_compose_preview_md()
+            self._sync_wysiwyg_from_editor()
         self._refresh_compare_tab_candidate_ui()
         self._refresh_compose_tab_label()
         self.page.update()
@@ -2139,16 +2174,15 @@ class MarkdownStudio(
         if not self.current_path:
             return {}
         try:
-            if hasattr(self, "_compose_plan_viewer_active") and self._compose_plan_viewer_active():
+            ki_ctx = (
+                self._active_plan_ki_context()
+                if hasattr(self, "_active_plan_ki_context")
+                else None
+            )
+            if ki_ctx is not None:
                 from iterthink.persistence import plan_pdf_annotations
 
-                doc_id = getattr(self, "_compose_plan_document_id", None)
-                vid = getattr(self, "_compose_plan_version_id", None)
-                if doc_id is None or vid is None:
-                    ctx = self._compose_plan_version_context()
-                    if ctx is None:
-                        return {}
-                    doc_id, vid, _pdf = ctx
+                _doc_id, vid = ki_ctx
                 with session_scope() as s:
                     return plan_pdf_annotations.plan_comments_map_for_ki(
                         s, content_version_id=int(vid)
@@ -2172,19 +2206,22 @@ class MarkdownStudio(
             return {}
 
     def _ki_comments_use_plan_labels(self) -> bool:
+        if hasattr(self, "_active_plan_ki_context"):
+            return self._active_plan_ki_context() is not None
         return hasattr(self, "_compose_plan_viewer_active") and self._compose_plan_viewer_active()
 
     def _ki_plan_comment_meta(self, paragraph_index: int) -> tuple[int, str] | None:
         """``(plan_page_index, annotation_kind)`` for a plan comment slot."""
         from iterthink.persistence import plan_pdf_annotations
 
-        doc_id = getattr(self, "_compose_plan_document_id", None)
-        vid = getattr(self, "_compose_plan_version_id", None)
-        if doc_id is None or vid is None:
-            ctx = self._compose_plan_version_context()
-            if ctx is None:
-                return None
-            doc_id, vid, _pdf = ctx
+        ki_ctx = (
+            self._active_plan_ki_context()
+            if hasattr(self, "_active_plan_ki_context")
+            else None
+        )
+        if ki_ctx is None:
+            return None
+        _doc_id, vid = ki_ctx
         with session_scope() as s:
             ann = plan_pdf_annotations.get_by_paragraph_index(
                 s,
@@ -2198,13 +2235,14 @@ class MarkdownStudio(
     def _ki_plan_comment_rows_for_list(self) -> list[tuple[int, str]]:
         from iterthink.persistence import plan_pdf_annotations
 
-        doc_id = getattr(self, "_compose_plan_document_id", None)
-        vid = getattr(self, "_compose_plan_version_id", None)
-        if doc_id is None or vid is None:
-            ctx = self._compose_plan_version_context()
-            if ctx is None:
-                return []
-            doc_id, vid, _pdf = ctx
+        ki_ctx = (
+            self._active_plan_ki_context()
+            if hasattr(self, "_active_plan_ki_context")
+            else None
+        )
+        if ki_ctx is None:
+            return []
+        _doc_id, vid = ki_ctx
         with session_scope() as s:
             anns = plan_pdf_annotations.list_for_plan_version(
                 s, content_version_id=int(vid)
@@ -2212,20 +2250,36 @@ class MarkdownStudio(
         rows: list[tuple[int, str]] = []
         for a in anns:
             body = (a.body or "").strip()
-            if a.annotation_kind == plan_pdf_annotations.KIND_PIN or body:
+            if a.annotation_kind == plan_pdf_annotations.KIND_CHANGE_REGION:
                 rows.append((int(a.paragraph_index), body))
-        return sorted(rows, key=lambda r: r[0])
+            elif a.annotation_kind == plan_pdf_annotations.KIND_PIN or body:
+                rows.append((int(a.paragraph_index), body))
+        rows.sort(
+            key=lambda r: (
+                next(
+                    (
+                        int(a.plan_page_index)
+                        for a in anns
+                        if int(a.paragraph_index) == int(r[0])
+                    ),
+                    0,
+                ),
+                int(r[0]),
+            )
+        )
+        return rows
 
     def _ki_plan_comment_raw_body(self, paragraph_index: int) -> str:
         from iterthink.persistence import plan_pdf_annotations
 
-        doc_id = getattr(self, "_compose_plan_document_id", None)
-        vid = getattr(self, "_compose_plan_version_id", None)
-        if doc_id is None or vid is None:
-            ctx = self._compose_plan_version_context()
-            if ctx is None:
-                return ""
-            doc_id, vid, _pdf = ctx
+        ki_ctx = (
+            self._active_plan_ki_context()
+            if hasattr(self, "_active_plan_ki_context")
+            else None
+        )
+        if ki_ctx is None:
+            return ""
+        _doc_id, vid = ki_ctx
         with session_scope() as s:
             ann = plan_pdf_annotations.get_by_paragraph_index(
                 s,
@@ -2241,6 +2295,135 @@ class MarkdownStudio(
             detail.visible = show
             if _ctrl_on_page(detail):
                 detail.update()
+
+    def _ki_comment_plan_viewer(self):
+        if hasattr(self, "_compose_plan_viewer_active") and self._compose_plan_viewer_active():
+            return getattr(self, "_compose_plan_focus_viewer", None)
+        if hasattr(self, "_review_plan_comment_viewer"):
+            viewer = self._review_plan_comment_viewer()
+            if viewer is not None:
+                return viewer
+        return getattr(self, "_compose_plan_focus_viewer", None)
+
+    def _sync_ki_comment_pick_affordance(self) -> None:
+        """Review markdown: click pointer + non-selectable rows while pick mode is active."""
+        active = bool(getattr(self, "_ki_comment_pick_mode", False))
+        on_review_md = (
+            int(getattr(self, "_main_tab_index", -1)) == TAB_FUTURE
+            and not (
+                hasattr(self, "_ki_comments_use_plan_labels")
+                and self._ki_comments_use_plan_labels()
+            )
+        )
+        if not on_review_md:
+            return
+
+        texts: list[ft.Text] = getattr(self, "_future_left_diff_texts", None) or []
+        saved_sel: dict[int, bool] = getattr(self, "_ki_comment_pick_saved_selectable", {})
+
+        for text in texts:
+            key = id(text)
+            if active:
+                if key not in saved_sel:
+                    saved_sel[key] = bool(getattr(text, "selectable", True))
+                text.selectable = False
+            elif key in saved_sel:
+                text.selectable = saved_sel.pop(key)
+            if _ctrl_on_page(text):
+                text.update()
+
+        if not active:
+            self._ki_comment_pick_saved_selectable = saved_sel
+        else:
+            self._ki_comment_pick_saved_selectable = saved_sel
+
+        saved_ro: dict[int, bool] = getattr(self, "_ki_comment_pick_saved_read_only", {})
+        fields: list[ft.TextField] = getattr(self, "_compare_right_fields", None) or []
+        for field in fields:
+            key = id(field)
+            if active:
+                if key not in saved_ro:
+                    saved_ro[key] = bool(getattr(field, "read_only", False))
+                field.read_only = True
+            elif key in saved_ro:
+                field.read_only = saved_ro.pop(key)
+            if _ctrl_on_page(field):
+                field.update()
+
+        if not active:
+            self._ki_comment_pick_saved_read_only = saved_ro
+        else:
+            self._ki_comment_pick_saved_read_only = saved_ro
+
+        cursor = ft.MouseCursor.CLICK if active else ft.MouseCursor.BASIC
+        for cell in getattr(self, "_future_comment_pick_cells", None) or []:
+            if getattr(cell, "mouse_cursor", None) != cursor:
+                cell.mouse_cursor = cursor
+                if _ctrl_on_page(cell):
+                    cell.update()
+
+    def _sync_ki_comment_add_btn(self) -> None:
+        btn = getattr(self, "_ki_comment_add_btn", None)
+        if btn is None:
+            return
+        active = bool(getattr(self, "_ki_comment_pick_mode", False))
+        btn.icon_color = config.PRIMARY_COLOR if active else config.ON_SURFACE_VARIANT
+        if _ctrl_on_page(btn):
+            btn.update()
+
+    def _sync_plan_review_comment_pick_btn(self) -> None:
+        btn = getattr(self, "_plan_review_comment_btn", None)
+        if btn is None:
+            return
+        active = bool(getattr(self, "_ki_comment_pick_mode", False))
+        btn.icon_color = config.PRIMARY_COLOR if active else config.ON_SURFACE_VARIANT
+        if _ctrl_on_page(btn):
+            btn.update()
+
+    def _set_ki_comment_pick_mode(self, active: bool) -> None:
+        active = bool(active)
+        if active == bool(getattr(self, "_ki_comment_pick_mode", False)):
+            if active and self._ki_comments_use_plan_labels():
+                viewer = self._ki_comment_plan_viewer()
+                if viewer is not None and viewer.interaction_mode != "place_comment":
+                    viewer.set_interaction_mode("place_comment")
+                    self._sync_plan_review_comment_pick_btn()
+                    self._sync_ki_comment_add_btn()
+            return
+        self._ki_comment_pick_mode = active
+        self._sync_ki_comment_add_btn()
+        self._sync_ki_comment_pick_affordance()
+        if self._ki_comments_use_plan_labels():
+            viewer = self._ki_comment_plan_viewer()
+            if viewer is not None:
+                viewer.set_interaction_mode("place_comment" if active else "idle")
+            self._sync_plan_review_comment_pick_btn()
+
+    def _on_ki_comment_add_click(self, _e: ft.ControlEvent | None = None) -> None:
+        if getattr(self, "_ki_comment_pick_mode", False):
+            self._set_ki_comment_pick_mode(False)
+            return
+        if not self.current_path:
+            self._snack("Open a note first.")
+            return
+        if not self.right_open:
+            self.toggle_right()
+        self._set_ki_topic(KI_TOPIC_COMMENTS)
+        if self._ki_comments_use_plan_labels():
+            if self._ki_comment_plan_viewer() is None:
+                self._snack("Open the plan view to place a comment.")
+                return
+            self._set_ki_comment_pick_mode(True)
+            self._snack("Click the plan to place a comment.")
+        else:
+            self._set_ki_comment_pick_mode(True)
+            self._snack("Click a paragraph to comment.")
+
+    async def _on_ki_comment_pick_text_paragraph_async(self, paragraph_index: int) -> None:
+        if not getattr(self, "_ki_comment_pick_mode", False):
+            return
+        self._set_ki_comment_pick_mode(False)
+        await self._open_ki_comments_for_paragraph_async(int(paragraph_index), True)
 
     def _rebuild_ki_comments_list(self) -> None:
         lv = getattr(self, "_ki_comments_list", None)
@@ -2331,8 +2514,11 @@ class MarkdownStudio(
         if comments_active:
             self._rebuild_ki_comments_list()
             self._sync_ki_comments_detail_visibility()
+            self._sync_ki_comment_add_btn()
 
     def _on_ki_topic_index_changed(self, ix: int) -> None:
+        if ix != KI_TOPIC_COMMENTS and getattr(self, "_ki_comment_pick_mode", False):
+            self._set_ki_comment_pick_mode(False)
         self._sync_ki_comments_tab_layout()
         if ix == KI_TOPIC_COMMENTS:
             return
@@ -2423,6 +2609,10 @@ class MarkdownStudio(
             self._comment_cancel_btn.visible = False
         self._rebuild_ki_comments_list()
         await self._scroll_ki_comments_to_paragraph(int(paragraph_index))
+        if self._ki_comments_use_plan_labels() and hasattr(
+            self, "_focus_review_plan_region"
+        ):
+            self._focus_review_plan_region(int(paragraph_index))
         for c in (
             self._ki_comments_detail,
             self._comment_heading,
@@ -2444,14 +2634,15 @@ class MarkdownStudio(
             if self._ki_comments_use_plan_labels():
                 from iterthink.persistence import plan_pdf_annotations
 
-                doc_id = getattr(self, "_compose_plan_document_id", None)
-                vid = getattr(self, "_compose_plan_version_id", None)
-                if doc_id is None or vid is None:
-                    ctx = self._compose_plan_version_context()
-                    if ctx is None:
-                        self._snack("Plan PDF is not loaded.")
-                        return
-                    doc_id, vid, _pdf = ctx
+                ki_ctx = (
+                    self._active_plan_ki_context()
+                    if hasattr(self, "_active_plan_ki_context")
+                    else None
+                )
+                if ki_ctx is None:
+                    self._snack("Plan PDF is not loaded.")
+                    return
+                _doc_id, vid = ki_ctx
                 with session_scope() as s:
                     ann = plan_pdf_annotations.get_by_paragraph_index(
                         s,
@@ -2485,6 +2676,12 @@ class MarkdownStudio(
             return
         if hasattr(self, "_refresh_compose_plan_annotations_overlay"):
             self._refresh_compose_plan_annotations_overlay()
+        if hasattr(self, "_refresh_review_plan_annotations_overlay"):
+            self._refresh_review_plan_annotations_overlay()
+        if hasattr(self, "_reload_review_change_regions_from_db_async"):
+            pg = getattr(self, "page", None)
+            if pg is not None:
+                pg.run_task(self._reload_review_change_regions_from_db_async)
         self._comment_edit_mode = False
         self._sync_ki_comment_tab_from_store()
         self._rebuild_ki_comments_list()
@@ -2559,21 +2756,50 @@ class MarkdownStudio(
         if not silent:
             self._snack("Saved.")
 
-    def _export_paragraph_comments_for_doc(self, md_path: Path) -> dict[int, str]:
+    def _export_paragraph_comments_for_doc(
+        self, md_path: Path, *, content_version_id: int | None = None
+    ) -> dict[int, str]:
         try:
             with session_scope() as s:
                 doc = content_repo.get_document_by_resolved_path(s, md_path)
                 if doc is None:
                     return {}
-                snaps = content_repo.list_snapshots(s, md_path)
-                if not snaps:
-                    return {}
-                vid = snaps[0].version_id
+                vid = content_version_id
+                if vid is None:
+                    snaps = content_repo.list_snapshots(s, md_path)
+                    if not snaps:
+                        return {}
+                    vid = snaps[0].version_id
                 return impact_annotations.paragraph_comments_map_for_export(
                     s, content_version_id=int(vid)
                 )
         except BaseException:
             return {}
+
+    def _resolve_export_markdown(
+        self,
+        md_path: Path,
+        version_key: str | None,
+        *,
+        is_current: bool,
+    ) -> tuple[str, int | None]:
+        """Return (markdown body, content_version_id for comments)."""
+        if version_key == _COMPARE_KEY_CURRENT:
+            return self.editor.value or "", None
+        if version_key:
+            try:
+                vid = int(version_key)
+            except (TypeError, ValueError):
+                vid = None
+            if vid is not None:
+                with session_scope() as s:
+                    return content_repo.load_version_body(s, vid), vid
+        if is_current:
+            return self.editor.value or "", None
+        try:
+            return md_path.read_text(encoding="utf-8"), None
+        except OSError as ex:
+            raise OSError(f"Could not read file: {ex}") from ex
 
     async def _complete_export_to_word_async(
         self,
@@ -2582,6 +2808,7 @@ class MarkdownStudio(
         markdown_src: str,
         template_path: Path,
         author: str,
+        content_version_id: int | None = None,
     ) -> None:
         """Pick save path and write DOCX (call after the template dialog is closed)."""
         self.ensure_file_pickers()
@@ -2625,7 +2852,9 @@ class MarkdownStudio(
             date_iso=date.today().isoformat(),
             comment_author=author,
         )
-        para_comments = self._export_paragraph_comments_for_doc(md_path)
+        para_comments = self._export_paragraph_comments_for_doc(
+            md_path, content_version_id=content_version_id
+        )
 
         def _run() -> None:
             markdown_docx_export.markdown_to_docx(
@@ -2662,18 +2891,40 @@ class MarkdownStudio(
                 self._snack("Open a markdown file first.")
                 return
             md_path = self.current_path.resolve()
-            markdown_src = self.editor.value or ""
         else:
             md_path = tree_path.resolve()
-            cur = self.current_path.resolve() if self.current_path else None
-            if cur and md_path == cur:
-                markdown_src = self.editor.value or ""
+
+        cur = self.current_path.resolve() if self.current_path else None
+        is_current = cur is not None and md_path == cur
+
+        snaps_all: list[content_repo.SnapshotInfo] = []
+        with session_scope() as s:
+            snaps_all = content_repo.list_snapshots(s, md_path)
+        filt = history_compare_snapshots(snaps_all)
+        dd_style = ui_theme.compare_candidate_dropdown_option_style()
+        version_opts: list[ft.dropdown.Option] = []
+        if is_current and self._is_dirty():
+            version_opts.append(
+                ft.dropdown.Option(key=_COMPARE_KEY_CURRENT, text="Current draft", style=dd_style)
+            )
+        version_opts.extend(build_history_snapshot_dropdown_options(filt, dd_style))
+
+        version_dd: ft.Dropdown | None = None
+        if version_opts:
+            default_version_key: str | None = None
+            if is_current and self._is_dirty():
+                default_version_key = _COMPARE_KEY_CURRENT
             else:
-                try:
-                    markdown_src = md_path.read_text(encoding="utf-8")
-                except OSError as ex:
-                    self._snack(f"Could not read file: {ex}")
-                    return
+                for opt in version_opts:
+                    if opt.key != _COMPARE_KEY_CURRENT:
+                        default_version_key = opt.key
+                        break
+            version_dd = ft.Dropdown(
+                label="Version",
+                options=version_opts,
+                value=default_version_key or version_opts[0].key,
+                dense=True,
+            )
 
         author = store_db.settings_get(self._db, store_db.SETTINGS_EXPORT_AUTHOR) or ""
         paths_by_label = {label: path for label, path in templates}
@@ -2683,7 +2934,7 @@ class MarkdownStudio(
             label="Template",
             options=[ft.dropdown.Option(l) for l in labels],
             value=labels[0],
-            expand=True,
+            dense=True,
         )
 
         async def on_export(_e: ft.ControlEvent | None = None) -> None:
@@ -2693,12 +2944,23 @@ class MarkdownStudio(
                 if tpl is None or not tpl.is_file():
                     self._snack("Choose a template.")
                     return
+                version_key = version_dd.value if version_dd is not None else None
+                try:
+                    markdown_src, content_version_id = self._resolve_export_markdown(
+                        md_path,
+                        version_key,
+                        is_current=is_current,
+                    )
+                except OSError as ex:
+                    self._snack(str(ex))
+                    return
                 self.page.pop_dialog()
                 await self._complete_export_to_word_async(
                     md_path=md_path,
                     markdown_src=markdown_src,
                     template_path=tpl,
                     author=author,
+                    content_version_id=content_version_id,
                 )
             except BaseException as ex:
                 self._snack(f"Export failed: {ex}")
@@ -2723,6 +2985,7 @@ class MarkdownStudio(
                                     color=config.ON_SURFACE,
                                 ),
                                 ft.Text(md_path.name, size=12, font_family="monospace"),
+                                *([version_dd] if version_dd is not None else []),
                                 tpl_dd,
                             ],
                             tight=True,
@@ -2731,7 +2994,7 @@ class MarkdownStudio(
                     ),
                     actions=[
                         ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog()),
-                        ft.TextButton("Continue…", on_click=lambda _e: self.page.run_task(on_export)),
+                        ft.TextButton("Export", on_click=lambda _e: self.page.run_task(on_export)),
                     ],
                     actions_alignment=ft.MainAxisAlignment.END,
                 )

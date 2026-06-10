@@ -73,20 +73,23 @@ def _impact_query_metadata(
 ) -> tuple[str, str, str | None]:
     from iterthink.db.content_models import Content
     from iterthink.services.rag.chunking import document_title
+    from iterthink.services.rag.project_scope import project_slug_for_path
 
     row = session.get(Content, int(target_document_id))
     lineage_id = row.lineage_id if row is not None else f"doc_{target_document_id}"
     cache_key = f"impact_q::{lineage_id}"
     title = "Untitled"
+    project_label: str | None = None
     if target_path is not None:
         try:
             path = target_path.resolve() if hasattr(target_path, "resolve") else target_path
+            project_label = project_slug_for_path(path)
             if path.is_file():
                 body = path.read_text(encoding="utf-8", errors="replace")
                 title = document_title(body, path.name)
         except (OSError, TypeError, ValueError):
             pass
-    return cache_key, title, None
+    return cache_key, title, project_label
 
 
 async def prepare_impact_context(

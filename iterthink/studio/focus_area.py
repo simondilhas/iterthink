@@ -40,7 +40,7 @@ from .list_continuation import (
     normalize_buffer_newlines,
     plan_list_continuation_after_enter,
 )
-from .markdown_preview import markdown_preview_with_task_checkboxes
+from .wysiwyg_editor import WysiwygEditorController
 from iterthink.ai.llm_router import remote_http_error_message
 from iterthink.ai.ollama_util import chat_response_text, chat_stream_delta, ollama_error_message
 from iterthink.ai.privacy_shield import (
@@ -56,6 +56,7 @@ from .constants import (
     COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX,
     COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX,
     COMPOSE_EDITOR_CONTENT_PAD_TOP_PX,
+    COMPOSE_EDITOR_SCROLLBAR_INSET_PX,
     COMPOSE_EDITOR_LINE_HEIGHT_PX,
     COMPOSE_EDITOR_MONO_CHAR_WIDTH_EST_PX,
     COMPOSE_EDITOR_WRAP_WIDTH_RESERVE_PX,
@@ -123,12 +124,84 @@ class MarkdownStudioCompose:
 
     def _discuss_llm_context_text(self, *, max_chars: int = 8000) -> str:
         buf = self._editor_buffer() or ""
-        return discuss_llm_context_text(buf, self._ctx_selection_range(), max_chars=max_chars)
+        return discuss_llm_context_text(
+            buf, self._compose_global_selection_range(), max_chars=max_chars
+        )
+
+    def _compose_wysiwyg_mode_active(self) -> bool:
+        return (
+            getattr(self, "_focus_view_mode", "wysiwyg") == "wysiwyg"
+            and getattr(self, "_main_tab_index", -1) == TAB_PRESENT
+        )
+
+    def _compose_wysiwyg_local_selection_range(
+        self,
+    ) -> tuple[int, int] | None:
+        """Block-local selection in the active wysiwyg edit field."""
+        if not self._compose_wysiwyg_mode_active():
+            return None
+        ctrl = getattr(self, "_wysiwyg_controller", None)
+        field = ctrl.get_active_field() if ctrl is not None else None
+        if field is None:
+            return None
+        buf = field.value or ""
+        sel = field.selection
+        if sel is not None and not sel.is_collapsed:
+            a, b = int(sel.start), int(sel.end)
+            if 0 <= a <= b <= len(buf) and buf[a:b].strip():
+                return a, b
+        stored = getattr(self, "_compose_sel_span", None)
+        if stored is not None:
+            a, b = int(stored[0]), int(stored[1])
+            if 0 <= a <= b <= len(buf) and buf[a:b].strip():
+                return a, b
+        return None
+
+    def _compose_global_selection_range(self) -> tuple[int, int] | None:
+        """Selection as offsets in the full compose markdown buffer."""
+        buf = self._editor_buffer() or ""
+        if self._compose_wysiwyg_mode_active():
+            ctrl = getattr(self, "_wysiwyg_controller", None)
+            local = self._compose_wysiwyg_local_selection_range()
+            if ctrl is not None and local is not None:
+                gspan = ctrl.global_span_for_selection(local[0], local[1])
+                if gspan is not None:
+                    a, b = int(gspan[0]), int(gspan[1])
+                    if 0 <= a <= b <= len(buf) and buf[a:b].strip():
+                        return a, b
+            return None
+        sel = self.editor.selection
+        if sel is not None and not sel.is_collapsed:
+            a, b = int(sel.start), int(sel.end)
+            if 0 <= a <= b <= len(buf) and buf[a:b].strip():
+                return a, b
+        span = getattr(self, "_compose_sel_span", None)
+        if span is not None:
+            a, b = int(span[0]), int(span[1])
+            if 0 <= a <= b <= len(buf) and buf[a:b].strip():
+                return a, b
+        return None
+
+    def _compose_active_paragraph_offset(self) -> int:
+        """Caret/selection anchor offset in the full compose buffer."""
+        buf = self.editor.value or ""
+        if self._compose_wysiwyg_mode_active():
+            ctrl = getattr(self, "_wysiwyg_controller", None)
+            if ctrl is not None:
+                gspan = self._compose_global_selection_range()
+                if gspan is not None:
+                    return int(gspan[0])
+                block_off = ctrl.active_block_global_offset()
+                if block_off is not None:
+                    return int(block_off)
+            return 0
+        sel = self.editor.selection
+        return int(sel.start) if sel is not None else 0
 
     async def _open_project_page(self) -> None:
         u = (_PROJECT_PAGE_URL or "").strip()
         if u:
-            self.page.launch_url(u)
+            await self.page.launch_url(u)
 
     # --- Editor right-click context menu ---
 
@@ -219,13 +292,7 @@ class MarkdownStudioCompose:
         self.page.run_task(self._quick_margin_action, action_id)
 
     def _ctx_selection_range(self) -> tuple[int, int] | None:
-        sel = self.editor.selection
-        if sel is not None and not sel.is_collapsed:
-            return int(sel.start), int(sel.end)
-        span = getattr(self, "_compose_sel_span", None)
-        if span is not None:
-            return int(span[0]), int(span[1])
-        return None
+        return self._compose_global_selection_range()
 
     async def _ctx_clipboard_copy(self) -> None:
         rng = self._ctx_selection_range()
@@ -343,9 +410,15 @@ class MarkdownStudioCompose:
             return
         w = max(80.0, float(getattr(self, "_compose_editor_stack_width", 400.0)))
         h = max(60.0, float(getattr(self, "_compose_editor_stack_height", 320.0)))
-        buf = self.editor.value or ""
+        field = self._compose_active_field()
+        in_wysiwyg = (
+            getattr(self, "_focus_view_mode", "wysiwyg") == "wysiwyg"
+            and field is not None
+            and field is not self.editor
+        )
+        buf = (field.value or "") if field is not None else (self.editor.value or "")
         span: tuple[int, int] | None = None
-        sel = self.editor.selection
+        sel = field.selection if field is not None else self.editor.selection
         if sel is not None and not sel.is_collapsed:
             a, b = int(sel.start), int(sel.end)
             if 0 <= a <= b <= len(buf) and (buf[a:b] or "").strip():
@@ -358,13 +431,21 @@ class MarkdownStudioCompose:
                     span = (a, b)
         anchor = None
         if span is not None:
+            pad_l = float(COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX)
+            pad_r = (
+                float(COMPOSE_EDITOR_SCROLLBAR_INSET_PX)
+                if in_wysiwyg
+                else float(COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX)
+            )
+            if in_wysiwyg:
+                pad_l += 32.0  # chrome column + row spacing
             anchor = selection_first_line_anchor_px(
                 buf,
                 span[0],
                 span[1],
                 stack_w=w,
-                pad_l=float(COMPOSE_EDITOR_CONTENT_PAD_LEFT_PX),
-                pad_r=float(COMPOSE_EDITOR_CONTENT_PAD_RIGHT_PX),
+                pad_l=pad_l,
+                pad_r=pad_r,
                 pad_t=float(COMPOSE_EDITOR_CONTENT_PAD_TOP_PX),
                 char_w_px=float(COMPOSE_EDITOR_MONO_CHAR_WIDTH_EST_PX),
                 line_h_px=float(COMPOSE_EDITOR_LINE_HEIGHT_PX),
@@ -414,6 +495,42 @@ class MarkdownStudioCompose:
 
     def _set_compose_editor_focused(self, focused: bool) -> None:
         self._compose_editor_focused = focused
+        if focused:
+            self._compose_wysiwyg_field_focused = False
+
+    def _set_wysiwyg_field_focused(self, focused: bool) -> None:
+        self._compose_wysiwyg_field_focused = focused
+        if focused:
+            self._compose_editor_focused = False
+
+    def _handle_wysiwyg_keyboard(self, key: str, *, shift: bool) -> bool:
+        """Return True if the key was handled."""
+        if getattr(self, "_focus_view_mode", "wysiwyg") != "wysiwyg":
+            return False
+        ctrl = self._ensure_wysiwyg_controller()
+        if key == "escape" and ctrl.editing_block_index is not None:
+            ctrl.commit_edit()
+            self._set_wysiwyg_field_focused(False)
+            return True
+        if not getattr(self, "_compose_wysiwyg_field_focused", False):
+            return False
+        if key == "enter" and not shift:
+            return ctrl.handle_enter(shift=shift)
+        if key == "backspace":
+            return ctrl.handle_backspace_at_start()
+        return False
+
+    async def _focus_wysiwyg_edit_field_async(self) -> None:
+        ctrl = self._ensure_wysiwyg_controller()
+        tf = ctrl.get_active_field()
+        if tf is None:
+            return
+        try:
+            await tf.focus()
+        except BaseException:
+            pass
+        if _ctrl_on_page(tf):
+            tf.update()
 
     # --- Compose floating selection toolbar (Focus editor, edit mode) ---
 
@@ -496,20 +613,116 @@ class MarkdownStudioCompose:
             right=None,
         )
 
+    def _ensure_wysiwyg_controller(self) -> WysiwygEditorController:
+        ctrl = getattr(self, "_wysiwyg_controller", None)
+        if ctrl is None:
+            ctrl = WysiwygEditorController(
+                on_markdown_change=self._on_wysiwyg_markdown_change,
+                on_active_field_change=self._on_wysiwyg_active_field_change,
+                on_focus_edit_field=lambda: self.page.run_task(
+                    self._focus_wysiwyg_edit_field_async
+                ),
+                on_selection_change=self._on_wysiwyg_selection_change,
+                on_block_comment=self._on_wysiwyg_block_comment,
+            )
+            self._wysiwyg_controller = ctrl
+            self._compose_wysiwyg_host = ctrl.build_host()
+        return ctrl
+
+    def _on_wysiwyg_active_field_change(self) -> None:
+        self._set_wysiwyg_field_focused(True)
+        self._compose_sync_selection_toolbar_visibility()
+
+    def _wysiwyg_paragraph_index_for_block(self, block_index: int) -> int | None:
+        ctrl = getattr(self, "_wysiwyg_controller", None)
+        if ctrl is None:
+            return None
+        off = ctrl.block_global_offset(block_index)
+        if off is None:
+            return None
+        return paragraph_index_at_offset(self.editor.value or "", off)
+
+    def _on_wysiwyg_block_comment(self, block_index: int) -> None:
+        idx = self._wysiwyg_paragraph_index_for_block(block_index)
+        self.page.run_task(self._open_ki_comments_for_paragraph_async, idx, True)
+
+    def _on_wysiwyg_selection_change(self, e: ft.TextSelectionChangeEvent) -> None:
+        sel = e.selection
+        if sel is not None and not sel.is_collapsed:
+            t = (e.selected_text or "").strip()
+            if t:
+                self.last_selection = e.selected_text or ""
+                self._compose_sel_span = (int(sel.start), int(sel.end))
+            else:
+                self._compose_sel_span = None
+            self._compose_sync_selection_toolbar_visibility()
+            return
+        if self._compose_sel_span is not None and sel is not None:
+            a, b = self._compose_sel_span
+            cur = int(sel.start)
+            if cur < a or cur > b:
+                self._compose_sel_span = None
+        self._compose_sync_selection_toolbar_visibility()
+
+    def _compose_active_field(self) -> ft.TextField | None:
+        if getattr(self, "_focus_view_mode", "wysiwyg") == "wysiwyg":
+            return self._ensure_wysiwyg_controller().get_active_field()
+        return self.editor
+
+    def _on_wysiwyg_markdown_change(self, md: str) -> None:
+        if (self.editor.value or "") == md:
+            return
+        self._wysiwyg_push_inflight = True
+        try:
+            self.editor.value = md
+        finally:
+            self._wysiwyg_push_inflight = False
+        self._editor_prev_for_list_continue = normalize_buffer_newlines(md)
+        self._refresh_dirty_state_ui()
+        if self._main_tab_index == TAB_PRESENT:
+            self._margin_gen += 1
+            gen = self._margin_gen
+            self.page.run_task(self._debounced_compose_rebuild, gen)
+        self._kick_debounced_compare_diff_if_main_editor_backs_buffers()
+        if getattr(self, "_left_sidebar_tab", 0) == 1 and hasattr(
+            self, "_kick_debounced_content_tree"
+        ):
+            self._kick_debounced_content_tree()
+        if not self.current_path:
+            return
+        self._kick_spell_cache_from_compose_if_needed()
+        self._kick_debounced_autosave()
+
+    def _sync_wysiwyg_from_editor(self) -> None:
+        if getattr(self, "_focus_view_mode", "wysiwyg") != "wysiwyg":
+            return
+        ctrl = self._ensure_wysiwyg_controller()
+        w = float(getattr(self, "_compose_reading_card", None) and self._compose_reading_card.width or 400)
+        ctrl.set_avail_width(max(200.0, w - float(COMPOSE_EDITOR_SCROLLBAR_INSET_PX)))
+        ctrl.sync_from_markdown(self.editor.value or "")
+
     def _compose_sync_selection_toolbar_visibility(self) -> None:
         host = getattr(self, "_compose_selection_toolbar_host", None)
         if host is None:
             return
         ok_tab = getattr(self, "_main_tab_index", None) == TAB_PRESENT
-        ok_mode = getattr(self, "_focus_view_mode", "edit") == "edit"
+        ok_mode = getattr(self, "_focus_view_mode", "wysiwyg") in ("wysiwyg", "source")
         show = ok_tab and ok_mode
+        if show and getattr(self, "_focus_view_mode", "wysiwyg") == "wysiwyg":
+            ctrl = self._ensure_wysiwyg_controller()
+            if ctrl.editing_block_index is None:
+                show = False
         if show:
-            buf = self.editor.value or ""
-            sel = self.editor.selection
-            if sel is None or sel.is_collapsed:
+            field = self._compose_active_field()
+            if field is None:
                 show = False
             else:
-                show = bool(sel.get_selected_text(buf).strip())
+                buf = field.value or ""
+                sel = field.selection
+                if sel is None or sel.is_collapsed:
+                    show = False
+                else:
+                    show = bool(sel.get_selected_text(buf).strip())
         changed = host.visible != show
         host.visible = show
         if show:
@@ -522,6 +735,16 @@ class MarkdownStudioCompose:
     ) -> None:
         self._compose_toolbar_applying = True
         try:
+            if getattr(self, "_focus_view_mode", "wysiwyg") == "wysiwyg":
+                field = self._compose_active_field()
+                if field is not None:
+                    field.value = new_text
+                    field.selection = ft.TextSelection(sel_start, sel_end)
+                    if _ctrl_on_page(field):
+                        field.update()
+                    md = self._ensure_wysiwyg_controller().current_markdown()
+                    self._on_wysiwyg_markdown_change(md)
+                return
             self.editor.value = new_text
             self.editor.selection = ft.TextSelection(sel_start, sel_end)
             self._compose_sel_span = (
@@ -536,8 +759,9 @@ class MarkdownStudioCompose:
 
     def _compose_snapshot_toolbar_range(self) -> None:
         """Capture selection before toolbar buttons steal editor focus."""
-        buf = self.editor.value or ""
-        sel = self.editor.selection
+        field = self._compose_active_field() or self.editor
+        buf = field.value or ""
+        sel = field.selection
         if sel is not None and not sel.is_collapsed:
             if sel.get_selected_text(buf).strip():
                 self._compose_toolbar_snap_range = (int(sel.start), int(sel.end))
@@ -551,8 +775,9 @@ class MarkdownStudioCompose:
         self._compose_toolbar_snap_range = None
 
     def _compose_toolbar_range(self) -> tuple[int, int] | None:
-        buf = self.editor.value or ""
-        sel = self.editor.selection
+        field = self._compose_active_field() or self.editor
+        buf = field.value or ""
+        sel = field.selection
         if sel is not None and not sel.is_collapsed:
             if sel.get_selected_text(buf).strip():
                 return int(sel.start), int(sel.end)
@@ -568,19 +793,24 @@ class MarkdownStudioCompose:
         rng = self._compose_toolbar_range()
         if rng is not None:
             return rng
-        buf = self.editor.value or ""
-        sel = self.editor.selection
+        field = self._compose_active_field() or self.editor
+        buf = field.value or ""
+        sel = field.selection
         if sel is None:
             return None
         caret = int(sel.start)
         return expand_selection_to_line_bounds(buf, caret, caret)
+
+    def _compose_toolbar_buffer(self) -> str:
+        field = self._compose_active_field()
+        return (field.value if field is not None else self.editor.value) or ""
 
     def _compose_toolbar_bold(self, _e: ft.ControlEvent) -> None:
         rng = self._compose_toolbar_range()
         if rng is None:
             return
         a, b = rng
-        got = apply_bold_wrap(self.editor.value or "", a, b)
+        got = apply_bold_wrap(self._compose_toolbar_buffer(), a, b)
         if got is None:
             return
         new_t, s0, s1 = got
@@ -591,7 +821,7 @@ class MarkdownStudioCompose:
         if rng is None:
             return
         a, b = rng
-        got = apply_italic_wrap(self.editor.value or "", a, b)
+        got = apply_italic_wrap(self._compose_toolbar_buffer(), a, b)
         if got is None:
             return
         new_t, s0, s1 = got
@@ -602,7 +832,7 @@ class MarkdownStudioCompose:
         if rng is None:
             return
         a, b = rng
-        got = apply_bullet_block(self.editor.value or "", a, b)
+        got = apply_bullet_block(self._compose_toolbar_buffer(), a, b)
         if got is None:
             return
         new_t, s0, s1 = got
@@ -613,7 +843,7 @@ class MarkdownStudioCompose:
         if rng is None:
             return
         a, b = rng
-        got = apply_numbered_block(self.editor.value or "", a, b)
+        got = apply_numbered_block(self._compose_toolbar_buffer(), a, b)
         if got is None:
             return
         new_t, s0, s1 = got
@@ -624,7 +854,7 @@ class MarkdownStudioCompose:
         if rng is None:
             return
         a, b = rng
-        got = apply_checklist_block(self.editor.value or "", a, b)
+        got = apply_checklist_block(self._compose_toolbar_buffer(), a, b)
         if got is None:
             return
         new_t, s0, s1 = got
@@ -635,7 +865,7 @@ class MarkdownStudioCompose:
         if rng is None:
             return
         a, b = rng
-        got = apply_indent_block(self.editor.value or "", a, b)
+        got = apply_indent_block(self._compose_toolbar_buffer(), a, b)
         if got is None:
             return
         new_t, s0, s1 = got
@@ -646,7 +876,7 @@ class MarkdownStudioCompose:
         if rng is None:
             return
         a, b = rng
-        got = apply_outdent_block(self.editor.value or "", a, b)
+        got = apply_outdent_block(self._compose_toolbar_buffer(), a, b)
         if got is None:
             return
         new_t, s0, s1 = got
@@ -665,7 +895,7 @@ class MarkdownStudioCompose:
         await self._request_tab_switch_async(TAB_FUTURE)
 
     async def _compose_handle_tab_key_async(self, *, shift: bool) -> None:
-        if self._main_tab_index != TAB_PRESENT or self._focus_view_mode != "edit":
+        if self._main_tab_index != TAB_PRESENT or self._focus_view_mode != "source":
             return
         if not getattr(self, "_compose_editor_focused", False):
             return
@@ -737,6 +967,11 @@ class MarkdownStudioCompose:
             gen = self._margin_gen
             self.page.run_task(self._debounced_compose_rebuild, gen)
         self._kick_debounced_compare_diff_if_main_editor_backs_buffers()
+        if (
+            getattr(self, "_focus_view_mode", "wysiwyg") == "wysiwyg"
+            and not getattr(self, "_wysiwyg_push_inflight", False)
+        ):
+            self._sync_wysiwyg_from_editor()
         if not self.current_path:
             return
         self._kick_spell_cache_from_compose_if_needed()
@@ -761,32 +996,24 @@ class MarkdownStudioCompose:
     def _compose_snapshot_margin_selection_for_menu(self) -> None:
         """Capture selection before PopupMenuButton focus clears it (tap-down / menu open)."""
         buf = self.editor.value or ""
-        sel = self.editor.selection
-        snap_start: int | None = None
-        snap_end: int | None = None
-        if sel is not None and not sel.is_collapsed:
-            raw = sel.get_selected_text(buf)
-            if raw.strip():
-                self._compose_margin_menu_snap = (raw, int(sel.start))
-                snap_start, snap_end = int(sel.start), int(sel.end)
-        if snap_start is None:
-            span = getattr(self, "_compose_sel_span", None)
-            if span is not None:
-                a, b = span
-                if 0 <= a <= b <= len(buf):
-                    raw = buf[a:b]
-                    if raw.strip():
-                        self._compose_margin_menu_snap = (raw, int(a))
-                        snap_start, snap_end = int(a), int(b)
-        if snap_start is None:
+        gspan = self._compose_global_selection_range()
+        if gspan is None:
             self._compose_margin_menu_snap = None
+            return
+        a, b = int(gspan[0]), int(gspan[1])
+        raw = buf[a:b]
+        if not raw.strip():
+            self._compose_margin_menu_snap = None
+            return
+        self._compose_margin_menu_snap = (raw, a)
+        if self._compose_wysiwyg_mode_active():
             return
         # Best-effort: re-focus the editor and re-apply the selection so the highlight
         # is repainted right before the popup overlay grabs focus. Flet may still steal
         # focus once the menu opens; the chat bubble quote remains the durable marker.
         try:
             self.editor.focus()
-            self.editor.selection = ft.TextSelection(snap_start, snap_end)
+            self.editor.selection = ft.TextSelection(a, b)
             if _ctrl_on_page(self.editor):
                 self.editor.update()
         except BaseException:
@@ -799,18 +1026,16 @@ class MarkdownStudioCompose:
         if not use_menu_snap:
             self._compose_clear_margin_menu_snap()
         buf = self.editor.value or ""
-        tf = self.editor
-        sel = tf.selection
         selected = ""
-        off = int(sel.start) if sel is not None else 0
         replace_span: tuple[int, int] | None = None
+        gspan = self._compose_global_selection_range()
 
-        if sel is not None and not sel.is_collapsed:
-            t = sel.get_selected_text(buf).strip()
-            if t:
-                selected = t
-                off = int(sel.start)
-                replace_span = (int(sel.start), int(sel.end))
+        if gspan is not None:
+            a, b = int(gspan[0]), int(gspan[1])
+            chunk = buf[a:b]
+            if chunk.strip():
+                selected = chunk.strip()
+                replace_span = (a, b)
 
         if not selected and use_menu_snap:
             snap = self._compose_margin_menu_snap
@@ -818,20 +1043,9 @@ class MarkdownStudioCompose:
                 raw, snap_off = snap
                 if raw.strip():
                     selected = raw.strip()
-                    off = snap_off
                     replace_span = (snap_off, snap_off + len(raw))
 
-        if not selected:
-            span = getattr(self, "_compose_sel_span", None)
-            if span is not None:
-                a, b = span
-                if 0 <= a <= b <= len(buf):
-                    chunk = buf[a:b]
-                    if chunk.strip():
-                        selected = chunk.strip()
-                        off = a
-                        replace_span = (a, b)
-
+        off = int(replace_span[0]) if replace_span is not None else self._compose_active_paragraph_offset()
         idx = paragraph_index_at_offset(buf, off)
         try:
             await self.run_margin_action(
@@ -877,7 +1091,6 @@ class MarkdownStudioCompose:
             self._compose_tab_filename_text.style = None
             self._compose_tab_filename_hit.mouse_cursor = ft.MouseCursor.BASIC
             self._compose_tab_filename_hit.tooltip = "Open a note first"
-            self._compose_current_file_menu_btn.visible = False
         else:
             suffix = (
                 self._document_ui_suffix()
@@ -889,20 +1102,17 @@ class MarkdownStudioCompose:
             self._compose_tab_filename_text.style = None
             self._compose_tab_filename_hit.mouse_cursor = ft.MouseCursor.CLICK
             self._compose_tab_filename_hit.tooltip = "Click to rename"
-            self._compose_current_file_menu_btn.visible = (
-                self.current_path.suffix.lower() == ".md"
-            )
+        if hasattr(self, "_sync_plan_filename_chrome"):
+            self._sync_plan_filename_chrome()
         if _ctrl_on_page(self._compose_tab_filename_text):
             self._compose_tab_filename_text.update()
         if _ctrl_on_page(self._compose_tab_filename_hit):
             self._compose_tab_filename_hit.update()
-        if _ctrl_on_page(self._compose_current_file_menu_btn):
-            self._compose_current_file_menu_btn.update()
         if apply_preview_mode:
-            self._apply_focus_preview_mode()
+            self._apply_focus_compose_mode()
 
-    def _compose_markdown_preview_available(self) -> bool:
-        """Preview toggle applies to editable markdown notes, not plan-PDF view."""
+    def _compose_wysiwyg_available(self) -> bool:
+        """WYSIWYG applies to editable markdown notes, not plan-PDF view."""
         cur = self.current_path
         if cur is None or cur.suffix.lower() != ".md":
             return False
@@ -913,65 +1123,38 @@ class MarkdownStudioCompose:
                 return False
         return True
 
-    def _toggle_focus_preview_mode(self) -> None:
+    def _toggle_focus_compose_mode(self) -> None:
         if self._main_tab_index != TAB_PRESENT:
             return
-        if not self._compose_markdown_preview_available():
+        if not self._compose_wysiwyg_available():
             return
         self._focus_view_mode = (
-            "preview" if self._focus_view_mode == "edit" else "edit"
+            "source" if self._focus_view_mode == "wysiwyg" else "wysiwyg"
         )
-        self._apply_focus_preview_mode()
+        self._apply_focus_compose_mode()
 
-    def _sync_compose_preview_md(self) -> None:
-        if getattr(self, "_focus_view_mode", "edit") != "preview":
-            return
-        self._compose_preview_md.value = markdown_preview_with_task_checkboxes(
-            self.editor.value or ""
-        )
-        if _ctrl_on_page(self._compose_preview_md):
-            self._compose_preview_md.update()
-
-    def _kick_debounced_compose_preview_sync(self) -> None:
-        if self._main_tab_index != TAB_PRESENT:
-            return
-        if getattr(self, "_focus_view_mode", "edit") != "preview":
-            return
-        self._compose_preview_gen += 1
-        gen = self._compose_preview_gen
-        self.page.run_task(self._debounced_sync_compose_preview_md, gen)
-
-    async def _debounced_sync_compose_preview_md(self, gen: int) -> None:
-        await asyncio.sleep(0.15)
-        if gen != self._compose_preview_gen:
-            return
-        if getattr(self, "_focus_view_mode", "edit") != "preview":
-            return
-        self._sync_compose_preview_md()
-
-    def _apply_focus_preview_mode(self) -> None:
+    def _apply_focus_compose_mode(self) -> None:
         on_focus = self._main_tab_index == TAB_PRESENT
-        markdown_note = self._compose_markdown_preview_available()
-        # Force back to edit when not on Focus so the next entry starts clean.
+        markdown_note = self._compose_wysiwyg_available()
         if not on_focus or not markdown_note:
-            self._focus_view_mode = "edit"
-        in_preview = self._focus_view_mode == "preview" and markdown_note
+            self._focus_view_mode = "source"
+        in_wysiwyg = self._focus_view_mode == "wysiwyg" and markdown_note
         self._focus_preview_toggle_btn.visible = on_focus and markdown_note
-        if in_preview:
-            self._sync_compose_preview_md()
-            self._compose_writing_slot.content = self._compose_preview_host
+        if in_wysiwyg:
+            self._sync_wysiwyg_from_editor()
+            host = self._ensure_wysiwyg_controller().root
+            self._compose_writing_slot.content = host
         else:
             self._compose_writing_slot.content = self._compose_editor_shell_wrapped
         self._focus_preview_toggle_btn.icon = (
-            ft.Icons.MODE_EDIT_OUTLINE if in_preview else ft.Icons.VISIBILITY_OUTLINED
+            ft.Icons.ARTICLE_OUTLINED if in_wysiwyg else ft.Icons.CODE
         )
         self._focus_preview_toggle_btn.tooltip = (
-            "Edit markdown" if in_preview else "Preview rendered markdown"
+            "Rendered preview" if not in_wysiwyg else "Markdown source"
         )
         for c in (
             self._focus_preview_toggle_btn,
             self._compose_writing_slot,
-            self._compose_preview_md,
         ):
             if _ctrl_on_page(c):
                 c.update()
@@ -980,6 +1163,10 @@ class MarkdownStudioCompose:
         if hasattr(self, "_apply_compose_plan_tab_scroll"):
             self._apply_compose_plan_tab_scroll()
         self._compose_sync_selection_toolbar_visibility()
+
+    def _apply_focus_preview_mode(self) -> None:
+        """Backward-compatible alias for tab/plan layout callers."""
+        self._apply_focus_compose_mode()
 
     def _compose_tab_exit_rename_mode(self) -> None:
         self._compose_tab_inline_rename_active = False
@@ -1104,24 +1291,39 @@ class MarkdownStudioCompose:
             self._refresh_compare_tab_candidate_ui()
             self._sync_version_toolbar_state()
             self._refresh_title_bar()
+            if hasattr(self, "_rebuild_compare_view"):
+                self._rebuild_compare_view()
             self._snack(f'Renamed to "{name}".')
 
     def _on_compose_reading_wrap_size(self, e: ft.LayoutSizeChangeEvent) -> None:
-        """Size reading card width from available compose column width."""
-        avail = max(200.0, float(e.width))
+        """Size reading card from available compose column width and height."""
+        avail_w = max(200.0, float(e.width))
+        avail_h = max(60.0, float(e.height))
         if hasattr(self, "_apply_compose_reading_card_width"):
-            self._apply_compose_reading_card_width(avail)
-        if hasattr(self, "_sync_compose_plan_viewport_width"):
-            self._sync_compose_plan_viewport_width(avail)
+            self._apply_compose_reading_card_width(avail_w)
+        if hasattr(self, "_sync_compose_plan_viewport_size"):
+            self._sync_compose_plan_viewport_size(avail_w, avail_h)
+        elif hasattr(self, "_sync_compose_plan_viewport_width"):
+            self._sync_compose_plan_viewport_width(avail_w)
         else:
             reading_w = int(
-                min(float(READING_MAX_PX), max(240.0, avail * COMPOSE_READING_WIDTH_FRAC))
+                min(float(READING_MAX_PX), max(240.0, avail_w * COMPOSE_READING_WIDTH_FRAC))
             )
             cur = int(self._compose_reading_card.width or 0)
             if cur != reading_w:
                 self._compose_reading_card.width = reading_w
                 if _ctrl_on_page(self._compose_reading_card):
                     self._compose_reading_card.update()
+        if (
+            getattr(self, "_focus_view_mode", "wysiwyg") == "wysiwyg"
+            and getattr(self, "_wysiwyg_controller", None) is not None
+        ):
+            reading_w = int(
+                min(float(READING_MAX_PX), max(240.0, avail_w * COMPOSE_READING_WIDTH_FRAC))
+            )
+            self._wysiwyg_controller.set_avail_width(
+                max(200.0, float(reading_w) - float(COMPOSE_EDITOR_SCROLLBAR_INSET_PX))
+            )
         if not getattr(self, "_compose_plan_viewer_active", lambda: False)():
             self._margin_gen += 1
             self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)
@@ -1187,6 +1389,11 @@ class MarkdownStudioCompose:
             self._kick_debounced_content_tree()
 
     def _on_editor_change(self, _e: ft.ControlEvent) -> None:
+        if getattr(self, "_wysiwyg_push_inflight", False):
+            self._editor_prev_for_list_continue = normalize_buffer_newlines(
+                self.editor.value or ""
+            )
+            return
         if self._editor_list_continue_applying:
             self._editor_prev_for_list_continue = normalize_buffer_newlines(
                 self.editor.value or ""
@@ -1197,7 +1404,7 @@ class MarkdownStudioCompose:
             self._compose_sel_span = None
             self._compose_toolbar_snap_range = None
 
-        if self._main_tab_index == TAB_PRESENT and self._focus_view_mode == "edit":
+        if self._main_tab_index == TAB_PRESENT and self._focus_view_mode == "source":
             raw_old = self._editor_prev_for_list_continue
             raw_new = self.editor.value or ""
             old = normalize_buffer_newlines(raw_old)
@@ -1225,8 +1432,6 @@ class MarkdownStudioCompose:
 
         self._refresh_dirty_state_ui()
         if self._main_tab_index == TAB_PRESENT:
-            if self._focus_view_mode == "preview":
-                self._kick_debounced_compose_preview_sync()
             self._margin_gen += 1
             gen = self._margin_gen
             self.page.run_task(self._debounced_compose_rebuild, gen)
@@ -1291,6 +1496,19 @@ class MarkdownStudioCompose:
             if cur < a or cur > b:
                 self._compose_sel_span = None
         self._compose_sync_selection_toolbar_visibility()
+        self._maybe_ki_comment_pick_from_editor(sel, buf)
+
+    def _maybe_ki_comment_pick_from_editor(
+        self, sel: ft.TextSelection | None, buf: str
+    ) -> None:
+        if not getattr(self, "_ki_comment_pick_mode", False):
+            return
+        if hasattr(self, "_ki_comments_use_plan_labels") and self._ki_comments_use_plan_labels():
+            return
+        if sel is None or not sel.is_collapsed:
+            return
+        idx = paragraph_index_at_offset(buf, int(sel.start))
+        self.page.run_task(self._on_ki_comment_pick_text_paragraph_async, idx)
 
     def _paragraph_sparkle_menu_control(self, para_index: int, *, for_compare: bool, compact: bool = False) -> ft.Control:
         """Compose: one popup with topic sections + prompts. Compare: Change-topic flat popup."""

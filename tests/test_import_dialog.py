@@ -2,11 +2,16 @@
 
 from pathlib import Path
 
+import pytest
+
 from iterthink import config
+from iterthink.db.session import session_scope
+from iterthink.persistence import content_repo
 from iterthink.services import document_import
 from iterthink.studio.explorer import (
     _effective_pdf_import_profile,
     _import_allowed_extensions,
+    _prior_import_settings,
 )
 
 
@@ -74,3 +79,44 @@ def test_plan_pdf_import_coerce_disabled(monkeypatch) -> None:
 def test_plan_pdf_import_coerce_enabled(monkeypatch) -> None:
     monkeypatch.setattr(config, "PLAN_PDF_IMPORT_ENABLED", True)
     assert _effective_pdf_import_profile("plan") == "plan"
+    assert _effective_pdf_import_profile("text") == "text"
+
+
+def test_prior_import_settings_none_without_versions(
+    ephemeral_store: None, tmp_path: Path
+) -> None:
+    md = tmp_path / "note.md"
+    md.write_text("# Note", encoding="utf-8")
+    assert _prior_import_settings(md) is None
+    with session_scope() as s:
+        assert content_repo.lineage_has_imported_version(s, md.resolve()) is False
+
+
+def test_prior_import_settings_reuses_lineage(
+    ephemeral_store: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config, "PLAN_PDF_IMPORT_ENABLED", True)
+    md = tmp_path / "plan.md"
+    md.write_text("<!-- pdf_profile:plan -->\n", encoding="utf-8")
+    pdf = tmp_path / "src.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    with session_scope() as s:
+        content_repo.persist_version_snapshot(
+            s,
+            md.resolve(),
+            md.read_text(),
+            "import",
+            pdf_source_path=pdf,
+            pdf_profile="plan",
+        )
+        content_repo.set_lineage_classification(
+            s,
+            md.resolve(),
+            "tec_plans",
+            source="import_manual",
+        )
+    prior = _prior_import_settings(md)
+    assert prior is not None
+    assert prior.pdf_profile == "plan"
+    assert prior.document_function == "tec_plans"
+    assert prior.classification_source == "import_manual"

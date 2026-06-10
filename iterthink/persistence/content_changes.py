@@ -114,6 +114,7 @@ def _geometry_source_for_annotation(annotation_id: int) -> str:
 def sync_plan_annotation_geometry(session: Session, ann: Any) -> None:
     """Mirror a plan pin/cloud row into ``content_geometries`` (PBS GeometryChange target)."""
     from iterthink.persistence.plan_pdf_annotations import (
+        KIND_CHANGE_REGION,
         KIND_PIN,
         KIND_REVISION_CLOUD,
         PlanAnnotation,
@@ -124,11 +125,12 @@ def sync_plan_annotation_geometry(session: Session, ann: Any) -> None:
     row = session.get(Content, int(ann.content_version_id))
     if row is None:
         return
-    role = (
-        GEOMETRY_ROLE_PLAN_PIN
-        if ann.annotation_kind == KIND_PIN
-        else GEOMETRY_ROLE_PLAN_CLOUD
-    )
+    if ann.annotation_kind == KIND_PIN:
+        role = GEOMETRY_ROLE_PLAN_PIN
+    elif ann.annotation_kind in (KIND_REVISION_CLOUD, KIND_CHANGE_REGION):
+        role = GEOMETRY_ROLE_PLAN_CLOUD
+    else:
+        return
     src = _geometry_source_for_annotation(ann.id)
     session.execute(
         delete(ContentGeometry).where(
@@ -136,8 +138,8 @@ def sync_plan_annotation_geometry(session: Session, ann: Any) -> None:
             ContentGeometry.geometry_source == src,
         )
     )
-    if ann.annotation_kind == KIND_REVISION_CLOUD:
-        geom = ann.geometry_json or json.dumps(ann.cloud_bbox_norm() or {})
+    if ann.annotation_kind in (KIND_REVISION_CLOUD, KIND_CHANGE_REGION):
+        geom = ann.geometry_json or json.dumps(ann.region_bbox_norm() or {})
     else:
         geom = json.dumps(
             {
@@ -185,3 +187,50 @@ def delete_plan_annotation_geometry(
             ContentGeometry.geometry_source == src,
         )
     )
+
+
+def enrich_plan_region_impact_geometry(
+    session: Session,
+    *,
+    annotation_id: int,
+    impact_narrative: str,
+    vec_rowid: int,
+    chunk_id: str,
+) -> None:
+    """Merge impact analysis fields into mirrored ``content_geometries.payload``."""
+    from sqlalchemy import select
+
+    from iterthink.persistence.plan_pdf_annotations import get_by_id
+
+    ann = get_by_id(session, int(annotation_id))
+    if ann is None:
+        return
+    src = _geometry_source_for_annotation(int(annotation_id))
+    geom_row = session.execute(
+        select(ContentGeometry).where(
+            ContentGeometry.content_id == int(ann.content_version_id),
+            ContentGeometry.geometry_source == src,
+        )
+    ).scalar_one_or_none()
+    if geom_row is None:
+        sync_plan_annotation_geometry(session, ann)
+        geom_row = session.execute(
+            select(ContentGeometry).where(
+                ContentGeometry.content_id == int(ann.content_version_id),
+                ContentGeometry.geometry_source == src,
+            )
+        ).scalar_one_or_none()
+    if geom_row is None:
+        return
+    try:
+        payload = json.loads(geom_row.payload or "{}")
+    except (json.JSONDecodeError, TypeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["impact_narrative"] = (impact_narrative or "").strip()
+    payload["vec_rowid"] = int(vec_rowid)
+    payload["chunk_id"] = str(chunk_id)
+    geom_row.payload = json.dumps(payload)
+    geom_row.updated_at = time.time()
+    session.flush()

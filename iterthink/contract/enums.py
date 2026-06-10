@@ -1,4 +1,4 @@
-"""Subset of contract enums for adapter validation (v0.0.7)."""
+"""Subset of contract enums for adapter validation (v0.1.0)."""
 
 from __future__ import annotations
 

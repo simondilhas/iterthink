@@ -26,10 +26,19 @@ def last_user_message_content(messages: list[dict[str, str]]) -> str:
     return ""
 
 
+def privacy_shield_enabled_for_tier(tier: str) -> bool:
+    """True when privacy shield is enabled for this outbound tier."""
+    t = (tier or "").strip().lower()
+    if t == "company":
+        return bool(config.PRIVACY_SHIELD_COMPANY_ENABLED)
+    if t == "cloud":
+        return bool(config.PRIVACY_SHIELD_CLOUD_ENABLED)
+    return False
+
+
 def privacy_shield_applies_to_tier(tier: str) -> bool:
     """True when outbound Office/Cloud requests are redacted."""
-    t = (tier or "").strip().lower()
-    return bool(config.PRIVACY_SHIELD_ENABLED) and t in ("company", "cloud")
+    return privacy_shield_enabled_for_tier(tier)
 
 
 def should_show_masked_in_chat(tier: str) -> bool:
@@ -74,7 +83,7 @@ async def redact_messages_for_tier(
     """Redact all message bodies when shield applies to this tier; else passthrough."""
     if not privacy_shield_applies_to_tier(tier):
         return messages, None
-    redacted, rmap = await redact_messages(messages)
+    redacted, rmap = await redact_messages(messages, tier)
     return redacted, rmap
 
 
@@ -206,7 +215,10 @@ def _parse_redaction_json(raw: str) -> tuple[str, RedactionMap, list[dict[str, A
 
 
 def apply_llm_entities_to_text(
-    text: str, entities: list[dict[str, Any]]
+    text: str,
+    entities: list[dict[str, Any]],
+    *,
+    tier: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Replace entity values with typed {{PREFIX_n}} on regex-preprocessed text."""
     mapping: dict[str, str] = {}
@@ -224,6 +236,7 @@ def apply_llm_entities_to_text(
         prefix = placeholder_prefix_for_entity(
             str(ent.get("type") or ""),
             str(ent.get("placeholder") or ""),
+            tier=tier,
         )
         n = counters.get(prefix, 0) + 1
         counters[prefix] = n
@@ -288,26 +301,29 @@ async def _llm_collect_entities(regex_text: str, system: str) -> tuple[list[dict
     return _dedupe_entities(all_entities), redacted_llm
 
 
-async def redact_text_via_local_llm(text: str) -> tuple[str, RedactionMap]:
+async def redact_text_via_local_llm(
+    text: str,
+    tier: str | None = None,
+) -> tuple[str, RedactionMap]:
     """Regex pass for configured categories, then local Qwen for LLM categories."""
     if not (text or "").strip():
         return text, RedactionMap()
 
-    regex_text, regex_map = regex_redact_configured(text)
+    regex_text, regex_map = regex_redact_configured(text, tier=tier)
     rmap = RedactionMap()
     rmap.merge_mapping(regex_map)
 
     if not regex_text.strip():
         return regex_text, rmap
 
-    if not llm_categories():
+    if not llm_categories(tier=tier):
         return regex_text, rmap
 
-    system = build_redact_system_prompt()
+    system = build_redact_system_prompt(tier=tier)
     entities, redacted_llm = await _llm_collect_entities(regex_text, system)
 
     if entities:
-        redacted, entity_map = apply_llm_entities_to_text(regex_text, entities)
+        redacted, entity_map = apply_llm_entities_to_text(regex_text, entities, tier=tier)
         rmap.merge_mapping(entity_map)
         if _entity_values_still_present(redacted, entities) and _redacted_llm_usable(redacted_llm):
             redacted = redacted_llm
@@ -320,6 +336,7 @@ async def redact_text_via_local_llm(text: str) -> tuple[str, RedactionMap]:
 
 async def redact_messages(
     messages: list[dict[str, str]],
+    tier: str | None = None,
 ) -> tuple[list[dict[str, str]], RedactionMap]:
     """Redact content fields in all messages; merge maps."""
     merged = RedactionMap()
@@ -328,7 +345,7 @@ async def redact_messages(
         role = str(m.get("role") or "user")
         content = str(m.get("content") or "")
         if content.strip():
-            redacted, rmap = await redact_text_via_local_llm(content)
+            redacted, rmap = await redact_text_via_local_llm(content, tier)
             merged.merge(rmap)
             out.append({"role": role, "content": redacted})
         else:

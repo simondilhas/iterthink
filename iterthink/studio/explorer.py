@@ -8,14 +8,23 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import flet as ft
 
 from iterthink import config
+from iterthink.contract.document_classification import SuggestResult, classify_document
+from iterthink.contract.document_function import TEC_DOCUMENTS
+from iterthink.contract.document_function_catalog import is_valid_function_id
 from iterthink.persistence import content_repo, store_db
 from iterthink.services import document_import
+from iterthink.services.import_classification_runner import suggest_for_import
 from iterthink.db.session import session_scope
+from .import_classification_ui import (
+    build_document_function_dropdown,
+    document_function_section_label,
+)
 from .constants import TAB_FUTURE, TAB_HISTORY, TAB_PRESENT
 from .list_continuation import normalize_buffer_newlines
 from .util import ctrl_on_page as _ctrl_on_page
@@ -62,6 +71,79 @@ _PDF_IMPORT_LABEL_PLAN = "Content and Layout (e.g. Review of plans, Layouts)"
 
 def _pdf_import_suggested_label(profile: document_import.PdfProfileHeuristic) -> str:
     return "Content and Layout" if profile == "plan" else "Content only"
+
+
+@dataclass(frozen=True)
+class _PdfImportDialogResult:
+    profile: document_import.PdfProfileHeuristic
+    function_id: str
+    classification_source: str
+
+
+@dataclass(frozen=True)
+class _PriorImportSettings:
+    pdf_profile: document_import.PdfProfileHeuristic
+    document_function: str
+    classification_source: str
+
+
+def _lineage_has_imported_version(resolved_md: Path) -> bool:
+    with session_scope() as s:
+        return content_repo.lineage_has_imported_version(s, resolved_md.resolve())
+
+
+def _prior_import_settings(resolved_md: Path) -> _PriorImportSettings | None:
+    """Reuse import-as profile and document function from an existing document lineage."""
+    resolved = resolved_md.resolve()
+    with session_scope() as s:
+        if not content_repo.lineage_has_imported_version(s, resolved):
+            return None
+        row = content_repo.get_artifact_lineage_by_path(s, resolved)
+        if row is None:
+            return None
+        attrs = content_repo.lineage_stored_classification_attrs(s, resolved)
+        cl = classify_document(resolved, stored_attrs=attrs)
+        fid = cl.document_functions[0] if cl.document_functions else TEC_DOCUMENTS
+        if not is_valid_function_id(fid):
+            fid = TEC_DOCUMENTS
+        class_src = str(attrs.get("classification_source") or cl.source or "stored")
+        latest_pdf = content_repo.latest_pdf_version_for_document(s, resolved)
+        if latest_pdf is not None:
+            prof = content_repo.get_version_pdf_profile(s, latest_pdf[0])
+            pdf_prof: document_import.PdfProfileHeuristic = (
+                "plan" if prof == "plan" else "text"
+            )
+        elif content_repo.is_plan_lineage(s, resolved):
+            pdf_prof = "plan"
+        else:
+            pdf_prof = "text"
+        return _PriorImportSettings(
+            pdf_profile=_effective_pdf_import_profile(pdf_prof),
+            document_function=fid,
+            classification_source=class_src,
+        )
+
+
+def _import_dest_dialog_hint(
+    dest_md: Path, documents_root: Path, *, import_into_existing: bool
+) -> str:
+    dest_md = dest_md.resolve()
+    root = documents_root.resolve()
+    try:
+        label = dest_md.relative_to(root).as_posix()
+    except ValueError:
+        label = dest_md.as_posix()
+    if import_into_existing:
+        return f"Add version to: {label}"
+    return f"Save as: {label}"
+
+
+def _classification_persist_source(suggested: SuggestResult, selected_id: str) -> str:
+    return (
+        "import_autoclassify"
+        if selected_id == suggested.function_id
+        else "import_manual"
+    )
 
 
 def _experimental_badge() -> ft.Container:
@@ -357,6 +439,11 @@ class MarkdownStudioExplorer:
                     self.current_path = new_resolved / rel
                 except ValueError:
                     pass
+
+        if not is_dir and self.current_path and self.current_path.resolve() == new_resolved:
+            self._refresh_compare_tab_candidate_ui()
+            if hasattr(self, "_rebuild_compare_view"):
+                self._rebuild_compare_view()
 
         return "renamed"
 
@@ -810,6 +897,7 @@ class MarkdownStudioExplorer:
 
     def _clear_open_document_ui(self) -> None:
         """Reset editor and compare state when no file is open (e.g. after delete)."""
+        self._cancel_and_teardown_compose_plan_viewer()
         self._cancel_autosave_timers()
         self._compare_candidate_source = "draft"
         self._compare_snapshot_version_id = None
@@ -1089,6 +1177,7 @@ class MarkdownStudioExplorer:
             self._snack(f"Picker failed: {ex}")
             return
         if not files or not getattr(files[0], "path", None):
+            self._snack("Could not read file path from picker.")
             return
         src = Path(files[0].path)
         if document_import.validate_extension(src) is None:
@@ -1100,36 +1189,171 @@ class MarkdownStudioExplorer:
         if new_document:
             await self._import_finish_new_document_dialog(src, dest_parent=dest_parent)
         else:
+            target = target_md.resolve()
+            prior = (
+                _prior_import_settings(target)
+                if _lineage_has_imported_version(target)
+                else None
+            )
             pdf_profile: document_import.PdfProfileHeuristic | None = None
-            if _ext_is_pdf(src):
+            document_function: str | None = None
+            classification_source = "import_manual"
+            if prior is not None:
+                pdf_profile = prior.pdf_profile if _ext_is_pdf(src) else None
+                document_function = prior.document_function
+                classification_source = prior.classification_source
+                if _ext_is_pdf(src):
+                    try:
+                        src, _ = await self._stage_and_classify_pdf(src)
+                    except BaseException as ex:
+                        self._snack(f"Could not read PDF: {ex}")
+                        return
+            elif _ext_is_pdf(src):
                 try:
-                    src = await asyncio.to_thread(_stage_import_source, src)
+                    src, _suggested = await self._stage_and_classify_pdf(src)
                 except BaseException as ex:
                     self._snack(f"Could not read PDF: {ex}")
                     return
-                pdf_profile = await self._prompt_pdf_import_profile(src)
-                if pdf_profile is None:
+                pdf_choice = await self._prompt_pdf_import_profile(
+                    src,
+                    suggested=_suggested,
+                    dest_md_path=target,
+                )
+                if pdf_choice is None:
                     return
+                pdf_profile = pdf_choice.profile
+                document_function = pdf_choice.function_id
+                classification_source = pdf_choice.classification_source
+            else:
+                func_choice = await self._prompt_import_document_function(
+                    title="Import version",
+                    dest_hint=_import_dest_dialog_hint(
+                        target, config.DOCUMENTS.resolve(), import_into_existing=True
+                    ),
+                    src=src,
+                    dest_md_path=target,
+                )
+                if func_choice is None:
+                    return
+                document_function, classification_source = func_choice
             await self._write_import_result(
                 src,
-                target_md.resolve(),
+                target,
                 pdf_profile=pdf_profile,
                 import_into_existing=True,
+                document_function=document_function,
+                classification_source=classification_source,
             )
 
-    async def _prompt_pdf_import_profile(
-        self, src: Path
-    ) -> document_import.PdfProfileHeuristic | None:
-        """Let the user pick document (markdown) vs plan (drawing) import."""
-        if not config.PLAN_PDF_IMPORT_ENABLED:
-            return "text"
+    async def _stage_and_classify_pdf(
+        self, picked: Path
+    ) -> tuple[Path, document_import.PdfProfileHeuristic]:
+        """Copy picker PDF to store staging and classify profile (with progress UI)."""
+        progress = await self._begin_import_progress("Reading PDF…")
         try:
-            suggested = await asyncio.to_thread(document_import.classify_pdf_profile, src)
-        except BaseException as ex:
-            self._snack(f"Could not read PDF: {ex}")
-            return None
+            staged = await asyncio.to_thread(_stage_import_source, picked)
+            suggested = await asyncio.to_thread(document_import.classify_pdf_profile, staged)
+            return staged, suggested
+        finally:
+            await progress.close()
+
+    async def _prompt_import_document_function(
+        self,
+        *,
+        title: str,
+        dest_hint: str,
+        src: Path,
+        dest_md_path: Path,
+        extra_rows: list[ft.Control] | None = None,
+        function_suggested: SuggestResult | None = None,
+    ) -> tuple[str, str] | None:
+        """Return ``(function_id, classification_source)`` or None if cancelled."""
+        suggested = function_suggested or await suggest_for_import(
+            self,
+            src_path=src,
+            dest_md_path=dest_md_path,
+            body=None,
+        )
         done = asyncio.Event()
-        outcome: dict[str, document_import.PdfProfileHeuristic | None] = {"profile": None}
+        outcome: dict[str, tuple[str, str] | None] = {"value": None}
+        func_dd, get_func = build_document_function_dropdown(suggested.function_id)
+        rows: list[ft.Control] = [
+            ft.Text(dest_hint, size=12, color=config.ON_SURFACE_VARIANT),
+        ]
+        if extra_rows:
+            rows.extend(extra_rows)
+        rows.extend([document_function_section_label(), func_dd])
+
+        async def confirm(_e: ft.ControlEvent | None = None) -> None:
+            fid = get_func()
+            outcome["value"] = (fid, _classification_persist_source(suggested, fid))
+            self.page.pop_dialog()
+            done.set()
+
+        def cancel(_e: ft.ControlEvent) -> None:
+            self.page.pop_dialog()
+            done.set()
+
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text(title),
+                content=ft.Column(rows, tight=True, spacing=8),
+                actions=[
+                    ft.TextButton("Cancel", on_click=cancel),
+                    ft.TextButton("Continue", on_click=lambda _e: self.page.run_task(confirm)),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        )
+        await done.wait()
+        return outcome["value"]
+
+    async def _prompt_pdf_import_profile(
+        self,
+        src: Path,
+        *,
+        suggested: document_import.PdfProfileHeuristic | None = None,
+        dest_md_path: Path | None = None,
+        function_suggested: SuggestResult | None = None,
+        import_into_existing: bool = True,
+    ) -> _PdfImportDialogResult | None:
+        """Let the user pick document (markdown) vs plan (drawing) import."""
+        if suggested is None:
+            try:
+                suggested = await asyncio.to_thread(document_import.classify_pdf_profile, src)
+            except BaseException as ex:
+                self._snack(f"Could not read PDF: {ex}")
+                return None
+        dest_for_fn = dest_md_path or src.with_suffix(".md")
+        fn_suggested = function_suggested or await suggest_for_import(
+            self,
+            src_path=src,
+            dest_md_path=dest_for_fn,
+            body=None,
+        )
+        if not config.PLAN_PDF_IMPORT_ENABLED:
+            choice = await self._prompt_import_document_function(
+                title="Import PDF",
+                dest_hint=_import_dest_dialog_hint(
+                    dest_for_fn,
+                    config.DOCUMENTS.resolve(),
+                    import_into_existing=import_into_existing,
+                ),
+                src=src,
+                dest_md_path=dest_for_fn,
+                function_suggested=fn_suggested,
+            )
+            if choice is None:
+                return None
+            fid, class_src = choice
+            return _PdfImportDialogResult(
+                profile="text",
+                function_id=fid,
+                classification_source=class_src,
+            )
+        done = asyncio.Event()
+        outcome: dict[str, _PdfImportDialogResult | None] = {"value": None}
 
         hint = ft.Text(
             f"Suggested: {_pdf_import_suggested_label(suggested)}",
@@ -1148,13 +1372,19 @@ class MarkdownStudioExplorer:
             selected=selected,
             on_change=_on_profile_change,
         )
+        func_dd, get_func = build_document_function_dropdown(fn_suggested.function_id)
 
         async def confirm(_e: ft.ControlEvent | None = None) -> None:
-            val = rg.value or selected["value"]
+            val = selected["value"] or rg.value
             if val not in ("text", "plan"):
                 self._snack("Choose an import type.")
                 return
-            outcome["profile"] = val  # type: ignore[assignment]
+            fid = get_func()
+            outcome["value"] = _PdfImportDialogResult(
+                profile=val,  # type: ignore[arg-type]
+                function_id=fid,
+                classification_source=_classification_persist_source(fn_suggested, fid),
+            )
             self.page.pop_dialog()
             done.set()
 
@@ -1166,7 +1396,17 @@ class MarkdownStudioExplorer:
             ft.AlertDialog(
                 modal=True,
                 title=ft.Text("Import PDF"),
-                content=ft.Column([hint, rg], tight=True, spacing=8),
+                content=ft.Column(
+                    [
+                        hint,
+                        ft.Text("Import as", size=12, weight=ft.FontWeight.W_500),
+                        rg,
+                        document_function_section_label(),
+                        func_dd,
+                    ],
+                    tight=True,
+                    spacing=8,
+                ),
                 actions=[
                     ft.TextButton("Cancel", on_click=cancel),
                     ft.TextButton("Continue", on_click=lambda _e: self.page.run_task(confirm)),
@@ -1175,7 +1415,7 @@ class MarkdownStudioExplorer:
             )
         )
         await done.wait()
-        return outcome["profile"]
+        return outcome["value"]
 
     def _import_dest_md_path(self, src: Path, base: Path) -> Path | None:
         """Target ``.md`` path from the source file name, or None if the name is invalid."""
@@ -1198,24 +1438,67 @@ class MarkdownStudioExplorer:
         dest = self._import_dest_md_path(picked, base)
         if dest is None:
             return
-        import_into_existing = dest.exists()
+        import_into_existing = dest.exists() or _lineage_has_imported_version(dest)
         is_pdf = _ext_is_pdf(picked)
+        prior = (
+            _prior_import_settings(dest)
+            if _lineage_has_imported_version(dest)
+            else None
+        )
+        if prior is not None:
+            if is_pdf:
+                try:
+                    staged_src, _ = await self._stage_and_classify_pdf(picked)
+                except BaseException as ex:
+                    self._snack(f"Could not read PDF: {ex}")
+                    return
+                await self._write_import_result(
+                    staged_src,
+                    dest,
+                    pdf_profile=prior.pdf_profile,
+                    import_into_existing=True,
+                    document_function=prior.document_function,
+                    classification_source=prior.classification_source,
+                )
+            else:
+                await self._write_import_result(
+                    picked,
+                    dest,
+                    import_into_existing=True,
+                    document_function=prior.document_function,
+                    classification_source=prior.classification_source,
+                )
+            return
+        fn_suggested = await suggest_for_import(
+            self,
+            src_path=picked,
+            dest_md_path=dest,
+            body=None,
+        )
         if not is_pdf:
+            choice = await self._prompt_import_document_function(
+                title="Import" if not import_into_existing else "Import version",
+                dest_hint=_import_dest_dialog_hint(
+                    dest, root, import_into_existing=import_into_existing
+                ),
+                src=picked,
+                dest_md_path=dest,
+                function_suggested=fn_suggested,
+            )
+            if choice is None:
+                return
+            document_function, classification_source = choice
             await self._write_import_result(
-                picked, dest, import_into_existing=import_into_existing
+                picked,
+                dest,
+                import_into_existing=import_into_existing,
+                document_function=document_function,
+                classification_source=classification_source,
             )
             return
 
         try:
-            staged_src = await asyncio.to_thread(_stage_import_source, picked)
-        except BaseException as ex:
-            self._snack(f"Could not read PDF: {ex}")
-            return
-
-        try:
-            suggested_prof = await asyncio.to_thread(
-                document_import.classify_pdf_profile, staged_src
-            )
+            staged_src, suggested_prof = await self._stage_and_classify_pdf(picked)
         except BaseException as ex:
             self._snack(f"Could not read PDF: {ex}")
             return
@@ -1223,11 +1506,14 @@ class MarkdownStudioExplorer:
             dest, root, import_into_existing=import_into_existing
         )
         plan_import_enabled = config.PLAN_PDF_IMPORT_ENABLED
+        func_dd, get_func = build_document_function_dropdown(fn_suggested.function_id)
 
         async def apply(_e: ft.ControlEvent | None = None) -> None:
             try:
                 if plan_import_enabled:
-                    val = pdf_profile_rg.value or selected_profile["value"]
+                    val = selected_profile["value"] or (
+                        pdf_profile_rg.value if pdf_profile_rg is not None else None
+                    )
                     if val not in ("text", "plan"):
                         self._snack("Choose an import type.")
                         return
@@ -1238,12 +1524,15 @@ class MarkdownStudioExplorer:
                     profile = val  # type: ignore[assignment]
                 else:
                     profile = "text"
+                fid = get_func()
                 self.page.pop_dialog()
                 await self._write_import_result(
                     staged_src,
                     dest,
                     pdf_profile=profile,  # type: ignore[arg-type]
                     import_into_existing=import_into_existing,
+                    document_function=fid,
+                    classification_source=_classification_persist_source(fn_suggested, fid),
                 )
             except BaseException as ex:
                 self._snack(f"Import failed: {ex}")
@@ -1283,6 +1572,7 @@ class MarkdownStudioExplorer:
                     pdf_profile_rg,
                 ]
             )
+        dialog_content.extend([document_function_section_label(), func_dd])
 
         self.page.show_dialog(
             ft.AlertDialog(
@@ -1325,6 +1615,8 @@ class MarkdownStudioExplorer:
         *,
         pdf_profile: document_import.PdfProfileHeuristic | None = None,
         import_into_existing: bool = False,
+        document_function: str | None = None,
+        classification_source: str = "import_manual",
     ) -> None:
         ext = document_import.validate_extension(src)
         pdf_src = src if ext == "pdf" else None
@@ -1356,30 +1648,24 @@ class MarkdownStudioExplorer:
 
                 md, pdf_prof, _ = await asyncio.to_thread(_ocr_image)
             elif pdf_src is not None:
-                pdf_prof = _effective_pdf_import_profile(
-                    pdf_profile or document_import.classify_pdf_profile(src)
-                )
-                if pdf_prof == "plan":
-                    if progress is not None:
-                        await progress.set_message("Saving plan PDF…")
+                if progress is not None:
+                    await progress.set_message("Preparing PDF…")
 
-                    def _fast_plan() -> tuple[str, content_repo.PdfProfile | None]:
+                def _prepare_pdf_body() -> tuple[str, content_repo.PdfProfile | None]:
+                    raw_prof = pdf_profile
+                    if raw_prof is None:
+                        raw_prof = document_import.classify_pdf_profile(src)
+                    prof = _effective_pdf_import_profile(raw_prof)
+                    if prof == "plan":
                         return document_import.import_plan_pdf_fast_stub(), "plan"
+                    md_body, _geo = document_import.import_pdf_with_profile_and_geometry(
+                        src, prof  # type: ignore[arg-type]
+                    )
+                    return md_body, prof
 
-                    md, pdf_prof, _ = await asyncio.to_thread(_fast_plan)
+                md, pdf_prof = await asyncio.to_thread(_prepare_pdf_body)
+                if pdf_prof == "plan":
                     lazy_geometry_src = pdf_src
-                else:
-                    if progress is not None:
-                        await progress.set_message("Extracting text from PDF…")
-
-                    def _extract_text() -> tuple[str, content_repo.PdfProfile | None, None]:
-                        prof = pdf_prof or "text"
-                        md_body, _geo = document_import.import_pdf_with_profile_and_geometry(
-                            src, prof  # type: ignore[arg-type]
-                        )
-                        return md_body, prof, None
-
-                    md, pdf_prof, _ = await asyncio.to_thread(_extract_text)
             else:
                 if progress is not None:
                     await progress.set_message("Converting document…")
@@ -1403,21 +1689,46 @@ class MarkdownStudioExplorer:
             self._snack(f"Could not write file: {ex}")
             return
         new_vid: int | None = None
+        if pdf_prof == "plan" and pdf_src is not None:
+            progress = await self._begin_import_progress("Saving PDF to library…")
         try:
-            with session_scope() as s:
-                new_vid = content_repo.persist_version_snapshot(
-                    s,
-                    dest.resolve(),
-                    md,
-                    "import",
-                    skip_if_unchanged_sha=False,
-                    pdf_source_path=pdf_src,
-                    docx_source_path=docx_src,
-                    pdf_profile=pdf_prof,
-                )
+
+            def _persist_snapshot() -> int | None:
+                with session_scope() as s:
+                    return content_repo.persist_version_snapshot(
+                        s,
+                        dest.resolve(),
+                        md,
+                        "import",
+                        skip_if_unchanged_sha=False,
+                        pdf_source_path=pdf_src,
+                        docx_source_path=docx_src,
+                        pdf_profile=pdf_prof,
+                    )
+
+            new_vid = await asyncio.to_thread(_persist_snapshot)
         except BaseException as ex:
             self._snack(f"Could not record version: {ex}")
             return
+        finally:
+            if progress is not None and pdf_prof == "plan" and pdf_src is not None:
+                await progress.close()
+                progress = None
+        if document_function:
+            try:
+
+                def _persist_classification() -> None:
+                    with session_scope() as s:
+                        content_repo.set_lineage_classification(
+                            s,
+                            dest.resolve(),
+                            document_function,
+                            source=classification_source,
+                        )
+
+                await asyncio.to_thread(_persist_classification)
+            except BaseException as ex:
+                self._snack(f"Could not save document function: {ex}")
         if pdf_prof == "plan" and new_vid is not None:
             with session_scope() as s:
                 pdf_rel = content_repo.get_version_pdf_relpath(s, new_vid)
@@ -1432,6 +1743,9 @@ class MarkdownStudioExplorer:
         )
         if pdf_prof == "plan":
             progress = await self._begin_import_progress("Rendering plan pages…")
+            self._import_plan_progress = progress
+        else:
+            self._import_plan_progress = None
         try:
             await self.open_file(
                 dest,
@@ -1442,6 +1756,7 @@ class MarkdownStudioExplorer:
                 import_into_existing=import_into_existing,
             )
         finally:
+            self._import_plan_progress = None
             if progress is not None:
                 await progress.close()
         target = document_import.import_target_display_path(
@@ -1828,6 +2143,7 @@ class MarkdownStudioExplorer:
         self._reset_compare_state()
         self._compose_plan_surface_key = None
         self._compose_plan_load_inflight_key = None
+        self._compose_plan_load_gen = int(getattr(self, "_compose_plan_load_gen", 0)) + 1
         self.current_path = path
         self._comment_para_index = None
         if hasattr(self, "_sync_ki_comments_tab_layout"):
@@ -1835,6 +2151,8 @@ class MarkdownStudioExplorer:
         self.last_saved_text = text
         self.editor.value = text
         self._editor_prev_for_list_continue = normalize_buffer_newlines(text)
+        if hasattr(self, "_apply_focus_compose_mode"):
+            self._apply_focus_compose_mode()
         self._compare_editor.value = text
         self._compare_baseline_snapshot = text
         self._refresh_compare_tab_candidate_ui()
@@ -1846,6 +2164,9 @@ class MarkdownStudioExplorer:
 
         prof = after_import_profile or self._document_pdf_profile()
 
+        if prof != "plan":
+            self._plan_layout_mode = "side_by_side"
+
         if after_import_vid is not None:
             self._select_snapshot_as_candidate(
                 after_import_vid, defer_rebuild=(prof == "plan")
@@ -1853,12 +2174,15 @@ class MarkdownStudioExplorer:
             self._refresh_compare_tab_candidate_ui()
 
         if prof == "plan":
-            self._apply_plan_import_open_state()
+            self._apply_plan_import_open_state(version_import=import_into_existing)
             self._skip_compose_plan_refresh_on_tab = True
             try:
                 if import_into_existing:
-                    await self._request_tab_switch_async(TAB_HISTORY)
-                    await self._rebuild_compare_view_async()
+                    await self._request_tab_switch_async(TAB_FUTURE)
+                    self._refresh_plan_compare_bar()
+                    await self._rebuild_future_plan_pdf_panes_async()
+                    if hasattr(self, "_sync_future_pdf_layers_visibility"):
+                        self._sync_future_pdf_layers_visibility()
                 else:
                     await self._request_tab_switch_async(TAB_PRESENT)
                     await self._refresh_compose_plan_surface_async()

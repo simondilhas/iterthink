@@ -174,6 +174,39 @@ def compose_preview_markdown_style_sheet() -> ft.MarkdownStyleSheet:
     )
 
 
+def compose_wysiwyg_block_markdown_style_sheet() -> ft.MarkdownStyleSheet:
+    """Per-block wysiwyg read surface: inter-block gaps live on row margins, not Markdown."""
+    sheet = compose_preview_markdown_style_sheet()
+    return ft.MarkdownStyleSheet(
+        block_spacing=0,
+        p_text_style=sheet.p_text_style,
+        p_padding=ft.padding.all(0),
+        h1_text_style=sheet.h1_text_style,
+        h1_padding=sheet.h1_padding,
+        h2_text_style=sheet.h2_text_style,
+        h2_padding=sheet.h2_padding,
+        h3_text_style=sheet.h3_text_style,
+        h3_padding=sheet.h3_padding,
+        h4_text_style=sheet.h4_text_style,
+        h4_padding=sheet.h4_padding,
+        h5_text_style=sheet.h5_text_style,
+        h5_padding=sheet.h5_padding,
+        h6_text_style=sheet.h6_text_style,
+        h6_padding=sheet.h6_padding,
+        strong_text_style=sheet.strong_text_style,
+        em_text_style=sheet.em_text_style,
+        list_indent=sheet.list_indent,
+        list_bullet_padding=ft.padding.symmetric(vertical=2),
+        blockquote_padding=sheet.blockquote_padding,
+        table_head_text_style=sheet.table_head_text_style,
+        table_body_text_style=sheet.table_body_text_style,
+        table_cells_padding=sheet.table_cells_padding,
+        table_padding=sheet.table_padding,
+        table_cells_decoration=sheet.table_cells_decoration,
+        horizontal_rule_decoration=sheet.horizontal_rule_decoration,
+    )
+
+
 def result_card_bg() -> str:
     return ft.Colors.with_opacity(0.97, config.SURFACE_VARIANT)
 

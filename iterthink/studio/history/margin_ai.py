@@ -82,6 +82,8 @@ class _HistoryMarginAiMixin:
         self._hide_prompt_footer(footer)
         if _ctrl_on_page(self.editor):
             self.editor.update()
+        if hasattr(self, "_sync_wysiwyg_from_editor"):
+            self._sync_wysiwyg_from_editor()
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)
         self._refresh_title_bar()
@@ -122,6 +124,8 @@ class _HistoryMarginAiMixin:
         self._hide_prompt_footer(footer)
         if _ctrl_on_page(self.editor):
             self.editor.update()
+        if hasattr(self, "_sync_wysiwyg_from_editor"):
+            self._sync_wysiwyg_from_editor()
         self._margin_gen += 1
         await self._debounced_compose_rebuild(self._margin_gen)
         self._refresh_title_bar()

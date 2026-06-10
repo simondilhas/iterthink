@@ -7,8 +7,17 @@ def paragraph_comment_label(paragraph_index: int) -> str:
     return f"Paragraph {int(paragraph_index) + 1}"
 
 
+def change_region_placeholder_body(page_index: int) -> str:
+    return f"Changed area · Page {int(page_index) + 1}"
+
+
 def plan_comment_list_label(page_index: int, kind: str) -> str:
-    label = "pin" if kind == "pin" else "cloud"
+    if kind == "pin":
+        label = "pin"
+    elif kind == "change_region":
+        label = "area"
+    else:
+        label = "cloud"
     return f"Page {int(page_index) + 1} · {label}"
 
 

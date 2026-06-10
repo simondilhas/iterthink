@@ -25,6 +25,8 @@ from iterthink.privacy_shield_settings import format_placeholder, regex_redact_c
 def test_should_show_masked_in_chat(monkeypatch) -> None:
     from iterthink import config
 
+    monkeypatch.setattr(config, "PRIVACY_SHIELD_COMPANY_ENABLED", True)
+    monkeypatch.setattr(config, "PRIVACY_SHIELD_CLOUD_ENABLED", True)
     monkeypatch.setattr(config, "PRIVACY_SHIELD_ENABLED", True)
     monkeypatch.setattr(config, "PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT", True)
     assert privacy_shield_applies_to_tier("company")
@@ -32,6 +34,15 @@ def test_should_show_masked_in_chat(monkeypatch) -> None:
     assert not should_show_masked_in_chat("local")
     monkeypatch.setattr(config, "PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT", False)
     assert not should_show_masked_in_chat("company")
+
+
+def test_privacy_shield_per_tier_master_switch(monkeypatch) -> None:
+    from iterthink import config
+
+    monkeypatch.setattr(config, "PRIVACY_SHIELD_COMPANY_ENABLED", True)
+    monkeypatch.setattr(config, "PRIVACY_SHIELD_CLOUD_ENABLED", False)
+    assert privacy_shield_applies_to_tier("company")
+    assert not privacy_shield_applies_to_tier("cloud")
 
 
 def test_format_placeholder() -> None:
@@ -297,7 +308,6 @@ def test_llm_backend_skips_shield_on_local_tier() -> None:
             cloud_openai_model="",
             cloud_google_model="",
             secrets={},
-            privacy_shield_enabled=True,
         )
 
         with patch("iterthink.ai.llm_router.redact_messages", new_callable=AsyncMock) as mock_redact:
@@ -333,7 +343,6 @@ def test_llm_backend_skips_reinject_when_disabled() -> None:
             cloud_openai_model="",
             cloud_google_model="",
             secrets={"company_openai": "sk-test"},
-            privacy_shield_enabled=True,
             privacy_shield_reinject=False,
         )
 
@@ -383,7 +392,6 @@ def test_llm_backend_redacts_before_company_call() -> None:
             cloud_openai_model="",
             cloud_google_model="",
             secrets={"company_openai": "sk-test"},
-            privacy_shield_enabled=True,
             privacy_shield_reinject=True,
         )
 

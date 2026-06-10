@@ -69,7 +69,9 @@ RAG_RERANKER_ENABLED: bool = False
 RAG_RERANKER_MODEL: str = "Xenova/ms-marco-MiniLM-L-6-v2"
 RAG_CONTEXT_MAX_CHARS: int = 2400
 RAG_IMPACT_TOP_K: int = 3
-PRIVACY_SHIELD_ENABLED: bool = True
+PRIVACY_SHIELD_ENABLED: bool = True  # True when company or cloud shield is on
+PRIVACY_SHIELD_COMPANY_ENABLED: bool = True
+PRIVACY_SHIELD_CLOUD_ENABLED: bool = True
 PRIVACY_SHIELD_HF_REPO: str = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
 PRIVACY_SHIELD_HF_FILE: str = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
 PRIVACY_SHIELD_CACHE_NAME: str = "qwen-2.5-1.5b.gguf"
@@ -83,6 +85,11 @@ FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED: bool = False
 OCR_ENABLED: bool = False
 OCR_ENGINE: str = "rapidocr"
 OCR_MODEL: str = "ppocrv4_latin_mobile"
+IMPORT_CLASSIFICATION_LLM_ENABLED: bool = False
+IMPORT_CLASSIFICATION_TIER: str = "local"
+IMPORT_CLASSIFICATION_MODEL: str = ""
+IMPORT_CLASSIFICATION_EXCERPT_MAX_CHARS: int = 1200
+PLAN_REGION_IMPACT_VISION_MODEL: str = "llava:13b"
 
 
 def _bundled_defaults_dict() -> dict[str, Any]:
@@ -182,12 +189,16 @@ def refresh() -> None:
     global STARTUP_DAILY_LOG, NEW_NOTE_NAME_TEMPLATE, RAG_SYSTEM, RAG_SEARCH_ENABLED
     global RAG_INDEX_ON_STARTUP, RAG_OVERLAP_CHARS, RAG_RERANKER_ENABLED, RAG_RERANKER_MODEL
     global RAG_CONTEXT_MAX_CHARS, RAG_IMPACT_TOP_K
-    global PRIVACY_SHIELD_ENABLED, PRIVACY_SHIELD_HF_REPO, PRIVACY_SHIELD_HF_FILE
+    global PRIVACY_SHIELD_ENABLED, PRIVACY_SHIELD_COMPANY_ENABLED, PRIVACY_SHIELD_CLOUD_ENABLED
+    global PRIVACY_SHIELD_HF_REPO, PRIVACY_SHIELD_HF_FILE
     global PRIVACY_SHIELD_CACHE_NAME, PRIVACY_SHIELD_REINJECT, PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT
     global PRIVACY_SHIELD_CHUNK_MAX_CHARS, PRIVACY_SHIELD_CHUNK_OVERLAP_PARAGRAPHS
     global TOKEN_COST_PERIOD
     global PLAN_PDF_IMPORT_ENABLED, FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED
     global OCR_ENABLED, OCR_ENGINE, OCR_MODEL
+    global IMPORT_CLASSIFICATION_LLM_ENABLED, IMPORT_CLASSIFICATION_TIER
+    global IMPORT_CLASSIFICATION_MODEL, IMPORT_CLASSIFICATION_EXCERPT_MAX_CHARS
+    global PLAN_REGION_IMPACT_VISION_MODEL
 
     merged = _merged_config()
     DOCUMENTS = _as_path("documents_root", merged)
@@ -308,8 +319,27 @@ def refresh() -> None:
         )
 
     _bd = _bundled_defaults_dict()
-    pse = merged.get("privacy_shield_enabled", _bd.get("privacy_shield_enabled", True))
-    PRIVACY_SHIELD_ENABLED = bool(pse) if isinstance(pse, bool) else True
+    _bd_ps = _bd.get("privacy_shield_enabled", True)
+    legacy_ps = merged.get("privacy_shield_enabled", _bd_ps)
+    legacy_on = bool(legacy_ps) if isinstance(legacy_ps, bool) else True
+
+    psc = merged.get("privacy_shield_company_enabled", _bd.get("privacy_shield_company_enabled"))
+    if isinstance(psc, bool):
+        PRIVACY_SHIELD_COMPANY_ENABLED = psc
+    elif "privacy_shield_company_enabled" not in merged and "privacy_shield_company_enabled" not in _bd:
+        PRIVACY_SHIELD_COMPANY_ENABLED = legacy_on
+    else:
+        PRIVACY_SHIELD_COMPANY_ENABLED = bool(_bd.get("privacy_shield_company_enabled", True))
+
+    psz = merged.get("privacy_shield_cloud_enabled", _bd.get("privacy_shield_cloud_enabled"))
+    if isinstance(psz, bool):
+        PRIVACY_SHIELD_CLOUD_ENABLED = psz
+    elif "privacy_shield_cloud_enabled" not in merged and "privacy_shield_cloud_enabled" not in _bd:
+        PRIVACY_SHIELD_CLOUD_ENABLED = legacy_on
+    else:
+        PRIVACY_SHIELD_CLOUD_ENABLED = bool(_bd.get("privacy_shield_cloud_enabled", True))
+
+    PRIVACY_SHIELD_ENABLED = PRIVACY_SHIELD_COMPANY_ENABLED or PRIVACY_SHIELD_CLOUD_ENABLED
 
     phr = merged.get("privacy_shield_hf_repo", _bd.get("privacy_shield_hf_repo", "Qwen/Qwen2.5-1.5B-Instruct-GGUF"))
     PRIVACY_SHIELD_HF_REPO = (
@@ -364,6 +394,14 @@ def refresh() -> None:
     ppie = merged.get("plan_pdf_import_enabled", _bd.get("plan_pdf_import_enabled", False))
     PLAN_PDF_IMPORT_ENABLED = bool(ppie) if isinstance(ppie, bool) else False
 
+    prim = merged.get(
+        "plan_region_impact_vision_model",
+        _bd.get("plan_region_impact_vision_model", "llava:13b"),
+    )
+    PLAN_REGION_IMPACT_VISION_MODEL = (
+        prim.strip() if isinstance(prim, str) and prim.strip() else "llava:13b"
+    )
+
     fsra = merged.get(
         "focus_selection_review_actions_enabled",
         _bd.get("focus_selection_review_actions_enabled", False),
@@ -379,6 +417,28 @@ def refresh() -> None:
 
     om = merged.get("ocr_model", _bd.get("ocr_model", "ppocrv4_latin_mobile"))
     OCR_MODEL = normalize_ocr_model(engine, om if isinstance(om, str) else None)
+
+    from iterthink.import_classification_settings import normalize_import_classification_tier
+
+    icllm = merged.get("import_classification_llm_enabled", _bd.get("import_classification_llm_enabled", False))
+    IMPORT_CLASSIFICATION_LLM_ENABLED = bool(icllm) if isinstance(icllm, bool) else False
+
+    ict = merged.get("import_classification_tier", _bd.get("import_classification_tier", "local"))
+    IMPORT_CLASSIFICATION_TIER = normalize_import_classification_tier(
+        ict if isinstance(ict, str) else None
+    )
+
+    icm = merged.get("import_classification_model", _bd.get("import_classification_model", ""))
+    IMPORT_CLASSIFICATION_MODEL = icm.strip() if isinstance(icm, str) else ""
+
+    icem = merged.get(
+        "import_classification_excerpt_max_chars",
+        _bd.get("import_classification_excerpt_max_chars", 1200),
+    )
+    try:
+        IMPORT_CLASSIFICATION_EXCERPT_MAX_CHARS = max(200, int(icem))
+    except (TypeError, ValueError):
+        IMPORT_CLASSIFICATION_EXCERPT_MAX_CHARS = 1200
 
 
 def read_bootstrap_yaml_text() -> str:

@@ -10,6 +10,7 @@ OcrEngine = Literal["rapidocr", "ollama"]
 DEFAULT_OCR_ENGINE: OcrEngine = "rapidocr"
 DEFAULT_OCR_MODEL = "ppocrv4_latin_mobile"
 DEFAULT_OLLAMA_OCR_MODEL = "llava"
+DEFAULT_PLAN_REGION_IMPACT_VISION_MODEL = "llava:13b"
 
 RAPIDOCR_PRESETS = frozenset(
     {
@@ -44,6 +45,11 @@ def default_model_for_engine(engine: OcrEngine) -> str:
     if engine == "ollama":
         return DEFAULT_OLLAMA_OCR_MODEL
     return DEFAULT_OCR_MODEL
+
+
+def normalize_plan_region_impact_vision_model(raw: str | None) -> str:
+    s = (raw or "").strip()
+    return s if s else DEFAULT_PLAN_REGION_IMPACT_VISION_MODEL
 
 
 def normalize_ocr_model(engine: OcrEngine, raw: str | None) -> str:

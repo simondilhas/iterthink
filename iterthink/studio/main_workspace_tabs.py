@@ -182,6 +182,8 @@ class MainWorkspaceTabsMixin:
             sub_col.update()
         self._refresh_tab_toolbar()
         self._apply_focus_preview_mode()
+        if hasattr(self, "_sync_plan_filename_chrome"):
+            self._sync_plan_filename_chrome()
         if hasattr(self, "_sync_ki_topic_strip_after_workspace_tab_change"):
             self._sync_ki_topic_strip_after_workspace_tab_change()
 
@@ -251,7 +253,13 @@ class MainWorkspaceTabsMixin:
                 self._tab_toolbar.update()
 
         on_diff = self._main_tab_index == TAB_FUTURE and self._review_subtab_index == 0
-        self._review_difference_chrome_row.visible = on_diff
+        show_plan_pdf = (
+            on_diff
+            and getattr(self, "_compare_candidate_source", None) == "pdf_original"
+            and hasattr(self, "_is_plan_pdf_compare")
+            and self._is_plan_pdf_compare()
+        )
+        self._review_difference_chrome_row.visible = on_diff and not show_plan_pdf
         if _ctrl_on_page(self._review_difference_chrome_row):
             self._review_difference_chrome_row.update()
 
@@ -259,6 +267,11 @@ class MainWorkspaceTabsMixin:
         # They must be hidden/disabled explicitly so inactive menus cannot linger.
         on_history = self._main_tab_index == TAB_HISTORY
         on_review = self._main_tab_index == TAB_FUTURE and self._review_subtab_index == 0
+        text_single = (
+            on_review
+            and hasattr(self, "_review_text_single_mode")
+            and self._review_text_single_mode()
+        )
         lack_older = on_history and not bool(self._compare_candidate_dropdown.options)
         asset_compare = on_history and self._compare_candidate_source in ("pdf_original", "ifc_original")
         md_visible = on_history and not asset_compare
@@ -270,9 +283,12 @@ class MainWorkspaceTabsMixin:
         )
         self._compare_newer_dropdown.visible = md_visible
         self._compare_newer_dropdown.disabled = not md_visible or self.current_path is None
-        self._review_baseline_dropdown.visible = on_review
+        self._review_baseline_dropdown.visible = on_review and not text_single
         self._review_baseline_dropdown.disabled = (
-            not on_review or self.current_path is None or not bool(self._review_baseline_dropdown.options)
+            not on_review
+            or text_single
+            or self.current_path is None
+            or not bool(self._review_baseline_dropdown.options)
         )
         self._review_candidate_dropdown.visible = on_review
         self._review_candidate_dropdown.disabled = not on_review or not bool(
@@ -284,6 +300,8 @@ class MainWorkspaceTabsMixin:
             self._compare_newer_dropdown.update()
         if hasattr(self, "_toolbar_history_md_row") and _ctrl_on_page(self._toolbar_history_md_row):
             self._toolbar_history_md_row.update()
+        if hasattr(self, "_sync_review_text_layout_chrome"):
+            self._sync_review_text_layout_chrome()
         if _ctrl_on_page(self._review_baseline_dropdown):
             self._review_baseline_dropdown.update()
         if _ctrl_on_page(self._review_candidate_dropdown):
@@ -343,30 +361,40 @@ class MainWorkspaceTabsMixin:
             if prev != TAB_HISTORY:
                 self._compare_newer_version_id = None
                 self._compare_newer_cached_body = ""
-            pick_vid: int | None = None
-            pending_post_import = self._pending_post_import_history_vid
-            if pending_post_import is not None:
-                self._pending_post_import_history_vid = None
-            elif self.current_path and prev != TAB_HISTORY:
-                with session_scope() as s:
-                    snaps = content_repo.list_snapshots(s, self.current_path.resolve())
-                pick_vid = content_repo.second_newest_history_autosave_version_id(snaps)
-
-            if pick_vid is not None:
-                self._select_snapshot_as_candidate(pick_vid)
-                self._capture_compare_baseline_snapshot()
-            else:
-                if self._compare_candidate_source not in (
-                    "snapshot",
-                    "pdf_original",
-                    "docx_original",
-                    "ifc_original",
-                ):
-                    # No snapshot selected yet; prime left from draft until user picks a version.
-                    self._compare_candidate_source = "snapshot"
-                    self._compare_editor.value = self.editor.value or ""
-                    self._capture_compare_baseline_snapshot()
+            plan_pdf_history = (
+                self.current_path is not None
+                and hasattr(self, "_document_pdf_profile")
+                and self._document_pdf_profile() == "plan"
+                and hasattr(self, "_ensure_plan_pdf_compare_active")
+                and self._ensure_plan_pdf_compare_active()
+            )
+            if plan_pdf_history:
                 self._rebuild_compare_view()
+            else:
+                pick_vid: int | None = None
+                pending_post_import = self._pending_post_import_history_vid
+                if pending_post_import is not None:
+                    self._pending_post_import_history_vid = None
+                elif self.current_path and prev != TAB_HISTORY:
+                    with session_scope() as s:
+                        snaps = content_repo.list_snapshots(s, self.current_path.resolve())
+                    pick_vid = content_repo.second_newest_history_autosave_version_id(snaps)
+
+                if pick_vid is not None:
+                    self._select_snapshot_as_candidate(pick_vid)
+                    self._capture_compare_baseline_snapshot()
+                else:
+                    if self._compare_candidate_source not in (
+                        "snapshot",
+                        "pdf_original",
+                        "docx_original",
+                        "ifc_original",
+                    ):
+                        # No snapshot selected yet; prime left from draft until user picks a version.
+                        self._compare_candidate_source = "snapshot"
+                        self._compare_editor.value = self.editor.value or ""
+                        self._capture_compare_baseline_snapshot()
+                    self._rebuild_compare_view()
 
         # Entering Present (TAB_PRESENT)
         elif new_ix == TAB_PRESENT:
@@ -399,6 +427,13 @@ class MainWorkspaceTabsMixin:
             await asyncio.sleep(0)  # yield so the client paints Review + spinner before snapshot IO
 
             try:
+                if (
+                    self.current_path is not None
+                    and hasattr(self, "_document_pdf_profile")
+                    and self._document_pdf_profile() == "plan"
+                    and hasattr(self, "_ensure_plan_pdf_compare_active")
+                ):
+                    self._ensure_plan_pdf_compare_active()
                 spell_review_hold = (
                     self._compare_candidate_source == CompareCandidateSource.SPELL_PREVIEW
                 )
@@ -438,7 +473,18 @@ class MainWorkspaceTabsMixin:
                     return
                 if self._compare_candidate_source == CompareCandidateSource.SPELL_PREVIEW:
                     await self._sync_spell_candidate_for_review_tab_async()
+                if hasattr(self, "_ensure_text_review_compare_layout_default"):
+                    self._ensure_text_review_compare_layout_default()
                 self._rebuild_future_paragraph_ui()
+                if hasattr(self, "_sync_future_pdf_layers_visibility"):
+                    self._sync_future_pdf_layers_visibility()
+                if (
+                    self._compare_candidate_source == CompareCandidateSource.PDF_ORIGINAL
+                    and hasattr(self, "_is_plan_pdf_compare")
+                    and self._is_plan_pdf_compare()
+                    and hasattr(self, "_refresh_plan_compare_bar")
+                ):
+                    self._refresh_plan_compare_bar()
             except BaseException as ex:
                 _log.exception("Review tab: failed while loading snapshot or building rows")
                 self._discard_future_tab_loading_spinner()

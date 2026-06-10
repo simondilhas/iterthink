@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import webbrowser
 from collections.abc import Callable
 from pathlib import Path
 
@@ -101,7 +102,7 @@ class MarkdownStudioShell:
             return
         self._header_chrome_hover = bool(e.data)
         if e.data:
-            self._invalidate_header_hide()
+            self._expand_header_bar()
         elif self._header_menu_open == 0:
             self._schedule_header_hide()
 
@@ -151,25 +152,37 @@ class MarkdownStudioShell:
             )
         )
 
+    async def _open_pricing_page_async(self) -> None:
+        url = licensing.PRICING_URL
+        try:
+            await self.page.launch_url(url)
+        except Exception:
+            webbrowser.open(url)
+
+    def _open_pricing_page(self, _e: ft.ControlEvent | None = None) -> None:
+        self.page.run_task(self._open_pricing_page_async)
+
     def _build_license_banner(self) -> ft.Control:
         if licensing.is_licensed():
             return ft.Container()
-        txt = ft.Text(
-            "Free for personal use — Get Commercial License",
-            size=12,
-            weight=ft.FontWeight.W_500,
-            color=config.PRIMARY_COLOR,
-        )
-        inner = ft.Container(
-            content=txt,
+        pill = ft.Container(
+            content=ft.Text(
+                "Free for personal use — Get Commercial License",
+                size=12,
+                weight=ft.FontWeight.W_500,
+                color=config.PRIMARY_COLOR,
+            ),
             padding=ft.padding.symmetric(horizontal=10, vertical=4),
             border_radius=12,
             bgcolor=ft.Colors.with_opacity(0.10, config.PRIMARY_COLOR),
         )
-        return ft.GestureDetector(
-            mouse_cursor=ft.MouseCursor.CLICK,
-            on_tap=lambda _e: self.page.launch_url(licensing.PRICING_URL),
-            content=inner,
+        return ft.TextButton(
+            content=pill,
+            style=ft.ButtonStyle(
+                padding=ft.padding.all(0),
+                overlay_color=ft.Colors.with_opacity(0.08, config.PRIMARY_COLOR),
+            ),
+            on_click=self._open_pricing_page,
         )
 
     def _refresh_license_banner(self) -> None:

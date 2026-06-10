@@ -8,7 +8,9 @@ import math
 import os
 import re
 import statistics
+import threading
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -16,6 +18,9 @@ from iterthink import config
 from iterthink.ocr_settings import IMAGE_IMPORT_EXTENSIONS
 
 logger = logging.getLogger(__name__)
+
+# pypdfium2 is not thread-safe; concurrent PdfDocument use corrupts the native heap.
+_PDFIUM_LOCK = threading.Lock()
 
 PdfProfileHeuristic = Literal["text", "plan"]
 
@@ -686,9 +691,23 @@ def import_pdf_for_profile(src: Path) -> tuple[str, PdfProfileHeuristic]:
     return import_pdf_with_profile(src, prof), prof
 
 
+def _classify_sample_page_indices(n: int, *, max_samples: int = 5) -> list[int]:
+    """Up to ``max_samples`` page indices spread across the document (first, last, middle)."""
+    if n <= 0:
+        return []
+    if n <= max_samples:
+        return list(range(n))
+    indices = {0, n - 1}
+    for j in range(1, max(1, max_samples - 1)):
+        indices.add(int((j / max_samples) * (n - 1)))
+    return sorted(indices)
+
+
 def classify_pdf_profile(src: Path) -> PdfProfileHeuristic:
     """
     Rough split: text-heavy PDFs → ``text``; sparse extraction → ``plan`` / drawing-like.
+
+    Samples at most five pages so multipage plan sets classify quickly.
     """
     from pypdf import PdfReader
 
@@ -696,13 +715,26 @@ def classify_pdf_profile(src: Path) -> PdfProfileHeuristic:
     n = len(reader.pages)
     if n == 0:
         return "plan"
+    sample_ix = _classify_sample_page_indices(n)
     total_chars = 0
-    for page in reader.pages:
-        total_chars += len((page.extract_text() or "").strip())
-    avg = total_chars / max(n, 1)
+    for i in sample_ix:
+        total_chars += len((reader.pages[i].extract_text() or "").strip())
+    avg = total_chars / max(len(sample_ix), 1)
     if avg < 120:
         return "plan"
     return "text"
+
+
+def count_pdf_pages(pdf_abs: Path) -> int:
+    """Page count without rasterizing."""
+    import pypdfium2 as pdfium
+
+    with _PDFIUM_LOCK:
+        pdf = pdfium.PdfDocument(str(pdf_abs))
+        try:
+            return len(pdf)
+        finally:
+            pdf.close()
 
 
 def pdf_render_cache_dir(pdf_abs: Path) -> Path:
@@ -715,14 +747,47 @@ def pdf_render_cache_dir(pdf_abs: Path) -> Path:
     return d
 
 
+def _sorted_render_cache_pages(cache: Path) -> list[Path]:
+    return sorted(cache.glob("page_*.png"))
+
+
+_RENDER_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_RENDER_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+def _render_cache_lock(cache_dir: Path) -> threading.Lock:
+    key = cache_dir.name
+    with _RENDER_CACHE_LOCKS_GUARD:
+        lock = _RENDER_CACHE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _RENDER_CACHE_LOCKS[key] = lock
+        return lock
+
+
+def _read_render_cache(
+    cache: Path, marker: Path, src_tag: str, *, max_pages: int | None
+) -> list[Path] | None:
+    if not (marker.is_file() and marker.read_text(encoding="utf-8") == src_tag):
+        return None
+    existing = _sorted_render_cache_pages(cache)
+    if not existing:
+        return None
+    return existing[:max_pages] if max_pages is not None else existing
+
+
 def render_pdf_to_png_pages(
     pdf_abs: Path,
     *,
     pdf_profile: PdfProfileHeuristic | None = None,
+    max_pages: int | None = None,
+    on_page_rendered: Callable[[int, int, Path], None] | None = None,
 ) -> list[Path]:
     """
-    Rasterize each PDF page to PNG under the render cache (pypdfium2 + Pillow).
-    Returns ordered list of PNG paths.
+    Rasterize PDF pages to PNG under the render cache (pypdfium2 + Pillow).
+
+    ``max_pages``: render at most this many pages from the start (progressive load).
+    Returns ordered list of PNG paths (subset when ``max_pages`` is set).
     """
     import pypdfium2 as pdfium
 
@@ -730,31 +795,59 @@ def render_pdf_to_png_pages(
     cache = pdf_render_cache_dir(pdf_abs)
     marker = cache / ".source"
     src_tag = f"{pdf_abs.resolve()}:{pdf_abs.stat().st_mtime_ns}:scale={scale}"
-    if marker.is_file() and marker.read_text(encoding="utf-8") == src_tag:
-        existing = sorted(cache.glob("page_*.png"))
-        if existing:
-            return existing
 
-    for old in cache.glob("page_*.png"):
-        old.unlink(missing_ok=True)
-    for old in cache.glob("page_*_textov_*.png"):
-        old.unlink(missing_ok=True)
+    cached = _read_render_cache(cache, marker, src_tag, max_pages=max_pages)
+    if cached is not None:
+        return cached
 
-    pdf = pdfium.PdfDocument(str(pdf_abs))
-    out: list[Path] = []
-    try:
-        for i in range(len(pdf)):
-            page = pdf[i]
-            bitmap = page.render(scale=scale)
-            pil_image = bitmap.to_pil()
-            p = cache / f"page_{i + 1:04d}.png"
-            pil_image.save(str(p))
-            out.append(p)
-    finally:
-        pdf.close()
+    with _render_cache_lock(cache):
+        cached = _read_render_cache(cache, marker, src_tag, max_pages=max_pages)
+        if cached is not None:
+            return cached
 
-    marker.write_text(src_tag, encoding="utf-8")
-    return out
+        with _PDFIUM_LOCK:
+            pdf = pdfium.PdfDocument(str(pdf_abs))
+            total = len(pdf)
+            want = total if max_pages is None else min(max_pages, total)
+            out: list[Path] = []
+            built_names: set[str] = set()
+            try:
+                for i in range(want):
+                    dst = cache / f"page_{i + 1:04d}.png"
+                    if dst.is_file():
+                        out.append(dst)
+                        built_names.add(dst.name)
+                        if on_page_rendered is not None:
+                            on_page_rendered(i + 1, total, dst)
+                        continue
+                    page = pdf[i]
+                    bitmap = page.render(scale=scale)
+                    try:
+                        pil_image = bitmap.to_pil()
+                        tmp = cache / f".page_{i + 1:04d}.tmp"
+                        pil_image.save(str(tmp), format="PNG")
+                        os.replace(tmp, dst)
+                    finally:
+                        bitmap.close()
+                    out.append(dst)
+                    built_names.add(dst.name)
+                    if on_page_rendered is not None:
+                        on_page_rendered(i + 1, total, dst)
+            finally:
+                pdf.close()
+
+        for old in cache.glob("page_*.png"):
+            if old.is_file() and old.name not in built_names:
+                old.unlink(missing_ok=True)
+        for old in cache.glob("page_*_textov_*.png"):
+            old.unlink(missing_ok=True)
+
+        if max_pages is None:
+            all_paths = _sorted_render_cache_pages(cache)
+            if len(all_paths) >= total:
+                marker.write_text(src_tag, encoding="utf-8")
+                return all_paths
+        return out
 
 
 def import_file_to_markdown(src: Path, md_path: Path) -> str:

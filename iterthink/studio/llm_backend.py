@@ -156,14 +156,19 @@ def build_llm_tier_tabs(
 def sync_privacy_shield_icon(
     icon: ft.Icon | None,
     *,
-    enabled: bool,
     tier: str,
     reinject: bool = True,
 ) -> None:
     """Update shield indicator beside KI tier tabs."""
+    from iterthink.ai.privacy_shield import privacy_shield_enabled_for_tier
+
     if icon is None:
         return
-    on = bool(enabled)
+    t = normalize_ki_tier(tier)
+    if t == KI_TIER_LOCAL:
+        on = bool(config.PRIVACY_SHIELD_COMPANY_ENABLED or config.PRIVACY_SHIELD_CLOUD_ENABLED)
+    else:
+        on = privacy_shield_enabled_for_tier(t)
     icon_name = ft.Icons.SHIELD if on else ft.Icons.GPP_BAD
     col = config.HIGHLIGHT if on else config.ON_SURFACE_VARIANT
     opacity = 1.0
@@ -247,7 +252,6 @@ class MarkdownStudioLlmBackend:
             cloud_openai_model=self.cloud_openai_model,
             cloud_google_model=self.cloud_google_model,
             secrets=secrets,
-            privacy_shield_enabled=config.PRIVACY_SHIELD_ENABLED,
             privacy_shield_reinject=config.PRIVACY_SHIELD_REINJECT,
             on_usage_recorded=self._on_llm_usage_recorded,
         )
@@ -291,6 +295,31 @@ class MarkdownStudioLlmBackend:
             return False, str(exc)
         self._api_secrets_cache = {str(k): str(v) for k, v in data.items() if v is not None}
         return True, "Credentials unlocked for this session."
+
+    def ensure_credential_vault_unlocked(self, *, passphrase: str = "") -> bool:
+        """Unlock the vault from session cache, passphrase field, or system keyring."""
+        if isinstance(self._api_secrets_cache, dict):
+            return True
+        if not vault_store.vault_exists():
+            return False
+        phrase = (passphrase or "").strip()
+        if not phrase:
+            from iterthink.ai import passphrase_keyring
+
+            phrase = (passphrase_keyring.get_stored_passphrase() or "").strip()
+        if not phrase:
+            return False
+        ok, _msg = self.try_unlock_credential_vault(phrase)
+        return ok
+
+    def resolve_vault_secret(self, name: str, *, passphrase: str = "") -> tuple[str, str | None]:
+        """Return a vault secret from the session cache or by decrypting on demand."""
+        if not self.ensure_credential_vault_unlocked(passphrase=passphrase):
+            return "", None
+        cache = self._api_secrets_cache
+        if not isinstance(cache, dict):
+            return "", None
+        return (cache.get(name) or "").strip(), None
 
     def save_credential_vault_entries(self, passphrase: str, updates: dict[str, str]) -> tuple[bool, str]:
         """Merge ``updates`` (non-empty values) into the vault JSON and re-encrypt."""

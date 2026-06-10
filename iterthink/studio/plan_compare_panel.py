@@ -24,8 +24,6 @@ class PlanComparePanel:
     candidate_dd: ft.Dropdown
     baseline_wrap: ft.Container
     candidate_wrap: ft.Container
-    overlay_switch: ft.Switch
-    side_by_side_switch: ft.Switch
     overlay_list: ft.ListView
     host: ft.Container
 
@@ -39,8 +37,6 @@ def build_plan_compare_panel(
     *,
     on_baseline: Callable[..., Any],
     on_candidate: Callable[..., Any],
-    on_overlay: Callable[..., Any],
-    on_side_by_side: Callable[..., Any] | None = None,
     on_hover_baseline: Callable[..., Any],
     on_hover_candidate: Callable[..., Any],
     on_baseline_focus: Callable[..., Any],
@@ -110,19 +106,6 @@ def build_plan_compare_panel(
         alignment=ft.Alignment.CENTER_LEFT,
         padding=ft.padding.symmetric(horizontal=2, vertical=1),
     )
-    overlay_sw = ft.Switch(
-        label="Show extracted text",
-        value=False,
-        disabled=True,
-        visible=False,
-        on_change=on_overlay,
-    )
-    side_sw = ft.Switch(
-        label="Side-by-side",
-        value=False,
-        disabled=True,
-        on_change=on_side_by_side or on_overlay,
-    )
     overlay_list = ft.ListView(
         expand=True,
         spacing=8,
@@ -157,8 +140,6 @@ def build_plan_compare_panel(
                     expand=True,
                 ),
             ),
-            overlay_sw,
-            side_sw,
         ],
         spacing=12,
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -173,8 +154,6 @@ def build_plan_compare_panel(
         candidate_dd=candidate_dd,
         baseline_wrap=baseline_wrap,
         candidate_wrap=candidate_wrap,
-        overlay_switch=overlay_sw,
-        side_by_side_switch=side_sw,
         overlay_list=overlay_list,
         host=host,
     )

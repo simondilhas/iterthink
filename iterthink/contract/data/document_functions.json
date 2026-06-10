@@ -1,0 +1,273 @@
+{
+  "contract_version": "0.1.0",
+  "source": "https://raw.githubusercontent.com/simondilhas/pragmatic-bim-data-contract/v0.1.0/classification/abstract-document-function/document-function.skos.ttl",
+  "scheme": "document-function",
+  "functions": [
+    {
+      "id": "administrative",
+      "notation": "ADM",
+      "label_en": "Administrative",
+      "label_de": "Administrativ",
+      "parent": "administrative"
+    },
+    {
+      "id": "adm_meeting_minutes",
+      "notation": "ADM-MIN",
+      "label_en": "Meeting minutes",
+      "label_de": "Sitzungsprotokolle",
+      "parent": "administrative"
+    },
+    {
+      "id": "adm_memos",
+      "notation": "ADM-MEM",
+      "label_en": "Memos",
+      "label_de": "Memos",
+      "parent": "administrative"
+    },
+    {
+      "id": "adm_internal_policies",
+      "notation": "ADM-POL",
+      "label_en": "Internal policies",
+      "label_de": "Interne Richtlinien",
+      "parent": "administrative"
+    },
+    {
+      "id": "adm_recaps",
+      "notation": "ADM-REC",
+      "label_en": "Recaps",
+      "label_de": "Zusammenfassungen",
+      "parent": "administrative"
+    },
+    {
+      "id": "financial",
+      "notation": "FIN",
+      "label_en": "Financial",
+      "label_de": "Finanzen",
+      "parent": "financial"
+    },
+    {
+      "id": "fin_invoices",
+      "notation": "FIN-INV",
+      "label_en": "Invoices",
+      "label_de": "Rechnungen",
+      "parent": "financial"
+    },
+    {
+      "id": "fin_receipts",
+      "notation": "FIN-RCP",
+      "label_en": "Receipts",
+      "label_de": "Quittungen",
+      "parent": "financial"
+    },
+    {
+      "id": "fin_balance_sheets",
+      "notation": "FIN-BAL",
+      "label_en": "Balance sheets",
+      "label_de": "Bilanzen",
+      "parent": "financial"
+    },
+    {
+      "id": "fin_payroll_records",
+      "notation": "FIN-PAY",
+      "label_en": "Payroll records",
+      "label_de": "Lohndokumente",
+      "parent": "financial"
+    },
+    {
+      "id": "legal_contractual",
+      "notation": "LEG",
+      "label_en": "Legal and contractual",
+      "label_de": "Rechtlich und vertraglich",
+      "parent": "legal_contractual"
+    },
+    {
+      "id": "leg_contracts",
+      "notation": "LEG-CON",
+      "label_en": "Contracts",
+      "label_de": "Vertraege",
+      "parent": "legal_contractual"
+    },
+    {
+      "id": "leg_ndas",
+      "notation": "LEG-NDA",
+      "label_en": "NDAs",
+      "label_de": "Geheimhaltungsvereinbarungen",
+      "parent": "legal_contractual"
+    },
+    {
+      "id": "leg_patents",
+      "notation": "LEG-PAT",
+      "label_en": "Patents",
+      "label_de": "Patente",
+      "parent": "legal_contractual"
+    },
+    {
+      "id": "leg_settlement_agreements",
+      "notation": "LEG-SET",
+      "label_en": "Settlement agreements",
+      "label_de": "Vergleichsvereinbarungen",
+      "parent": "legal_contractual"
+    },
+    {
+      "id": "regulatory_normative",
+      "notation": "REG",
+      "label_en": "Regulatory and normative",
+      "label_de": "Regulatorisch und normativ",
+      "parent": "regulatory_normative"
+    },
+    {
+      "id": "reg_norms",
+      "notation": "REG-NOR",
+      "label_en": "Norms",
+      "label_de": "Normen",
+      "parent": "regulatory_normative"
+    },
+    {
+      "id": "reg_laws",
+      "notation": "REG-LAW",
+      "label_en": "Laws",
+      "label_de": "Gesetze",
+      "parent": "regulatory_normative"
+    },
+    {
+      "id": "reg_standards",
+      "notation": "REG-STD",
+      "label_en": "Standards",
+      "label_de": "Standards",
+      "parent": "regulatory_normative"
+    },
+    {
+      "id": "reg_compliance_reports",
+      "notation": "REG-CMP",
+      "label_en": "Compliance reports",
+      "label_de": "Compliance-Berichte",
+      "parent": "regulatory_normative"
+    },
+    {
+      "id": "reg_cmp_audits",
+      "notation": "REG-CMP-AUD",
+      "label_en": "Compliance audits",
+      "label_de": "Compliance-Audits",
+      "parent": "reg_compliance_reports"
+    },
+    {
+      "id": "reg_cmp_declarations",
+      "notation": "REG-CMP-DCL",
+      "label_en": "Conformity declarations",
+      "label_de": "Konformitaetserklaerungen",
+      "parent": "reg_compliance_reports"
+    },
+    {
+      "id": "reg_cmp_filings",
+      "notation": "REG-CMP-FIL",
+      "label_en": "Regulatory filings",
+      "label_de": "Behoerdliche Einreichungen",
+      "parent": "reg_compliance_reports"
+    },
+    {
+      "id": "marketing_sales",
+      "notation": "MKS",
+      "label_en": "Marketing and Sales",
+      "label_de": "Marketing und Vertrieb",
+      "parent": "marketing_sales"
+    },
+    {
+      "id": "mks_case_studies",
+      "notation": "MKS-CAS",
+      "label_en": "Case studies",
+      "label_de": "Fallstudien",
+      "parent": "marketing_sales"
+    },
+    {
+      "id": "mks_brochures",
+      "notation": "MKS-BRO",
+      "label_en": "Brochures",
+      "label_de": "Broschueren",
+      "parent": "marketing_sales"
+    },
+    {
+      "id": "mks_white_papers",
+      "notation": "MKS-WHP",
+      "label_en": "White papers",
+      "label_de": "White Papers",
+      "parent": "marketing_sales"
+    },
+    {
+      "id": "mks_lead_lists",
+      "notation": "MKS-LDL",
+      "label_en": "Lead lists",
+      "label_de": "Lead-Listen",
+      "parent": "marketing_sales"
+    },
+    {
+      "id": "technical",
+      "notation": "TEC",
+      "label_en": "Technical",
+      "label_de": "Technisch",
+      "parent": "technical"
+    },
+    {
+      "id": "tec_schematics",
+      "notation": "TEC-SCH",
+      "label_en": "Schematics",
+      "label_de": "Schemata",
+      "parent": "technical"
+    },
+    {
+      "id": "tec_plans",
+      "notation": "TEC-PLN",
+      "label_en": "Plans",
+      "label_de": "Plaene",
+      "parent": "technical"
+    },
+    {
+      "id": "tec_documents",
+      "notation": "TEC-DOC",
+      "label_en": "Documents",
+      "label_de": "Dokumente",
+      "parent": "technical"
+    },
+    {
+      "id": "tec_manuals",
+      "notation": "TEC-MAN",
+      "label_en": "Manuals",
+      "label_de": "Handbuecher",
+      "parent": "technical"
+    },
+    {
+      "id": "requirements_briefs",
+      "notation": "REQ",
+      "label_en": "Requirements and briefs",
+      "label_de": "Anforderungen und Briefings",
+      "parent": "requirements_briefs"
+    },
+    {
+      "id": "req_functional_specifications",
+      "notation": "REQ-FSP",
+      "label_en": "Functional specifications",
+      "label_de": "Fachliche Spezifikationen",
+      "parent": "requirements_briefs"
+    },
+    {
+      "id": "req_project_briefs",
+      "notation": "REQ-BRF",
+      "label_en": "Project briefs",
+      "label_de": "Projektbriefings",
+      "parent": "requirements_briefs"
+    },
+    {
+      "id": "req_tender_documents",
+      "notation": "REQ-TND",
+      "label_en": "Tender documents",
+      "label_de": "Ausschreibungsunterlagen",
+      "parent": "requirements_briefs"
+    },
+    {
+      "id": "req_user_stories",
+      "notation": "REQ-UST",
+      "label_en": "User stories",
+      "label_de": "User Stories",
+      "parent": "requirements_briefs"
+    }
+  ]
+}

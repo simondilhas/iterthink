@@ -140,12 +140,22 @@ def _lineage_id_for_path(resolved: Path) -> str:
 
 def _get_or_create_lineage_latest(session: Session, resolved_doc: Path) -> Content | None:
     lid = _lineage_id_for_path(resolved_doc)
-    return session.execute(
+    row = session.execute(
         select(Content)
         .where(Content.lineage_id == lid)
         .where(Content.is_latest.is_(True))
         .limit(1)
     ).scalar_one_or_none()
+    if row is not None:
+        return row
+    # Renamed notes keep the old lineage_id until relocated; match by store path_key.
+    pk = path_key_for(resolved_doc)
+    rp = str(resolved_doc.resolve())
+    for candidate in session.scalars(select(Content).where(Content.is_latest.is_(True))).all():
+        attrs = _attrs(candidate)
+        if attrs.get("path_key") == pk or attrs.get("resolved_path") == rp:
+            return candidate
+    return None
 
 
 def get_lineage_id_for_path(session: Session, resolved_doc: Path) -> str | None:
@@ -255,6 +265,51 @@ def get_artifact_lineage_by_path(session: Session, resolved_doc: Path) -> Conten
     return _get_or_create_lineage_latest(session, resolved_doc)
 
 
+def lineage_has_imported_version(session: Session, resolved_doc: Path) -> bool:
+    """True when the document lineage has at least one saved snapshot (version_no > 0)."""
+    row = get_artifact_lineage_by_path(session, resolved_doc)
+    if row is None:
+        return False
+    return latest_version_id_for_lineage(session, row.lineage_id) is not None
+
+
+def lineage_stored_classification_attrs(session: Session, resolved_doc: Path) -> dict[str, Any]:
+    """Lineage attrs carrying ``document_functions`` (anchor first, then latest row)."""
+    row = get_artifact_lineage_by_path(session, resolved_doc)
+    if row is None:
+        return {}
+    anchor = _lineage_anchor(session, row.lineage_id)
+    for candidate in (anchor, row):
+        if candidate is None:
+            continue
+        attrs = _attrs(candidate)
+        stored = attrs.get("document_functions")
+        if isinstance(stored, list) and stored:
+            return attrs
+    if anchor is not None:
+        return _attrs(anchor)
+    return _attrs(row)
+
+
+def set_lineage_classification(
+    session: Session,
+    resolved_doc: Path,
+    function_id: str,
+    *,
+    source: str,
+    kbob_code: str | None = None,
+) -> None:
+    """Persist contract ``classifications[]`` on the lineage anchor (version 0 row)."""
+    from iterthink.contract.document_classification import attrs_from_function
+
+    row = get_or_create_lineage(session, resolved_doc)
+    anchor = _lineage_anchor(session, row.lineage_id)
+    target = anchor if anchor is not None else row
+    attrs = _attrs(target)
+    attrs.update(attrs_from_function(function_id, source=source, kbob_code=kbob_code))
+    _set_attrs(target, attrs)
+
+
 # Back-compat aliases for callers still using document naming
 get_document_by_resolved_path = get_artifact_lineage_by_path
 
@@ -326,26 +381,103 @@ def refresh_document_last_disk_state_from_disk(session: Session, resolved_doc: P
     update_document_last_disk_state(session, p, body=body)
 
 
+def _rewrite_store_relpath_pk(relpath: str | None, old_pk: str, new_pk: str) -> str | None:
+    if not relpath or old_pk == new_pk:
+        return relpath
+    for root in ("snapshots/", "pdf_assets/", "docx_assets/", "plan_text/"):
+        needle = f"{root}{old_pk}/"
+        if relpath.startswith(needle):
+            return relpath.replace(needle, f"{root}{new_pk}/", 1)
+    return relpath
+
+
+def _migrate_store_pk_dirs(old_resolved: Path, new_resolved: Path) -> None:
+    old_pk = path_key_for(old_resolved)
+    new_pk = path_key_for(new_resolved)
+    if old_pk == new_pk:
+        return
+    base = config.STORE_DIR.resolve()
+    for sub in ("snapshots", "pdf_assets", "docx_assets", "plan_text"):
+        old_d = (config.STORE_DIR / sub / old_pk).resolve()
+        new_d = (config.STORE_DIR / sub / new_pk).resolve()
+        try:
+            old_d.relative_to(base)
+            new_d.relative_to(base)
+        except ValueError:
+            continue
+        if not old_d.is_dir():
+            continue
+        new_d.parent.mkdir(parents=True, exist_ok=True)
+        if new_d.exists():
+            for item in old_d.iterdir():
+                dest = new_d / item.name
+                if dest.exists():
+                    continue
+                shutil.move(str(item), str(dest))
+            shutil.rmtree(old_d, ignore_errors=True)
+        else:
+            shutil.move(str(old_d), str(new_d))
+
+
+def _relocate_document_lineage(
+    session: Session,
+    old_resolved: Path,
+    new_resolved: Path,
+) -> Literal["ok", "collision"]:
+    """Move a document lineage to a new on-disk path (rename or folder move)."""
+    old_r = old_resolved.resolve()
+    new_r = new_resolved.resolve()
+    if old_r == new_r:
+        return "ok"
+    old_lid = _lineage_id_for_path(old_r)
+    new_lid = _lineage_id_for_path(new_r)
+    new_key = path_key_for(new_r)
+    old_pk = path_key_for(old_r)
+
+    rows = list(session.scalars(select(Content).where(Content.lineage_id == old_lid)).all())
+    if not rows:
+        return "ok"
+
+    if old_lid != new_lid:
+        other = session.execute(
+            select(Content).where(Content.lineage_id == new_lid).limit(1)
+        ).scalar_one_or_none()
+        if other is not None:
+            return "collision"
+
+    now = time.time()
+    for row in rows:
+        attrs = _attrs(row)
+        rp = attrs.get("resolved_path")
+        if rp:
+            try:
+                if Path(rp).resolve() == old_r:
+                    attrs["resolved_path"] = str(new_r)
+            except (OSError, ValueError):
+                pass
+        if old_pk != new_key:
+            for key in ("snapshot_relpath", "pdf_asset_relpath", "docx_asset_relpath"):
+                rel = attrs.get(key)
+                if rel:
+                    attrs[key] = _rewrite_store_relpath_pk(str(rel), old_pk, new_key)
+            attrs["path_key"] = new_key
+        row.lineage_id = new_lid
+        if row.version_no == 0 or row.is_latest:
+            row.name = new_r.name
+            row.source_id = new_key
+        _set_attrs(row, attrs)
+        row.updated_at = now
+
+    session.flush()
+    if old_pk != new_key:
+        _migrate_store_pk_dirs(old_r, new_r)
+    return "ok"
+
+
 def update_document_path_after_rename(
     session: Session, old_resolved: Path, new_resolved: Path
 ) -> Literal["ok", "collision"]:
-    old_row = get_artifact_lineage_by_path(session, old_resolved)
-    if old_row is None:
-        return "ok"
-    new_key = path_key_for(new_resolved)
-    new_lid = _lineage_id_for_path(new_resolved)
-    other = session.execute(
-        select(Content).where(Content.lineage_id == new_lid).where(Content.id != old_row.id).limit(1)
-    ).scalar_one_or_none()
-    if other is not None:
-        return "collision"
-    attrs = _attrs(old_row)
-    attrs["resolved_path"] = str(new_resolved.resolve())
-    attrs["path_key"] = new_key
-    _set_attrs(old_row, attrs)
-    old_row.name = new_resolved.name
-    old_row.source_id = new_key
-    return "ok"
+    return _relocate_document_lineage(session, old_resolved, new_resolved)
 
 
 def update_document_paths_after_dir_rename(
@@ -354,7 +486,7 @@ def update_document_paths_after_dir_rename(
     old_b = old_dir_resolved.resolve()
     new_b = new_dir_resolved.resolve()
     rows = list(session.scalars(select(Content).where(Content.is_latest.is_(True))).all())
-    planned: list[tuple[Content, Path]] = []
+    planned: list[tuple[Path, Path]] = []
     for row in rows:
         attrs = _attrs(row)
         rp_s = attrs.get("resolved_path")
@@ -365,28 +497,12 @@ def update_document_paths_after_dir_rename(
             rel = rp.relative_to(old_b)
         except ValueError:
             continue
-        planned.append((row, (new_b / rel).resolve()))
+        planned.append((rp, (new_b / rel).resolve()))
 
-    new_lids = {_lineage_id_for_path(np) for _, np in planned}
-    for row in rows:
-        if row.is_latest and row.lineage_id in new_lids:
-            for c, np in planned:
-                if c.id != row.id and _lineage_id_for_path(np) == row.lineage_id:
-                    if any(c2.id != c.id for c2, np2 in planned if _lineage_id_for_path(np2) == row.lineage_id):
-                        return "collision"
-
-    for row, np in planned:
-        nk = path_key_for(np)
-        nlid = _lineage_id_for_path(np)
-        for other in rows:
-            if other.id != row.id and other.is_latest and other.lineage_id == nlid:
-                return "collision"
-        attrs = _attrs(row)
-        attrs["resolved_path"] = str(np)
-        attrs["path_key"] = nk
-        _set_attrs(row, attrs)
-        row.name = np.name
-        row.source_id = nk
+    for old_rp, new_rp in planned:
+        st = _relocate_document_lineage(session, old_rp, new_rp)
+        if st == "collision":
+            return "collision"
     return "ok"
 
 

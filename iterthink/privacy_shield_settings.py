@@ -107,6 +107,11 @@ _LLM_CATEGORY_HINTS: dict[str, str] = {
 }
 
 
+def _normalize_shield_tier(tier: str | None) -> str:
+    t = (tier or "").strip().lower()
+    return t if t in ("company", "cloud") else ""
+
+
 @dataclass(frozen=True)
 class PrivacyCategory:
     id: str
@@ -114,8 +119,21 @@ class PrivacyCategory:
     priority: int
     placeholder: str
     mode: str  # regex | llm | both
-    enabled: bool
+    enabled_company: bool
+    enabled_cloud: bool
     description: str = ""
+
+    @property
+    def enabled(self) -> bool:
+        return self.enabled_company or self.enabled_cloud
+
+    def enabled_for_tier(self, tier: str | None) -> bool:
+        t = _normalize_shield_tier(tier)
+        if t == "company":
+            return self.enabled_company
+        if t == "cloud":
+            return self.enabled_cloud
+        return self.enabled
 
     def example_token(self, n: int = 1) -> str:
         return format_placeholder(self.placeholder, n)
@@ -148,13 +166,17 @@ def _parse_categories(raw: Any) -> dict[str, PrivacyCategory]:
         mode = str(item.get("mode") or "llm").strip().lower()
         if mode not in ("regex", "llm", "both"):
             mode = "llm"
+        legacy = bool(item.get("enabled", True))
+        enabled_company = item.get("enabled_company")
+        enabled_cloud = item.get("enabled_cloud")
         out[str(cid)] = PrivacyCategory(
             id=str(cid),
             label=str(item.get("label") or cid),
             priority=int(item.get("priority") or 1),
             placeholder=ph,
             mode=mode,
-            enabled=bool(item.get("enabled", True)),
+            enabled_company=bool(enabled_company) if isinstance(enabled_company, bool) else legacy,
+            enabled_cloud=bool(enabled_cloud) if isinstance(enabled_cloud, bool) else legacy,
             description=str(item.get("description") or ""),
         )
     return out
@@ -185,7 +207,8 @@ def _merge_with_bundled(store: dict[str, PrivacyCategory]) -> dict[str, PrivacyC
                 priority=default.priority,
                 placeholder=default.placeholder,
                 mode=default.mode,
-                enabled=s.enabled,
+                enabled_company=s.enabled_company,
+                enabled_cloud=s.enabled_cloud,
                 description=default.description,
             )
         else:
@@ -234,7 +257,8 @@ def save_categories(categories: dict[str, PrivacyCategory]) -> None:
             "priority": c.priority,
             "placeholder": c.placeholder,
             "mode": c.mode,
-            "enabled": c.enabled,
+            "enabled_company": c.enabled_company,
+            "enabled_cloud": c.enabled_cloud,
         }
         if c.description:
             row["description"] = c.description
@@ -250,16 +274,23 @@ def save_categories(categories: dict[str, PrivacyCategory]) -> None:
     load_categories(reload=True)
 
 
-def enabled_categories() -> list[PrivacyCategory]:
-    return sorted([c for c in load_categories().values() if c.enabled], key=_sort_key)
+def enabled_categories(*, tier: str | None = None) -> list[PrivacyCategory]:
+    cats = load_categories().values()
+    if tier:
+        return sorted([c for c in cats if c.enabled_for_tier(tier)], key=_sort_key)
+    return sorted([c for c in cats if c.enabled], key=_sort_key)
 
 
-def regex_categories() -> list[PrivacyCategory]:
-    return [c for c in enabled_categories() if c.mode in ("regex", "both") and c.id in _CATEGORY_REGEX]
+def regex_categories(*, tier: str | None = None) -> list[PrivacyCategory]:
+    return [
+        c
+        for c in enabled_categories(tier=tier)
+        if c.mode in ("regex", "both") and c.id in _CATEGORY_REGEX
+    ]
 
 
-def llm_categories() -> list[PrivacyCategory]:
-    return [c for c in enabled_categories() if c.mode in ("llm", "both")]
+def llm_categories(*, tier: str | None = None) -> list[PrivacyCategory]:
+    return [c for c in enabled_categories(tier=tier) if c.mode in ("llm", "both")]
 
 
 _ENTITY_TYPE_ALIASES: dict[str, str] = {
@@ -281,7 +312,12 @@ _ENTITY_TYPE_ALIASES: dict[str, str] = {
 }
 
 
-def placeholder_prefix_for_entity(type_key: str, placeholder_hint: str = "") -> str:
+def placeholder_prefix_for_entity(
+    type_key: str,
+    placeholder_hint: str = "",
+    *,
+    tier: str | None = None,
+) -> str:
     """Map LLM entity type (or hint token) to configured placeholder prefix."""
     hint = (placeholder_hint or "").strip()
     m = re.match(r"\{\{([A-Z][A-Z0-9_]*?)_\d+\}\}", hint)
@@ -291,17 +327,17 @@ def placeholder_prefix_for_entity(type_key: str, placeholder_hint: str = "") -> 
     t = (type_key or "").strip().lower()
     cid = _ENTITY_TYPE_ALIASES.get(t, t)
     cats = load_categories()
-    if cid in cats and cats[cid].enabled:
+    if cid in cats and cats[cid].enabled_for_tier(tier):
         return cats[cid].placeholder
 
-    for c in llm_categories():
+    for c in llm_categories(tier=tier):
         if c.id == cid or c.placeholder.lower() == t:
             return c.placeholder
     return "PERSON"
 
 
-def build_redact_system_prompt() -> str:
-    llm_cats = llm_categories()
+def build_redact_system_prompt(*, tier: str | None = None) -> str:
+    llm_cats = llm_categories(tier=tier)
     lines = [
         "You redact sensitive text. Reply with JSON only, no markdown.",
         'Schema: {"redacted_text": string, "entities": [{"placeholder": string, "value": string, "type": string}]}.',
@@ -314,20 +350,20 @@ def build_redact_system_prompt() -> str:
         for c in llm_cats:
             hint = _LLM_CATEGORY_HINTS.get(c.id, c.label.lower())
             lines.append(f"- {hint} → {c.example_token(1)} (increment n per occurrence)")
-    regex_cats = regex_categories()
+    regex_cats = regex_categories(tier=tier)
     if regex_cats:
         preserved = ", ".join(c.example_token(1) for c in regex_cats)
         lines.append(f"Do not alter tokens already present from regex pass: {preserved}.")
     return " ".join(lines)
 
 
-def regex_redact_configured(text: str) -> tuple[str, dict[str, str]]:
+def regex_redact_configured(text: str, *, tier: str | None = None) -> tuple[str, dict[str, str]]:
     """Apply enabled regex categories; returns (text, placeholder→value)."""
     out = text
     mapping: dict[str, str] = {}
     counters: dict[str, int] = {}
 
-    for cat in regex_categories():
+    for cat in regex_categories(tier=tier):
         patterns = _CATEGORY_REGEX.get(cat.id, ())
         for pat in patterns:
             while True:

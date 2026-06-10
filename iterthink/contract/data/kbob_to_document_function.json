@@ -1,0 +1,2097 @@
+{
+  "contract_version": "0.1.0",
+  "source": "https://raw.githubusercontent.com/simondilhas/pragmatic-bim-data-contract/v0.1.0/classification/mapping/kbob-document-types-to-document-function.mapping.ttl",
+  "scheme": "kbob-document-types-2016",
+  "target_scheme": "document-function",
+  "entries": {
+    "O01001": [
+      "adm_internal_policies"
+    ],
+    "O01002": [
+      "adm_internal_policies"
+    ],
+    "O01003": [
+      "adm_internal_policies"
+    ],
+    "O03002": [
+      "adm_internal_policies"
+    ],
+    "O03003": [
+      "adm_internal_policies"
+    ],
+    "O05001": [
+      "adm_internal_policies"
+    ],
+    "O05002": [
+      "adm_internal_policies"
+    ],
+    "O05003": [
+      "adm_internal_policies"
+    ],
+    "O05004": [
+      "adm_internal_policies"
+    ],
+    "O05005": [
+      "adm_internal_policies"
+    ],
+    "O05006": [
+      "adm_internal_policies"
+    ],
+    "O10001": [
+      "adm_meeting_minutes"
+    ],
+    "O10002": [
+      "adm_meeting_minutes",
+      "adm_memos"
+    ],
+    "O10003": [
+      "adm_meeting_minutes",
+      "adm_memos"
+    ],
+    "O10005": [
+      "adm_meeting_minutes",
+      "adm_memos"
+    ],
+    "O10006": [
+      "adm_meeting_minutes",
+      "adm_memos"
+    ],
+    "O10007": [
+      "adm_meeting_minutes",
+      "adm_memos"
+    ],
+    "O10014": [
+      "adm_meeting_minutes",
+      "adm_memos"
+    ],
+    "O10015": [
+      "adm_meeting_minutes",
+      "adm_memos"
+    ],
+    "O10016": [
+      "adm_meeting_minutes",
+      "adm_memos"
+    ],
+    "O10017": [
+      "adm_meeting_minutes",
+      "adm_memos"
+    ],
+    "O10018": [
+      "adm_meeting_minutes",
+      "adm_memos"
+    ],
+    "O10004": [
+      "adm_memos"
+    ],
+    "O10008": [
+      "adm_memos"
+    ],
+    "O10009": [
+      "adm_memos"
+    ],
+    "O10010": [
+      "adm_memos"
+    ],
+    "O10011": [
+      "adm_memos"
+    ],
+    "O10020": [
+      "adm_memos"
+    ],
+    "O16001": [
+      "adm_recaps"
+    ],
+    "O16002": [
+      "adm_recaps"
+    ],
+    "O16003": [
+      "adm_recaps"
+    ],
+    "O16004": [
+      "adm_recaps"
+    ],
+    "O16005": [
+      "adm_recaps"
+    ],
+    "O16006": [
+      "adm_recaps"
+    ],
+    "O16007": [
+      "adm_recaps"
+    ],
+    "O02001": [
+      "adm_recaps",
+      "adm_meeting_minutes"
+    ],
+    "O02002": [
+      "adm_recaps",
+      "adm_meeting_minutes"
+    ],
+    "O02003": [
+      "adm_recaps",
+      "adm_meeting_minutes"
+    ],
+    "O02004": [
+      "adm_recaps",
+      "adm_meeting_minutes"
+    ],
+    "O02005": [
+      "adm_recaps",
+      "adm_meeting_minutes"
+    ],
+    "O02006": [
+      "adm_recaps",
+      "adm_meeting_minutes"
+    ],
+    "O02007": [
+      "adm_recaps",
+      "adm_meeting_minutes"
+    ],
+    "O02008": [
+      "adm_recaps",
+      "adm_meeting_minutes"
+    ],
+    "O02009": [
+      "adm_recaps",
+      "adm_meeting_minutes"
+    ],
+    "O02010": [
+      "adm_recaps",
+      "adm_meeting_minutes"
+    ],
+    "O06001": [
+      "administrative"
+    ],
+    "O06002": [
+      "administrative"
+    ],
+    "O08001": [
+      "administrative"
+    ],
+    "O08002": [
+      "administrative"
+    ],
+    "O09001": [
+      "administrative"
+    ],
+    "O09002": [
+      "administrative"
+    ],
+    "K01001": [
+      "fin_balance_sheets"
+    ],
+    "K01002": [
+      "fin_balance_sheets"
+    ],
+    "K01003": [
+      "fin_balance_sheets"
+    ],
+    "K01004": [
+      "fin_balance_sheets"
+    ],
+    "K01005": [
+      "fin_balance_sheets"
+    ],
+    "K01006": [
+      "fin_balance_sheets"
+    ],
+    "K01007": [
+      "fin_balance_sheets"
+    ],
+    "K01008": [
+      "fin_balance_sheets"
+    ],
+    "K01009": [
+      "fin_balance_sheets"
+    ],
+    "K01012": [
+      "fin_balance_sheets"
+    ],
+    "K01013": [
+      "fin_balance_sheets"
+    ],
+    "K01014": [
+      "fin_balance_sheets"
+    ],
+    "K01015": [
+      "fin_balance_sheets"
+    ],
+    "K01016": [
+      "fin_balance_sheets"
+    ],
+    "K01017": [
+      "fin_balance_sheets"
+    ],
+    "K01018": [
+      "fin_balance_sheets"
+    ],
+    "K01019": [
+      "fin_balance_sheets"
+    ],
+    "K01020": [
+      "fin_balance_sheets"
+    ],
+    "K01021": [
+      "fin_balance_sheets"
+    ],
+    "K01050": [
+      "fin_balance_sheets"
+    ],
+    "K01051": [
+      "fin_balance_sheets"
+    ],
+    "K01052": [
+      "fin_balance_sheets"
+    ],
+    "K01053": [
+      "fin_balance_sheets"
+    ],
+    "K01081": [
+      "fin_balance_sheets"
+    ],
+    "K04001": [
+      "fin_balance_sheets"
+    ],
+    "K04002": [
+      "fin_balance_sheets"
+    ],
+    "K04003": [
+      "fin_balance_sheets"
+    ],
+    "B14000": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14001": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14002": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14003": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14004": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14005": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14006": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14100": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14101": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14102": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14103": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14104": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14105": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "B14106": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "K08001": [
+      "fin_balance_sheets",
+      "tec_documents"
+    ],
+    "K05001": [
+      "fin_invoices"
+    ],
+    "K05002": [
+      "fin_invoices"
+    ],
+    "K05003": [
+      "fin_invoices"
+    ],
+    "K05004": [
+      "fin_invoices"
+    ],
+    "K05005": [
+      "fin_invoices"
+    ],
+    "K05006": [
+      "fin_invoices"
+    ],
+    "K06001": [
+      "fin_invoices",
+      "fin_balance_sheets"
+    ],
+    "K06002": [
+      "fin_invoices",
+      "fin_balance_sheets"
+    ],
+    "K06003": [
+      "fin_invoices",
+      "fin_balance_sheets"
+    ],
+    "K06004": [
+      "fin_invoices",
+      "fin_balance_sheets"
+    ],
+    "K06005": [
+      "fin_invoices",
+      "fin_balance_sheets"
+    ],
+    "K06006": [
+      "fin_invoices",
+      "fin_balance_sheets"
+    ],
+    "K06007": [
+      "fin_invoices",
+      "fin_balance_sheets"
+    ],
+    "K06008": [
+      "fin_invoices",
+      "fin_balance_sheets"
+    ],
+    "K06009": [
+      "fin_invoices",
+      "fin_balance_sheets"
+    ],
+    "O11001": [
+      "fin_receipts"
+    ],
+    "K03001": [
+      "leg_contracts"
+    ],
+    "K03002": [
+      "leg_contracts"
+    ],
+    "K03003": [
+      "leg_contracts"
+    ],
+    "K03004": [
+      "leg_contracts"
+    ],
+    "K03005": [
+      "leg_contracts"
+    ],
+    "K03006": [
+      "leg_contracts"
+    ],
+    "K03007": [
+      "leg_contracts"
+    ],
+    "K03008": [
+      "leg_contracts"
+    ],
+    "K03009": [
+      "leg_contracts"
+    ],
+    "K03010": [
+      "leg_contracts"
+    ],
+    "K03011": [
+      "leg_contracts"
+    ],
+    "K03012": [
+      "leg_contracts"
+    ],
+    "K03013": [
+      "leg_contracts"
+    ],
+    "K03014": [
+      "leg_contracts"
+    ],
+    "K03015": [
+      "leg_contracts"
+    ],
+    "K03016": [
+      "leg_contracts"
+    ],
+    "K03017": [
+      "leg_contracts"
+    ],
+    "K03018": [
+      "leg_contracts"
+    ],
+    "K07001": [
+      "leg_contracts"
+    ],
+    "K07002": [
+      "leg_contracts"
+    ],
+    "K07003": [
+      "leg_contracts"
+    ],
+    "K07004": [
+      "leg_contracts"
+    ],
+    "K09001": [
+      "leg_contracts"
+    ],
+    "K09002": [
+      "leg_contracts"
+    ],
+    "K09003": [
+      "leg_contracts"
+    ],
+    "K09004": [
+      "leg_contracts"
+    ],
+    "O10019": [
+      "leg_contracts"
+    ],
+    "O10013": [
+      "leg_contracts"
+    ],
+    "B13001": [
+      "leg_contracts",
+      "reg_cmp_declarations"
+    ],
+    "B13002": [
+      "leg_contracts",
+      "reg_cmp_declarations"
+    ],
+    "B13003": [
+      "leg_contracts",
+      "reg_cmp_declarations"
+    ],
+    "O10012": [
+      "leg_settlement_agreements"
+    ],
+    "O12001": [
+      "mks_brochures"
+    ],
+    "O12002": [
+      "mks_brochures"
+    ],
+    "O13001": [
+      "reg_cmp_filings"
+    ],
+    "O13002": [
+      "reg_cmp_filings"
+    ],
+    "O13003": [
+      "reg_cmp_filings"
+    ],
+    "O13004": [
+      "reg_cmp_filings"
+    ],
+    "O13005": [
+      "reg_cmp_filings"
+    ],
+    "O13006": [
+      "reg_cmp_filings"
+    ],
+    "O13007": [
+      "reg_cmp_filings"
+    ],
+    "O13008": [
+      "reg_cmp_filings"
+    ],
+    "O13009": [
+      "reg_cmp_filings"
+    ],
+    "O13010": [
+      "reg_cmp_filings"
+    ],
+    "O13011": [
+      "reg_cmp_filings"
+    ],
+    "O13012": [
+      "reg_cmp_filings"
+    ],
+    "O13013": [
+      "reg_cmp_filings"
+    ],
+    "O13014": [
+      "reg_cmp_filings"
+    ],
+    "O13015": [
+      "reg_cmp_filings"
+    ],
+    "O13016": [
+      "reg_cmp_filings"
+    ],
+    "O13017": [
+      "reg_cmp_filings"
+    ],
+    "O13018": [
+      "reg_cmp_filings"
+    ],
+    "O13019": [
+      "reg_cmp_filings"
+    ],
+    "O13020": [
+      "reg_cmp_filings"
+    ],
+    "O13101": [
+      "reg_cmp_filings"
+    ],
+    "O14001": [
+      "reg_cmp_filings"
+    ],
+    "O14002": [
+      "reg_cmp_filings"
+    ],
+    "O14003": [
+      "reg_cmp_filings"
+    ],
+    "O14004": [
+      "reg_cmp_filings"
+    ],
+    "O14005": [
+      "reg_cmp_filings"
+    ],
+    "O14006": [
+      "reg_cmp_filings"
+    ],
+    "O14007": [
+      "reg_cmp_filings"
+    ],
+    "O14008": [
+      "reg_cmp_filings"
+    ],
+    "O14009": [
+      "reg_cmp_filings"
+    ],
+    "O14010": [
+      "reg_cmp_filings"
+    ],
+    "O14011": [
+      "reg_cmp_filings"
+    ],
+    "O14012": [
+      "reg_cmp_filings"
+    ],
+    "O14013": [
+      "reg_cmp_filings"
+    ],
+    "O14014": [
+      "reg_cmp_filings"
+    ],
+    "O14015": [
+      "reg_cmp_filings"
+    ],
+    "O14016": [
+      "reg_cmp_filings"
+    ],
+    "O14017": [
+      "reg_cmp_filings"
+    ],
+    "O14018": [
+      "reg_cmp_filings"
+    ],
+    "O14019": [
+      "reg_cmp_filings"
+    ],
+    "O14020": [
+      "reg_cmp_filings"
+    ],
+    "O14021": [
+      "reg_cmp_filings"
+    ],
+    "O14022": [
+      "reg_cmp_filings"
+    ],
+    "O14023": [
+      "reg_cmp_filings"
+    ],
+    "O14024": [
+      "reg_cmp_filings"
+    ],
+    "O14050": [
+      "reg_cmp_filings"
+    ],
+    "O14101": [
+      "reg_cmp_filings"
+    ],
+    "O14102": [
+      "reg_cmp_filings"
+    ],
+    "O04001": [
+      "reg_compliance_reports",
+      "adm_internal_policies"
+    ],
+    "O04002": [
+      "reg_compliance_reports",
+      "adm_internal_policies"
+    ],
+    "O04003": [
+      "reg_compliance_reports",
+      "adm_internal_policies"
+    ],
+    "O04004": [
+      "reg_compliance_reports",
+      "adm_internal_policies"
+    ],
+    "O04005": [
+      "reg_compliance_reports",
+      "adm_internal_policies"
+    ],
+    "O04006": [
+      "reg_compliance_reports",
+      "adm_internal_policies"
+    ],
+    "O04051": [
+      "reg_compliance_reports",
+      "adm_internal_policies"
+    ],
+    "O04052": [
+      "reg_compliance_reports",
+      "adm_internal_policies"
+    ],
+    "O04101": [
+      "reg_compliance_reports",
+      "adm_internal_policies"
+    ],
+    "B07001": [
+      "reg_compliance_reports",
+      "tec_documents"
+    ],
+    "B07002": [
+      "reg_compliance_reports",
+      "tec_documents"
+    ],
+    "B07003": [
+      "reg_compliance_reports",
+      "tec_documents"
+    ],
+    "B07004": [
+      "reg_compliance_reports",
+      "tec_documents"
+    ],
+    "B07005": [
+      "reg_compliance_reports",
+      "tec_documents"
+    ],
+    "B07006": [
+      "reg_compliance_reports",
+      "tec_documents"
+    ],
+    "B07007": [
+      "reg_compliance_reports",
+      "tec_documents"
+    ],
+    "B07008": [
+      "reg_compliance_reports",
+      "tec_documents"
+    ],
+    "B01011": [
+      "reg_laws"
+    ],
+    "B01012": [
+      "reg_norms"
+    ],
+    "B01013": [
+      "reg_norms"
+    ],
+    "B01014": [
+      "reg_norms"
+    ],
+    "B03001": [
+      "req_functional_specifications"
+    ],
+    "B03002": [
+      "req_functional_specifications"
+    ],
+    "B03003": [
+      "req_functional_specifications"
+    ],
+    "B03004": [
+      "req_functional_specifications"
+    ],
+    "B10001": [
+      "req_functional_specifications"
+    ],
+    "B10002": [
+      "req_functional_specifications"
+    ],
+    "B10003": [
+      "req_functional_specifications"
+    ],
+    "B11001": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11002": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11003": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11004": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11101": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11102": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11103": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11104": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11105": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11106": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11107": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11108": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11109": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11110": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11111": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11112": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11113": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11114": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11115": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11116": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11117": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11118": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11119": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11120": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11121": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11122": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11123": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11124": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11125": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11126": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11127": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11128": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11129": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11130": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11131": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11132": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11133": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11201": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11202": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11203": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11204": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11205": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11206": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11207": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11301": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11302": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11303": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11304": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11305": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11306": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11307": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B11308": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12001": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12002": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12003": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12004": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12005": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12006": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12007": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12008": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12009": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12010": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12011": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12012": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12013": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12101": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12201": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12202": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12203": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12204": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12205": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12208": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12209": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12210": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12301": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12302": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12303": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12304": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12401": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12402": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12403": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12404": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12405": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12406": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12407": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12408": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12409": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12410": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12501": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12502": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12601": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12602": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12603": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12604": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12605": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12606": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12607": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12608": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12609": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12610": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12611": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12612": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12701": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12702": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12703": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12801": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12803": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12804": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12805": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B12806": [
+      "req_functional_specifications",
+      "tec_documents"
+    ],
+    "B01001": [
+      "req_project_briefs"
+    ],
+    "B01002": [
+      "req_project_briefs"
+    ],
+    "B01003": [
+      "req_project_briefs"
+    ],
+    "B04001": [
+      "req_project_briefs"
+    ],
+    "B04002": [
+      "req_project_briefs"
+    ],
+    "B04003": [
+      "req_project_briefs"
+    ],
+    "B04004": [
+      "req_project_briefs"
+    ],
+    "B04005": [
+      "req_project_briefs"
+    ],
+    "B04006": [
+      "req_project_briefs"
+    ],
+    "B04007": [
+      "req_project_briefs"
+    ],
+    "B02101": [
+      "req_project_briefs",
+      "tec_documents"
+    ],
+    "B02102": [
+      "req_project_briefs",
+      "tec_documents"
+    ],
+    "B02103": [
+      "req_project_briefs",
+      "tec_documents"
+    ],
+    "B02104": [
+      "req_project_briefs",
+      "tec_documents"
+    ],
+    "B02201": [
+      "req_project_briefs",
+      "tec_documents"
+    ],
+    "B02202": [
+      "req_project_briefs",
+      "tec_documents"
+    ],
+    "K02001": [
+      "req_tender_documents"
+    ],
+    "K02002": [
+      "req_tender_documents"
+    ],
+    "K02003": [
+      "req_tender_documents"
+    ],
+    "K02004": [
+      "req_tender_documents"
+    ],
+    "K02005": [
+      "req_tender_documents"
+    ],
+    "K02006": [
+      "req_tender_documents"
+    ],
+    "K02007": [
+      "req_tender_documents"
+    ],
+    "K02008": [
+      "req_tender_documents"
+    ],
+    "K02009": [
+      "req_tender_documents"
+    ],
+    "K02010": [
+      "req_tender_documents"
+    ],
+    "K02011": [
+      "req_tender_documents"
+    ],
+    "B05001": [
+      "tec_documents"
+    ],
+    "B05002": [
+      "tec_documents"
+    ],
+    "B05003": [
+      "tec_documents"
+    ],
+    "B05004": [
+      "tec_documents"
+    ],
+    "B05005": [
+      "tec_documents"
+    ],
+    "B05006": [
+      "tec_documents"
+    ],
+    "B05007": [
+      "tec_documents"
+    ],
+    "B05008": [
+      "tec_documents"
+    ],
+    "B05009": [
+      "tec_documents"
+    ],
+    "B05011": [
+      "tec_documents"
+    ],
+    "B05050": [
+      "tec_documents"
+    ],
+    "B05101": [
+      "tec_documents"
+    ],
+    "B05102": [
+      "tec_documents"
+    ],
+    "B06000": [
+      "tec_documents"
+    ],
+    "B06001": [
+      "tec_documents"
+    ],
+    "B06002": [
+      "tec_documents"
+    ],
+    "B06003": [
+      "tec_documents"
+    ],
+    "B06004": [
+      "tec_documents"
+    ],
+    "B06005": [
+      "tec_documents"
+    ],
+    "B06006": [
+      "tec_documents"
+    ],
+    "B06007": [
+      "tec_documents"
+    ],
+    "B15000": [
+      "tec_documents"
+    ],
+    "B15002": [
+      "tec_documents"
+    ],
+    "B15003": [
+      "tec_documents"
+    ],
+    "B15006": [
+      "tec_documents"
+    ],
+    "B15007": [
+      "tec_documents"
+    ],
+    "B15100": [
+      "tec_documents"
+    ],
+    "B19001": [
+      "tec_documents"
+    ],
+    "B19002": [
+      "tec_documents"
+    ],
+    "B19003": [
+      "tec_documents"
+    ],
+    "B19004": [
+      "tec_documents"
+    ],
+    "B19005": [
+      "tec_documents"
+    ],
+    "B19006": [
+      "tec_documents"
+    ],
+    "B19007": [
+      "tec_documents"
+    ],
+    "B19008": [
+      "tec_documents"
+    ],
+    "B19009": [
+      "tec_documents"
+    ],
+    "B19010": [
+      "tec_documents"
+    ],
+    "B19011": [
+      "tec_documents"
+    ],
+    "B19012": [
+      "tec_documents"
+    ],
+    "B19013": [
+      "tec_documents"
+    ],
+    "B19014": [
+      "tec_documents"
+    ],
+    "B19015": [
+      "tec_documents"
+    ],
+    "B19016": [
+      "tec_documents"
+    ],
+    "B20001": [
+      "tec_documents"
+    ],
+    "O15001": [
+      "tec_documents",
+      "adm_meeting_minutes"
+    ],
+    "O15002": [
+      "tec_documents",
+      "adm_meeting_minutes"
+    ],
+    "O15003": [
+      "tec_documents",
+      "adm_meeting_minutes"
+    ],
+    "O15004": [
+      "tec_documents",
+      "adm_meeting_minutes"
+    ],
+    "O15005": [
+      "tec_documents",
+      "adm_meeting_minutes"
+    ],
+    "O15006": [
+      "tec_documents",
+      "adm_meeting_minutes"
+    ],
+    "O15008": [
+      "tec_documents",
+      "adm_meeting_minutes"
+    ],
+    "O15009": [
+      "tec_documents",
+      "adm_meeting_minutes"
+    ],
+    "O15010": [
+      "tec_documents",
+      "adm_meeting_minutes"
+    ],
+    "O15011": [
+      "tec_documents",
+      "adm_meeting_minutes"
+    ],
+    "O15012": [
+      "tec_documents",
+      "adm_meeting_minutes"
+    ],
+    "O15013": [
+      "tec_documents",
+      "adm_meeting_minutes"
+    ],
+    "B17003": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17004": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17005": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17006": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17007": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17008": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17009": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17011": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17012": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17013": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17014": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17015": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17016": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17017": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17018": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17019": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B17101": [
+      "tec_documents",
+      "adm_recaps"
+    ],
+    "B18001": [
+      "tec_manuals"
+    ],
+    "B18002": [
+      "tec_manuals"
+    ],
+    "B18003": [
+      "tec_manuals"
+    ],
+    "B18004": [
+      "tec_manuals"
+    ],
+    "B18005": [
+      "tec_manuals"
+    ],
+    "B18006": [
+      "tec_manuals"
+    ],
+    "B18007": [
+      "tec_manuals"
+    ],
+    "B18008": [
+      "tec_manuals"
+    ],
+    "B18009": [
+      "tec_manuals"
+    ],
+    "B18010": [
+      "tec_manuals"
+    ],
+    "B18011": [
+      "tec_manuals"
+    ],
+    "B18051": [
+      "tec_manuals"
+    ],
+    "B18071": [
+      "tec_manuals"
+    ],
+    "O03001": [
+      "tec_manuals"
+    ],
+    "O07001": [
+      "tec_plans"
+    ],
+    "O07002": [
+      "tec_plans"
+    ],
+    "O07003": [
+      "tec_plans"
+    ],
+    "V01001": [
+      "tec_plans"
+    ],
+    "V01002": [
+      "tec_plans"
+    ],
+    "V01003": [
+      "tec_plans"
+    ],
+    "V01004": [
+      "tec_plans"
+    ],
+    "V01005": [
+      "tec_plans"
+    ],
+    "V01006": [
+      "tec_plans"
+    ],
+    "V01007": [
+      "tec_plans"
+    ],
+    "V02001": [
+      "tec_plans"
+    ],
+    "V02002": [
+      "tec_plans"
+    ],
+    "V02003": [
+      "tec_plans"
+    ],
+    "V02004": [
+      "tec_plans"
+    ],
+    "V02005": [
+      "tec_plans"
+    ],
+    "V02006": [
+      "tec_plans"
+    ],
+    "V02007": [
+      "tec_plans"
+    ],
+    "V03001": [
+      "tec_plans"
+    ],
+    "V03002": [
+      "tec_plans"
+    ],
+    "V04001": [
+      "tec_plans"
+    ],
+    "V04002": [
+      "tec_plans"
+    ],
+    "V04003": [
+      "tec_plans"
+    ],
+    "V04004": [
+      "tec_plans"
+    ],
+    "V04005": [
+      "tec_plans"
+    ],
+    "V04006": [
+      "tec_plans"
+    ],
+    "V05001": [
+      "tec_plans"
+    ],
+    "V05002": [
+      "tec_plans"
+    ],
+    "V05003": [
+      "tec_plans"
+    ],
+    "V05004": [
+      "tec_plans"
+    ],
+    "V05005": [
+      "tec_plans"
+    ],
+    "V05008": [
+      "tec_plans"
+    ],
+    "V05009": [
+      "tec_plans"
+    ],
+    "V06001": [
+      "tec_plans"
+    ],
+    "V06002": [
+      "tec_plans"
+    ],
+    "V06003": [
+      "tec_plans"
+    ],
+    "V06004": [
+      "tec_plans"
+    ],
+    "V06005": [
+      "tec_plans"
+    ],
+    "V07001": [
+      "tec_plans"
+    ],
+    "V07002": [
+      "tec_plans"
+    ],
+    "V07003": [
+      "tec_plans"
+    ],
+    "V07100": [
+      "tec_plans"
+    ],
+    "V07102": [
+      "tec_plans"
+    ],
+    "V07103": [
+      "tec_plans"
+    ],
+    "V07104": [
+      "tec_plans"
+    ],
+    "V07105": [
+      "tec_plans"
+    ],
+    "V07106": [
+      "tec_plans"
+    ],
+    "V07107": [
+      "tec_plans"
+    ],
+    "V07108": [
+      "tec_plans"
+    ],
+    "V07109": [
+      "tec_plans"
+    ],
+    "V07110": [
+      "tec_plans"
+    ],
+    "V07111": [
+      "tec_plans"
+    ],
+    "V07112": [
+      "tec_plans"
+    ],
+    "V07113": [
+      "tec_plans"
+    ],
+    "V07200": [
+      "tec_plans"
+    ],
+    "V07201": [
+      "tec_plans"
+    ],
+    "V07202": [
+      "tec_plans"
+    ],
+    "V07203": [
+      "tec_plans"
+    ],
+    "V07204": [
+      "tec_plans"
+    ],
+    "V07205": [
+      "tec_plans"
+    ],
+    "V07206": [
+      "tec_plans"
+    ],
+    "V07207": [
+      "tec_plans"
+    ],
+    "V07208": [
+      "tec_plans"
+    ],
+    "V07209": [
+      "tec_plans"
+    ],
+    "V07210": [
+      "tec_plans"
+    ],
+    "V07211": [
+      "tec_plans"
+    ],
+    "V07212": [
+      "tec_plans"
+    ],
+    "V07213": [
+      "tec_plans"
+    ],
+    "V09001": [
+      "tec_plans"
+    ],
+    "V09002": [
+      "tec_plans"
+    ],
+    "V09003": [
+      "tec_plans"
+    ],
+    "V09004": [
+      "tec_plans"
+    ],
+    "V09005": [
+      "tec_plans"
+    ],
+    "V09006": [
+      "tec_plans"
+    ],
+    "V09007": [
+      "tec_plans"
+    ],
+    "V09008": [
+      "tec_plans"
+    ],
+    "V09009": [
+      "tec_plans"
+    ],
+    "V09010": [
+      "tec_plans"
+    ],
+    "V09101": [
+      "tec_plans"
+    ],
+    "V09102": [
+      "tec_plans"
+    ],
+    "V09104": [
+      "tec_plans"
+    ],
+    "V09201": [
+      "tec_plans"
+    ],
+    "V09202": [
+      "tec_plans"
+    ],
+    "V10101": [
+      "tec_plans"
+    ],
+    "V10102": [
+      "tec_plans"
+    ],
+    "V10201": [
+      "tec_plans"
+    ],
+    "V10202": [
+      "tec_plans"
+    ],
+    "V11001": [
+      "tec_plans"
+    ],
+    "V11002": [
+      "tec_plans"
+    ],
+    "V11101": [
+      "tec_plans"
+    ],
+    "V11102": [
+      "tec_plans"
+    ],
+    "V11103": [
+      "tec_plans"
+    ],
+    "V11201": [
+      "tec_plans"
+    ],
+    "V11202": [
+      "tec_plans"
+    ],
+    "V11203": [
+      "tec_plans"
+    ],
+    "V11204": [
+      "tec_plans"
+    ],
+    "V11205": [
+      "tec_plans"
+    ],
+    "V11206": [
+      "tec_plans"
+    ],
+    "V11207": [
+      "tec_plans"
+    ],
+    "V11208": [
+      "tec_plans"
+    ],
+    "V11301": [
+      "tec_plans"
+    ],
+    "V11302": [
+      "tec_plans"
+    ],
+    "V11303": [
+      "tec_plans"
+    ],
+    "V11304": [
+      "tec_plans"
+    ],
+    "V11305": [
+      "tec_plans"
+    ],
+    "V11306": [
+      "tec_plans"
+    ],
+    "V11307": [
+      "tec_plans"
+    ],
+    "V11308": [
+      "tec_plans"
+    ],
+    "V11403": [
+      "tec_plans"
+    ],
+    "V11404": [
+      "tec_plans"
+    ],
+    "V11405": [
+      "tec_plans"
+    ],
+    "V11406": [
+      "tec_plans"
+    ],
+    "V08001": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08002": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08003": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08004": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08005": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08006": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08007": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08008": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08011": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08021": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08022": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08023": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08025": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08026": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08027": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08101": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08102": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08103": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08104": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08105": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08106": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08201": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08202": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08203": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08204": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08205": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08301": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08302": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08303": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08304": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08305": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08401": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08402": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08403": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08404": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08405": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08406": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08501": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08502": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08503": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08504": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08601": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08602": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08603": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08604": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08605": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08606": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08607": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08701": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08702": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08703": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08801": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V08802": [
+      "tec_plans",
+      "tec_schematics"
+    ],
+    "V02011": [
+      "tec_schematics"
+    ],
+    "V08024": [
+      "tec_schematics"
+    ]
+  }
+}

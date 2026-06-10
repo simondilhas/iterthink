@@ -16,6 +16,8 @@ class _HistoryDispatchMixin:
           2. Implement ``_rebuild_compare_<fmt>_panes()`` in its own mixin.
           3. Add one ``elif`` branch here.
         """
+        if hasattr(self, "_ensure_plan_pdf_compare_active"):
+            self._ensure_plan_pdf_compare_active()
         source = self._compare_candidate_source
         if source == CompareCandidateSource.PDF_ORIGINAL:
             if hasattr(self, "_refresh_plan_compare_bar"):

@@ -101,3 +101,86 @@ def test_paragraph_upsert_still_unique(ephemeral_store: None, tmp_path: Path) ->
         )
         m = paragraph_user_comments.map_for_version(s, content_version_id=vid)
     assert m[0] == "second"
+
+
+def test_sync_auto_change_regions_upsert(ephemeral_store: None, tmp_path: Path) -> None:
+    from iterthink.services.plan_change_regions import DetectedChangeRegion
+
+    vid = _persist_doc(tmp_path)
+    reg = DetectedChangeRegion(
+        region_key="abc123",
+        page_index=0,
+        norm_bbox=(0.1, 0.2, 0.4, 0.5),
+        pixel_count=500,
+    )
+    with session_scope() as s:
+        plan_pdf_annotations.sync_auto_change_regions(
+            s,
+            candidate_version_id=vid,
+            baseline_version_id=vid - 1,
+            regions=[reg],
+        )
+        listed = plan_pdf_annotations.list_change_regions_for_version(
+            s, content_version_id=vid
+        )
+    assert len(listed) == 1
+    assert listed[0].annotation_kind == plan_pdf_annotations.KIND_CHANGE_REGION
+    assert listed[0].region_bbox_norm() is not None
+    assert listed[0].body == "Changed area · Page 1"
+
+    reg2 = DetectedChangeRegion(
+        region_key="abc123",
+        page_index=0,
+        norm_bbox=(0.1, 0.2, 0.4, 0.5),
+        pixel_count=600,
+    )
+    with session_scope() as s:
+        plan_pdf_annotations.sync_auto_change_regions(
+            s,
+            candidate_version_id=vid,
+            baseline_version_id=vid - 1,
+            regions=[reg2],
+        )
+        listed2 = plan_pdf_annotations.list_change_regions_for_version(
+            s, content_version_id=vid
+        )
+    assert len(listed2) == 1
+    assert listed2[0].id == listed[0].id
+    assert int(listed2[0].region_meta().get("pixel_count") or 0) == 600
+
+
+def test_sync_preserves_body_on_iou_match(ephemeral_store: None, tmp_path: Path) -> None:
+    from iterthink.services.plan_change_regions import DetectedChangeRegion
+
+    vid = _persist_doc(tmp_path)
+    reg = DetectedChangeRegion(
+        region_key="key1",
+        page_index=0,
+        norm_bbox=(0.1, 0.2, 0.4, 0.5),
+        pixel_count=500,
+    )
+    with session_scope() as s:
+        anns = plan_pdf_annotations.sync_auto_change_regions(
+            s,
+            candidate_version_id=vid,
+            baseline_version_id=1,
+            regions=[reg],
+        )
+        plan_pdf_annotations.update_body(
+            s, annotation_id=int(anns[0].id), body="user note"
+        )
+    shifted = DetectedChangeRegion(
+        region_key="key2",
+        page_index=0,
+        norm_bbox=(0.11, 0.21, 0.41, 0.51),
+        pixel_count=520,
+    )
+    with session_scope() as s:
+        anns2 = plan_pdf_annotations.sync_auto_change_regions(
+            s,
+            candidate_version_id=vid,
+            baseline_version_id=1,
+            regions=[shifted],
+        )
+    assert len(anns2) == 1
+    assert anns2[0].body == "user note"

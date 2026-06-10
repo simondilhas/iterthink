@@ -44,6 +44,19 @@ _COMPARE_HISTORY_CELL_PAD = ft.padding.all(8)
 
 
 class _HistoryParagraphUIMixin:
+    def _future_review_visible_row_cells(
+        self,
+        *,
+        text_single: bool,
+        eval_ctrl: ft.Control,
+        left_cell: ft.Container,
+        pill_host: ft.Container,
+        right_cell: ft.Container,
+    ) -> list[ft.Control]:
+        if text_single:
+            return [right_cell]
+        return [eval_ctrl, left_cell, pill_host, right_cell]
+
     def _review_comment_presence_icon(
         self, *, has_comment: bool, rail_h: float = float(COMPARE_ACTION_RAIL_HOVER_WRAP_MIN_H)
     ) -> ft.Container | None:
@@ -147,6 +160,11 @@ class _HistoryParagraphUIMixin:
             content=rail_content,
         )
         return rail, hover, presence
+
+    def _on_review_compare_row_comment_pick(self, paragraph_index: int) -> None:
+        if not getattr(self, "_ki_comment_pick_mode", False):
+            return
+        self.page.run_task(self._on_ki_comment_pick_text_paragraph_async, int(paragraph_index))
 
     def _rebuild_compare_paragraph_ui(self) -> None:
         """History tab: eval | old | pill | new — with ghost rows at old positions of moved content.
@@ -359,6 +377,8 @@ class _HistoryParagraphUIMixin:
         comparison), not ``ghost_moved`` rows. ``_future_eval_cand_indices`` maps eval cell
         order to candidate paragraph indices when delete rows precede comparisons.
         """
+        if hasattr(self, "_ensure_plan_pdf_compare_active"):
+            self._ensure_plan_pdf_compare_active()
         if self._compare_candidate_source == CompareCandidateSource.PDF_ORIGINAL:
             self._compare_pill_gen += 1
             self._future_rows_listview.controls.clear()
@@ -415,6 +435,7 @@ class _HistoryParagraphUIMixin:
 
         self._future_rows_listview.controls.clear()
         self._future_left_diff_texts.clear()
+        self._future_comment_pick_cells: list[ft.Container] = []
         self._future_row_pill_hosts.clear()
         self._compare_right_fields.clear()
         self._compare_eval_hosts.clear()
@@ -481,6 +502,7 @@ class _HistoryParagraphUIMixin:
         eval_spacer_w = COMPARE_EVAL_COL_W
         comp_idx = 0
         field_idx = 0
+        text_single = hasattr(self, "_review_text_single_mode") and self._review_text_single_mode()
 
         for row in display_rows:
             is_ghost = row.row_type in ("ghost_moved", "removed")
@@ -504,6 +526,8 @@ class _HistoryParagraphUIMixin:
             )
 
             if row.row_type == "ghost_moved":
+                if text_single:
+                    continue
                 ghost_left = ft.Text(
                     row.old_text,
                     style=ghost_text_style,
@@ -575,12 +599,13 @@ class _HistoryParagraphUIMixin:
                 self._future_row_insert_after_old.append(-1)
                 self._compare_right_fields.append(right_tf)
                 eval_ctrl = ft.Container(width=eval_spacer_w)
-                row_cells: list[ft.Control] = [
-                    eval_ctrl,
-                    left_cell,
-                    pill_host,
-                    right_cell,
-                ]
+                row_cells: list[ft.Control] = self._future_review_visible_row_cells(
+                    text_single=text_single,
+                    eval_ctrl=eval_ctrl,
+                    left_cell=left_cell,
+                    pill_host=pill_host,
+                    right_cell=right_cell,
+                )
                 if show_actions:
                     actions_ctrl, hover_wrap_future, presence_host = self._build_actions_square(
                         field_idx,
@@ -660,6 +685,10 @@ class _HistoryParagraphUIMixin:
                 padding=_COMPARE_HISTORY_CELL_PAD,
                 opacity=_MOVED_OPACITY if row.is_moved else 1.0,
             )
+            cand_pi = row.new_paragraph_index
+            if cand_pi is not None and int(cand_pi) >= 0:
+                pick_pi = int(cand_pi)
+                left_cell.on_click = lambda _e, p=pick_pi: self._on_review_compare_row_comment_pick(p)
             right_tf = ft.TextField(
                 **right_tf_kwargs,
                 value=cur_txt,
@@ -674,6 +703,10 @@ class _HistoryParagraphUIMixin:
                 expand=1,
                 padding=_COMPARE_HISTORY_CELL_PAD,
             )
+            if cand_pi is not None and int(cand_pi) >= 0:
+                pick_pi = int(cand_pi)
+                right_cell.on_click = lambda _e, p=pick_pi: self._on_review_compare_row_comment_pick(p)
+                self._future_comment_pick_cells.extend([left_cell, right_cell])
             self._compare_right_fields.append(right_tf)
             eval_host = self._build_eval_cell(comp_idx)
             self._compare_eval_hosts.append(eval_host)
@@ -681,12 +714,13 @@ class _HistoryParagraphUIMixin:
             self._future_eval_cand_indices.append(row.new_paragraph_index)
             comp_idx += 1
 
-            row_cells = [
-                eval_host,
-                left_cell,
-                pill_host,
-                right_cell,
-            ]
+            row_cells = self._future_review_visible_row_cells(
+                text_single=text_single,
+                eval_ctrl=eval_host,
+                left_cell=left_cell,
+                pill_host=pill_host,
+                right_cell=right_cell,
+            )
             if show_actions:
                 cand_pi = row.new_paragraph_index
                 has_uc = cand_pi in future_user_comments
@@ -747,6 +781,9 @@ class _HistoryParagraphUIMixin:
 
         if self._active_check_id is not None:
             self._refresh_all_eval_cells()
+
+        if hasattr(self, "_sync_ki_comment_pick_affordance"):
+            self._sync_ki_comment_pick_affordance()
 
         self._refresh_compare_bulk_buttons()
         if self._compare_candidate_source != CompareCandidateSource.SPELL_PREVIEW:

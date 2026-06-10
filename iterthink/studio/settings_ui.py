@@ -32,6 +32,7 @@ from .settings_ocr import build_ocr_settings_tab
 from .settings_privacy import build_privacy_settings_tab
 from .settings_rag import build_rag_settings_tab
 from .settings_token_cost import build_token_cost_settings_tab
+from .settings_yourcompanyos import build_yourcompanyos_settings_tab
 from .prompts_merge_ui import show_prompt_merge_dialog
 from .util import (
     CLOUD_VENDOR_ANTHROPIC,
@@ -1008,7 +1009,7 @@ async def _open_settings_dialog(studio: Any) -> None:
     )
 
     wrap_crypto = ft.Container(
-        visible=_models_tier_k in (KI_TIER_COMPANY, KI_TIER_CLOUD),
+        visible=True,
         content=ft.Column(
             [
                 ft.Text("Encryption", weight=ft.FontWeight.W_600, size=14),
@@ -1263,6 +1264,27 @@ async def _open_settings_dialog(studio: Any) -> None:
         on_saved=lambda: _apply_paths_and_theme(studio, store_changed=False),
     )
 
+    def _on_yourcompanyos_saved() -> None:
+        show = getattr(studio, "_ki_act_show_configured", None)
+        hide = getattr(studio, "_ki_act_show_unconfigured", None)
+        from .ki_act_workflows import studio_yourcompanyos_configured
+
+        if studio_yourcompanyos_configured(studio):
+            if callable(show):
+                show()
+            refresh = getattr(studio, "_ki_act_refresh_workflows", None)
+            if callable(refresh):
+                page.run_task(refresh)
+        elif callable(hide):
+            hide()
+
+    tab_yourcompanyos = build_yourcompanyos_settings_tab(
+        studio=studio,
+        crypto_passphrase_tf=crypto_passphrase_tf,
+        crypto_feedback_txt=crypto_feedback_txt,
+        on_saved=_on_yourcompanyos_saved,
+    )
+
     tab_app = ft.Container(
         padding=8,
         content=ft.Column(
@@ -1486,6 +1508,7 @@ async def _open_settings_dialog(studio: Any) -> None:
     _RAG_PANEL_IX = 2
     _KNOWLEDGE_PANEL_IX = 3
     _OCR_PANEL_IX = 5
+    _YOURCOMPANYOS_PANEL_IX = 6
 
     panels = [
         tab_app,
@@ -1494,6 +1517,7 @@ async def _open_settings_dialog(studio: Any) -> None:
         tab_knowledge,
         tab_export,
         tab_ocr,
+        tab_yourcompanyos,
         tab_privacy,
         tab_usage,
         tab_license,
@@ -1526,6 +1550,7 @@ async def _open_settings_dialog(studio: Any) -> None:
         extended=True,
         min_width=72,
         min_extended_width=152,
+        height=500,
         bgcolor=ft.Colors.with_opacity(0.06, ft.Colors.WHITE),
         destinations=[
             ft.NavigationRailDestination(icon=ft.Icons.PALETTE_OUTLINED, label="App"),
@@ -1534,6 +1559,7 @@ async def _open_settings_dialog(studio: Any) -> None:
             ft.NavigationRailDestination(icon=ft.Icons.MENU_BOOK_OUTLINED, label="Knowledge"),
             ft.NavigationRailDestination(icon=ft.Icons.DESCRIPTION_OUTLINED, label="Export"),
             ft.NavigationRailDestination(icon=ft.Icons.DOCUMENT_SCANNER_OUTLINED, label="Import"),
+            ft.NavigationRailDestination(icon=ft.Icons.PLAY_CIRCLE_OUTLINE, label="{yourcompany}os"),
             ft.NavigationRailDestination(icon=ft.Icons.SHIELD_OUTLINED, label="Privacy"),
             ft.NavigationRailDestination(icon=ft.Icons.PAYMENTS_OUTLINED, label="Usage"),
             ft.NavigationRailDestination(icon=ft.Icons.KEY, label="License"),
@@ -1550,6 +1576,14 @@ async def _open_settings_dialog(studio: Any) -> None:
             rail.update()
 
     studio._focus_rag_settings_panel = focus_rag_settings_panel
+
+    def focus_yourcompanyos_settings_panel() -> None:
+        show_panel(_YOURCOMPANYOS_PANEL_IX)
+        rail.selected_index = _YOURCOMPANYOS_PANEL_IX
+        if _ctrl_on_page(rail):
+            rail.update()
+
+    studio._focus_yourcompanyos_settings_panel = focus_yourcompanyos_settings_panel
 
     body = ft.Row(
         [

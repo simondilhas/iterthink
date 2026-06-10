@@ -243,9 +243,9 @@ class MarkdownStudioContentTree:
     async def _content_ensure_compose_editor(self) -> None:
         if self._main_tab_index != TAB_PRESENT:
             await self._request_tab_switch_async(TAB_PRESENT)
-        if getattr(self, "_focus_view_mode", "edit") == "preview":
-            self._focus_view_mode = "edit"
-            self._apply_focus_preview_mode()
+        if getattr(self, "_focus_view_mode", "wysiwyg") != "source":
+            self._focus_view_mode = "source"
+            self._apply_focus_compose_mode()
 
     def _content_find_next(self) -> None:
         needle = self._content_find_needle()
@@ -484,14 +484,23 @@ class MarkdownStudioContentTree:
     async def _on_content_heading_tap(self, offset: int) -> None:
         if self._main_tab_index != TAB_PRESENT:
             await self._request_tab_switch_async(TAB_PRESENT)
-        if getattr(self, "_focus_view_mode", "edit") == "preview":
-            self._focus_view_mode = "edit"
-            self._apply_focus_preview_mode()
-        off = max(0, min(int(offset), len(self.editor.value or "")))
-        try:
-            await self.editor.focus()
-        except BaseException:
-            pass
-        self.editor.selection = ft.TextSelection(off, off)
-        if _ctrl_on_page(self.editor):
-            self.editor.update()
+        if not self._compose_wysiwyg_available():
+            off = max(0, min(int(offset), len(self.editor.value or "")))
+            try:
+                await self.editor.focus()
+            except BaseException:
+                pass
+            self.editor.selection = ft.TextSelection(off, off)
+            if _ctrl_on_page(self.editor):
+                self.editor.update()
+            return
+        if getattr(self, "_focus_view_mode", "wysiwyg") != "wysiwyg":
+            self._focus_view_mode = "wysiwyg"
+            self._apply_focus_compose_mode()
+        self._sync_wysiwyg_from_editor()
+        from iterthink.studio.wysiwyg_blocks import block_at_global_offset
+
+        ctrl = self._ensure_wysiwyg_controller()
+        bi, caret = block_at_global_offset(ctrl.blocks, offset)
+        ctrl.start_edit(bi, caret)
+        await self._focus_wysiwyg_edit_field_async()

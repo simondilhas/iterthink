@@ -1,4 +1,4 @@
-"""Pragmatic BIM Data Contract v0.0.7 helpers (enums, paths, validation)."""
+"""Pragmatic BIM Data Contract v0.1.0 helpers (enums, paths, classification)."""
 
 from iterthink.contract.version import CONTRACT_VERSION
 

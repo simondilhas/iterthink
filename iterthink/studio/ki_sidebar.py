@@ -121,6 +121,9 @@ class MarkdownStudioKiSidebar:
         if not self.right_open:
             self.toggle_right()
         self._set_ki_topic(KI_TOPIC_ACT)
+        refresh = getattr(self, "_ki_act_refresh_workflows", None)
+        if callable(refresh):
+            await refresh()
 
     def _set_ki_topic(self, index: int) -> None:
         pages = getattr(self, "_ki_tab_pages", None) or []
@@ -141,6 +144,10 @@ class MarkdownStudioKiSidebar:
             self._sync_impact_ki_context_visibility()
         if hasattr(self, "_on_ki_topic_index_changed"):
             self._on_ki_topic_index_changed(ix)
+        if ix == KI_TOPIC_ACT:
+            refresh = getattr(self, "_ki_act_refresh_workflows", None)
+            if callable(refresh):
+                self.page.run_task(refresh)
 
     def _sync_ki_topic_strip_after_workspace_tab_change(self) -> None:
         """After ``_main_tab_index`` updates: reclamp topic, pill page, strip, impact dock.
@@ -200,10 +207,17 @@ class MarkdownStudioKiSidebar:
             if (
                 getattr(self, "_compose_editor_focused", False)
                 and int(getattr(self, "_main_tab_index", -1)) == TAB_PRESENT
-                and getattr(self, "_focus_view_mode", "edit") == "edit"
+                and getattr(self, "_focus_view_mode", "wysiwyg") == "source"
             ):
                 self.page.run_task(self._compose_handle_tab_key_async, shift=e.shift)
             return
+        if key in ("enter", "backspace", "escape") and int(
+            getattr(self, "_main_tab_index", -1)
+        ) == TAB_PRESENT:
+            if hasattr(self, "_handle_wysiwyg_keyboard") and self._handle_wysiwyg_keyboard(
+                key, shift=e.shift
+            ):
+                return
         if key != "j":
             return
         if not (e.ctrl or e.meta):
@@ -340,7 +354,6 @@ class MarkdownStudioKiSidebar:
     def _sync_privacy_shield_icon(self) -> None:
         sync_privacy_shield_icon(
             getattr(self, "_privacy_shield_icon", None),
-            enabled=config.PRIVACY_SHIELD_ENABLED,
             tier=self.ki_tier,
             reinject=config.PRIVACY_SHIELD_REINJECT,
         )
@@ -393,7 +406,7 @@ class MarkdownStudioKiSidebar:
             cloud_user = redacted_user
         elif should_show_masked_in_chat(self.ki_tier):
             try:
-                user_chat_text, _ = await redact_text_via_local_llm(raw)
+                user_chat_text, _ = await redact_text_via_local_llm(raw, self.ki_tier)
             except ValueError as ex:
                 self._append_chat_line("user", raw)
                 self._snack(str(ex))

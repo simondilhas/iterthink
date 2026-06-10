@@ -16,12 +16,33 @@ from iterthink.privacy_shield_settings import (
     save_categories,
 )
 
+_TIER_COL_W = 72
+
 
 def _ctrl_on_page(ctrl: ft.Control) -> bool:
     try:
         return ctrl.page is not None
     except RuntimeError:
         return False
+
+
+def _bool_or(value: Any, default: bool) -> bool:
+    return bool(value) if isinstance(value, bool) else default
+
+
+def _legacy_privacy_enabled(bootstrap: dict) -> bool:
+    legacy = bootstrap.get("privacy_shield_enabled")
+    if isinstance(legacy, bool):
+        return legacy
+    company = bootstrap.get("privacy_shield_company_enabled")
+    cloud = bootstrap.get("privacy_shield_cloud_enabled")
+    if isinstance(company, bool) or isinstance(cloud, bool):
+        return _bool_or(company, True) or _bool_or(cloud, True)
+    return True
+
+
+def _privacy_master_on(company_sw: ft.Switch, cloud_sw: ft.Switch) -> bool:
+    return bool(company_sw.value) or bool(cloud_sw.value)
 
 
 def build_privacy_settings_tab(
@@ -31,45 +52,67 @@ def build_privacy_settings_tab(
     on_saved: Callable[[], None] | None = None,
 ) -> ft.Container:
     _bd0 = bootstrap_data()
-    _ps0 = _bd0.get("privacy_shield_enabled", True)
-    if not isinstance(_ps0, bool):
-        _ps0 = True
-    privacy_shield_sw = ft.Switch(
-        label="Privacy shield enabled",
-        value=_ps0,
+    _legacy_on = _legacy_privacy_enabled(_bd0)
+    _psc0 = _bd0.get("privacy_shield_company_enabled")
+    _psz0 = _bd0.get("privacy_shield_cloud_enabled")
+    privacy_shield_company_sw = ft.Switch(
+        label="Company",
+        value=_bool_or(_psc0, _legacy_on),
     )
+    privacy_shield_cloud_sw = ft.Switch(
+        label="Public",
+        value=_bool_or(_psz0, _legacy_on),
+    )
+
     _psr0 = _bd0.get("privacy_shield_reinject", True)
-    if not isinstance(_psr0, bool):
-        _psr0 = True
     privacy_shield_reinject_sw = ft.Switch(
         label="Restore original values in AI replies",
-        value=_psr0,
-        disabled=not _ps0,
+        value=_bool_or(_psr0, True),
+        disabled=not _privacy_master_on(privacy_shield_company_sw, privacy_shield_cloud_sw),
     )
 
     _psm0 = _bd0.get("privacy_shield_show_masked_in_chat", False)
-    if not isinstance(_psm0, bool):
-        _psm0 = False
     privacy_shield_show_masked_sw = ft.Switch(
         label="Show masked text in KI chat (Office/Cloud)",
-        value=_psm0,
-        disabled=not _ps0,
+        value=_bool_or(_psm0, False),
+        disabled=not _privacy_master_on(privacy_shield_company_sw, privacy_shield_cloud_sw),
     )
 
     cats = load_categories()
-    cat_switches: dict[str, ft.Switch] = {}
+    cat_company_switches: dict[str, ft.Switch] = {}
+    cat_cloud_switches: dict[str, ft.Switch] = {}
     category_rows: list[ft.Control] = []
 
-    def _on_master_switch(_e: ft.ControlEvent | None = None) -> None:
-        on = bool(privacy_shield_sw.value)
+    def _sync_dependent_switches() -> None:
+        on = _privacy_master_on(privacy_shield_company_sw, privacy_shield_cloud_sw)
         privacy_shield_reinject_sw.disabled = not on
         privacy_shield_show_masked_sw.disabled = not on
-        if _ctrl_on_page(privacy_shield_reinject_sw):
-            privacy_shield_reinject_sw.update()
-        if _ctrl_on_page(privacy_shield_show_masked_sw):
-            privacy_shield_show_masked_sw.update()
+        for ctrl in (privacy_shield_reinject_sw, privacy_shield_show_masked_sw):
+            if _ctrl_on_page(ctrl):
+                ctrl.update()
 
-    privacy_shield_sw.on_change = _on_master_switch
+    def _on_master_switch(_e: ft.ControlEvent | None = None) -> None:
+        _sync_dependent_switches()
+
+    privacy_shield_company_sw.on_change = _on_master_switch
+    privacy_shield_cloud_sw.on_change = _on_master_switch
+
+    category_rows.append(
+        ft.Row(
+            [
+                ft.Container(ft.Text("Category", weight=ft.FontWeight.W_600, size=12), expand=True),
+                ft.Container(
+                    ft.Text("Company", weight=ft.FontWeight.W_600, size=12, text_align=ft.TextAlign.CENTER),
+                    width=_TIER_COL_W,
+                ),
+                ft.Container(
+                    ft.Text("Public", weight=ft.FontWeight.W_600, size=12, text_align=ft.TextAlign.CENTER),
+                    width=_TIER_COL_W,
+                ),
+            ],
+            spacing=8,
+        )
+    )
 
     last_priority: int | None = None
     for c in categories_for_ui():
@@ -82,12 +125,24 @@ def build_privacy_settings_tab(
                     size=13,
                 )
             )
-        sw = ft.Switch(
-            label=f"{c.label}  →  {c.example_token(1)}",
-            value=c.enabled,
+        sw_company = ft.Switch(value=c.enabled_company)
+        sw_cloud = ft.Switch(value=c.enabled_cloud)
+        cat_company_switches[c.id] = sw_company
+        cat_cloud_switches[c.id] = sw_cloud
+        category_rows.append(
+            ft.Row(
+                [
+                    ft.Container(
+                        ft.Text(f"{c.label}  →  {c.example_token(1)}", size=13),
+                        expand=True,
+                    ),
+                    ft.Container(sw_company, width=_TIER_COL_W, alignment=ft.Alignment.CENTER),
+                    ft.Container(sw_cloud, width=_TIER_COL_W, alignment=ft.Alignment.CENTER),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
         )
-        cat_switches[c.id] = sw
-        category_rows.append(sw)
 
     async def save_privacy_settings(_e: ft.ControlEvent | None = None) -> None:
         try:
@@ -95,7 +150,9 @@ def build_privacy_settings_tab(
         except (OSError, yaml.YAMLError) as ex:
             studio._snack(f"Could not read app config: {ex}")
             return
-        data["privacy_shield_enabled"] = bool(privacy_shield_sw.value)
+        data["privacy_shield_company_enabled"] = bool(privacy_shield_company_sw.value)
+        data["privacy_shield_cloud_enabled"] = bool(privacy_shield_cloud_sw.value)
+        data.pop("privacy_shield_enabled", None)
         data["privacy_shield_reinject"] = bool(privacy_shield_reinject_sw.value)
         data["privacy_shield_show_masked_in_chat"] = bool(privacy_shield_show_masked_sw.value)
         try:
@@ -120,12 +177,14 @@ def build_privacy_settings_tab(
                 priority=c.priority,
                 placeholder=c.placeholder,
                 mode=c.mode,
-                enabled=bool(cat_switches[cid].value),
+                enabled_company=bool(cat_company_switches[cid].value),
+                enabled_cloud=bool(cat_cloud_switches[cid].value),
                 description=c.description,
             )
         save_categories(updated)
         studio._snack("Privacy shield settings saved.")
-        privacy_shield_sw.value = config.PRIVACY_SHIELD_ENABLED
+        privacy_shield_company_sw.value = config.PRIVACY_SHIELD_COMPANY_ENABLED
+        privacy_shield_cloud_sw.value = config.PRIVACY_SHIELD_CLOUD_ENABLED
         privacy_shield_reinject_sw.value = config.PRIVACY_SHIELD_REINJECT
         privacy_shield_reinject_sw.disabled = not config.PRIVACY_SHIELD_ENABLED
         privacy_shield_show_masked_sw.value = config.PRIVACY_SHIELD_SHOW_MASKED_IN_CHAT
@@ -171,7 +230,14 @@ def build_privacy_settings_tab(
         content=ft.Column(
             [
                 privacy_disclaimer,
-                privacy_shield_sw,
+                ft.Text("Privacy shield enabled", weight=ft.FontWeight.W_600, size=13),
+                ft.Row(
+                    [
+                        privacy_shield_company_sw,
+                        privacy_shield_cloud_sw,
+                    ],
+                    spacing=16,
+                ),
                 privacy_shield_reinject_sw,
                 privacy_shield_show_masked_sw,
                 ft.Divider(height=1, color=ft.Colors.with_opacity(0.15, config.OUTLINE)),

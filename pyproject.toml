@@ -48,6 +48,7 @@ dependencies = [
     "pyspellchecker>=0.8.0",
     "langdetect>=1.0.9",
     "rapidocr>=3.8.0",
+    "onnxruntime>=1.17.0",
 ]
 
 [project.optional-dependencies]
