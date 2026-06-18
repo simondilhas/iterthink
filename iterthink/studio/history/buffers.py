@@ -181,21 +181,35 @@ class _HistoryBuffersMixin:
         )
 
     def _sync_compare_buffer_from_fields(self) -> None:
-        parts = [tf.value or "" for tf in self._compare_right_fields]
+        if getattr(self, "_future_virtual_active", False):
+            self._compare_commit_virtual_future_fields()
         if self._main_tab_index == TAB_FUTURE:
             kinds = getattr(self, "_future_row_kinds", None) or []
             cand_idxs = getattr(self, "_future_row_cand_idx", None) or []
             by_new: dict[int, str] = {}
-            for i, tf in enumerate(self._compare_right_fields):
+            n_fields = (
+                len(self._future_virtual_field_meta)
+                if getattr(self, "_future_virtual_active", False)
+                else len(self._compare_right_fields)
+            )
+            for i in range(n_fields):
                 if i < len(kinds) and kinds[i] == "delete":
                     continue
                 if i < len(cand_idxs) and cand_idxs[i] is not None and cand_idxs[i] >= 0:
-                    by_new[int(cand_idxs[i])] = tf.value or ""
+                    if getattr(self, "_future_virtual_active", False):
+                        val = self._future_virtual_field_text(i)
+                    else:
+                        val = self._compare_right_fields[i].value or ""
+                    by_new[int(cand_idxs[i])] = val
             if not by_new:
                 merged = ""
             else:
                 merged = join_paragraphs([by_new.get(j, "") for j in range(max(by_new) + 1)])
         else:
+            if getattr(self, "_compare_virtual_active", False):
+                parts = list(self._compare_virtual_comp_right)
+            else:
+                parts = [tf.value or "" for tf in self._compare_right_fields]
             merged = "\n\n".join(parts) if parts else ""
         if self._main_tab_index == TAB_HISTORY:
             if self._compare_newer_version_id is None:

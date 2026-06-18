@@ -24,17 +24,21 @@ from .candidate_state import CompareCandidateSource
 
 class _HistoryBulkActionsMixin:
     def _compare_has_pending_bulk_apply(self) -> bool:
-        if not self.current_path or not self._compare_right_fields:
+        if not self.current_path or not self._compare_comp_slot_count():
             return False
         # Manual seeded candidate: always allow bulk apply so Approve All stays visible
         # even before the user has made any edits to the right column.
         if self._pending_ai_accept_action_id == REVIEW_MANUAL_CANDIDATE_ACTION_ID:
             return True
-        merged = "\n\n".join(tf.value or "" for tf in self._compare_right_fields)
+        if getattr(self, "_future_virtual_active", False):
+            self._sync_compare_buffer_from_fields()
+            merged = self._compare_editor.value or ""
+        else:
+            merged = "\n\n".join(tf.value or "" for tf in self._compare_right_fields)
         return merged != (self.editor.value or "")
 
     def _refresh_compare_bulk_buttons(self) -> None:
-        n = len(self._compare_right_fields)
+        n = self._compare_comp_slot_count()
         # Approve/decline bulk buttons only shown on Future tab (ai_preview).
         on_future = self._main_tab_index == TAB_FUTURE
         pending_apply = self._compare_has_pending_bulk_apply() if on_future else False

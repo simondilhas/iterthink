@@ -222,8 +222,6 @@ class _HistoryDiffSpansMixin:
         """Update History inline diff for both columns (snapshot vs draft; same paragraph count)."""
         if self._main_tab_index != TAB_HISTORY:
             return
-        if len(self._compare_left_diff_texts) != len(self._compare_right_fields):
-            return
         older = self._compare_editor.value or ""
         newer = self._history_newer_side_text() or ""
         if len(older) + len(newer) > _DIFF_SPAN_CHAR_CAP:
@@ -232,6 +230,15 @@ class _HistoryDiffSpansMixin:
             newer = newer[:half] + "\n…"
         display_rows = paragraph_compare.build_history_display_rows(older, newer)
         comparison_rows = [r for r in display_rows if r.row_type == "comparison"]
+        if getattr(self, "_compare_virtual_active", False):
+            self._compare_virtual_comp_left = [r.old_text for r in comparison_rows]
+            self._compare_virtual_comp_right = [r.new_text for r in comparison_rows]
+            for i, r in enumerate(comparison_rows):
+                self._compare_set_candidate_para_text(i, r.new_text)
+            self._refresh_compare_virtual_spans()
+            return
+        if len(self._compare_left_diff_texts) != len(self._compare_right_fields):
+            return
         for i, r in enumerate(comparison_rows):
             if i >= len(self._compare_left_diff_texts):
                 break

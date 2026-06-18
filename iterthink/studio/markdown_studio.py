@@ -226,7 +226,9 @@ class MarkdownStudio(
         # Sha of the proposal body currently displayed in the Review right column; used to
         # decide whether to persist a new ai_proposal snapshot when the user leaves it.
         self._loaded_proposal_sha: str | None = None
-        # History tab: left + right are read-only diff Texts; _compare_right_fields holds hidden carriers
+        self._compare_rebuild_pending: bool = False
+        self._compare_virtual_active: bool = False
+        self._future_virtual_active: bool = False
         # so length-based code (hash invalidation, bulk-apply checks) keeps working unchanged.
         self._compare_right_fields: list[ft.TextField] = []
         self._compare_left_diff_texts: list[ft.Text] = []
@@ -251,6 +253,8 @@ class MarkdownStudio(
         self._future_left_diff_texts: list[ft.Text] = []
         self._future_row_pill_hosts: list[ft.Container] = []
         self._future_row_stable_texts: list[str] = []
+        self._compare_rebuild_pending = False
+        self._compare_reset_virtual_state()
         # Compose text frozen when opening Compare (draft); left column diffs vs this, not live editor drift.
         self._compare_baseline_snapshot: str = ""
         self._compose_tab_inline_rename_active: bool = False
@@ -630,6 +634,7 @@ class MarkdownStudio(
             expand=True,
             spacing=0,
             padding=ft.padding.symmetric(horizontal=4, vertical=2),
+            on_scroll=self._on_compare_rows_virtual_scroll,
         )
         self._compare_paragraph_layer = ft.Container(content=self._compare_rows_listview, expand=True)
         self._compare_pdf_left_lv = ft.ListView(
@@ -758,6 +763,7 @@ class MarkdownStudio(
             expand=True,
             spacing=0,
             padding=ft.padding.symmetric(horizontal=4, vertical=2),
+            on_scroll=self._on_future_rows_virtual_scroll,
         )
         self._future_paragraph_layer = ft.Container(content=self._future_rows_listview, expand=True)
         self._future_pdf_left_lv = ft.ListView(

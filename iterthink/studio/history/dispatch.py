@@ -16,6 +16,10 @@ class _HistoryDispatchMixin:
           2. Implement ``_rebuild_compare_<fmt>_panes()`` in its own mixin.
           3. Add one ``elif`` branch here.
         """
+        if self._main_tab_index != TAB_HISTORY:
+            self._mark_compare_rebuild_pending()
+            return
+        self._clear_compare_rebuild_pending()
         if hasattr(self, "_ensure_plan_pdf_compare_active"):
             self._ensure_plan_pdf_compare_active()
         source = self._compare_candidate_source

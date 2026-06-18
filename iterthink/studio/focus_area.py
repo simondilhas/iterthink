@@ -569,14 +569,6 @@ class MarkdownStudioCompose:
         )
 
         toolbar_items: list[ft.Control] = []
-        if config.FOCUS_SELECTION_REVIEW_ACTIONS_ENABLED:
-            toolbar_items.append(
-                _btn(
-                    ft.Icons.SPELLCHECK,
-                    "Spelling review (Review tab)",
-                    self._compose_toolbar_spellcheck,
-                )
-            )
         toolbar_items.extend(
             [
                 _btn(ft.Icons.FORMAT_BOLD, "Bold **", self._compose_toolbar_bold),
@@ -690,7 +682,6 @@ class MarkdownStudioCompose:
             self._kick_debounced_content_tree()
         if not self.current_path:
             return
-        self._kick_spell_cache_from_compose_if_needed()
         self._kick_debounced_autosave()
 
     def _sync_wysiwyg_from_editor(self) -> None:
@@ -882,18 +873,6 @@ class MarkdownStudioCompose:
         new_t, s0, s1 = got
         self._compose_apply_toolbar_text_mutation(new_t, s0, s1)
 
-    def _compose_toolbar_spellcheck(self, _e: ft.ControlEvent) -> None:
-        if not self.current_path:
-            self._snack("Open a note first.")
-            return
-        self.page.run_task(self._compose_toolbar_spellcheck_open_review_async)
-
-    async def _compose_toolbar_spellcheck_open_review_async(self) -> None:
-        """Review tab, Difference panel, full-document spelling suggestions."""
-        self._select_review_subtab(0)
-        self._enter_spell_review_mode()
-        await self._request_tab_switch_async(TAB_FUTURE)
-
     async def _compose_handle_tab_key_async(self, *, shift: bool) -> None:
         if self._main_tab_index != TAB_PRESENT or self._focus_view_mode != "source":
             return
@@ -974,7 +953,6 @@ class MarkdownStudioCompose:
             self._sync_wysiwyg_from_editor()
         if not self.current_path:
             return
-        self._kick_spell_cache_from_compose_if_needed()
         self._kick_debounced_autosave()
 
     def _cancel_autosave_timers(self) -> None:
@@ -1465,7 +1443,6 @@ class MarkdownStudioCompose:
             self._kick_debounced_content_tree()
         if not self.current_path:
             return
-        self._kick_spell_cache_from_compose_if_needed()
         self._kick_debounced_autosave()
 
     async def _debounced_compose_rebuild(self, gen: int) -> None:

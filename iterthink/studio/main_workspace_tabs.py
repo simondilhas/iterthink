@@ -471,10 +471,7 @@ class MainWorkspaceTabsMixin:
                     and hasattr(self, "_ensure_plan_pdf_compare_active")
                 ):
                     self._ensure_plan_pdf_compare_active()
-                spell_review_hold = (
-                    self._compare_candidate_source == CompareCandidateSource.SPELL_PREVIEW
-                )
-                already_staged = spell_review_hold or (
+                already_staged = (
                     self._compare_candidate_source == CompareCandidateSource.AI_PREVIEW
                     and self._pending_ai_accept_action_id
                     and self._compare_snapshot_version_id is not None
@@ -506,8 +503,6 @@ class MainWorkspaceTabsMixin:
                     self._main_tab_index = prev
                     self._apply_active_tab_ui_state()
                     return
-                if self._compare_candidate_source == CompareCandidateSource.SPELL_PREVIEW:
-                    await self._sync_spell_candidate_for_review_tab_async()
                 if hasattr(self, "_ensure_text_review_compare_layout_default"):
                     self._ensure_text_review_compare_layout_default()
                 self._rebuild_future_paragraph_ui()

@@ -151,7 +151,7 @@ class MarkdownStudioChecksUi:
         if self._main_tab_index != TAB_FUTURE:
             await self._request_tab_switch_async(TAB_FUTURE)
         # Need a candidate to analyse against the baseline.
-        if not self._compare_right_fields:
+        if not self._compare_comp_slot_count():
             self._rebuild_future_paragraph_ui()
         buffers = self._active_compare_buffers()
         if not buffers.candidate.strip():

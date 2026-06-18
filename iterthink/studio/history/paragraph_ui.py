@@ -187,6 +187,12 @@ class _HistoryParagraphUIMixin:
 
         display_rows = paragraph_compare.build_history_display_rows(older_text, newer_text)
         comparison_rows = [r for r in display_rows if r.row_type == "comparison"]
+        if self._compare_should_virtualize(len(display_rows)):
+            self._compare_reset_virtual_state()
+            self._rebuild_compare_paragraph_ui_virtual(display_rows, comparison_rows)
+            return
+
+        self._compare_reset_virtual_state()
         n_comp = len(comparison_rows)
 
         self._compare_rows_listview.controls.clear()
@@ -377,6 +383,10 @@ class _HistoryParagraphUIMixin:
         comparison), not ``ghost_moved`` rows. ``_future_eval_cand_indices`` maps eval cell
         order to candidate paragraph indices when delete rows precede comparisons.
         """
+        if self._main_tab_index != TAB_FUTURE:
+            self._mark_compare_rebuild_pending()
+            return
+        self._clear_compare_rebuild_pending()
         if hasattr(self, "_ensure_plan_pdf_compare_active"):
             self._ensure_plan_pdf_compare_active()
         if self._compare_candidate_source == CompareCandidateSource.PDF_ORIGINAL:
@@ -431,6 +441,17 @@ class _HistoryParagraphUIMixin:
         diffs = compute_alignment(current_text, ai_text)
         display_rows = paragraph_compare.build_history_display_rows(current_text, ai_text)
         comparison_rows = [r for r in display_rows if r.row_type == "comparison"]
+        if self._compare_should_virtualize(len(display_rows)):
+            self._future_virtual_active = False
+            self._rebuild_future_paragraph_ui_virtual(
+                display_rows=display_rows,
+                comparison_rows=comparison_rows,
+                current_text=current_text,
+                ai_text=ai_text,
+                diffs=diffs,
+            )
+            return
+
         n_comp = len(comparison_rows)
 
         self._future_rows_listview.controls.clear()

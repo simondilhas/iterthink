@@ -132,8 +132,8 @@ class _HistoryMarginAiMixin:
         self._snack(f"Paragraph {idx + 1} replaced.")
 
     def _compare_paragraph_for_index(self, idx: int) -> str:
-        if 0 <= idx < len(self._compare_right_fields):
-            return self._compare_right_fields[idx].value or ""
+        if 0 <= idx < self._compare_comp_slot_count():
+            return self._compare_candidate_para_text(idx)
         paras = split_paragraphs(self._compare_editor.value or "")
         return paras[idx] if 0 <= idx < len(paras) else ""
 

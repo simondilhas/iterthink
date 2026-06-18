@@ -17,6 +17,7 @@ from .buffers import (
 )
 from .bulk_actions import _HistoryBulkActionsMixin
 from .candidate_state import CompareCandidateSource
+from .compare_virtual_ui import _CompareVirtualMixin
 from .debounce import _HistoryDebounceMixin
 from .diff_spans import _HistoryDiffSpansMixin
 from .dispatch import _HistoryDispatchMixin
@@ -29,6 +30,7 @@ from .spell_review import _HistorySpellReviewMixin
 class MarkdownStudioCompareText(
     _HistoryBuffersMixin,
     _HistoryDispatchMixin,
+    _CompareVirtualMixin,
     _HistoryDiffSpansMixin,
     _HistoryParagraphUIMixin,
     _HistoryDropdownsMixin,

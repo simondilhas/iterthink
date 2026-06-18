@@ -17,6 +17,10 @@ from .candidate_state import CompareCandidateSource
 
 class _HistoryDebounceMixin:
     def _refresh_compare_diff_immediate(self) -> None:
+        if not self._compare_tab_is_active():
+            self._mark_compare_rebuild_pending()
+            return
+        self._clear_compare_rebuild_pending()
         if self._main_tab_index == TAB_FUTURE:
             self._rebuild_future_paragraph_ui()
             return
@@ -42,7 +46,7 @@ class _HistoryDebounceMixin:
         need_rebuild = (
             self._future_review_candidate_para_count_mismatch(n_rows)
             if self._main_tab_index == TAB_FUTURE
-            else n_rows != len(self._compare_right_fields)
+            else n_rows != self._compare_comp_slot_count()
         )
         if need_rebuild:
             if self._main_tab_index == TAB_FUTURE:
@@ -76,6 +80,16 @@ class _HistoryDebounceMixin:
             return
         buffers = self._active_compare_buffers()
         kinds, disps = paragraph_compare.compare_slots_heuristic(buffers.baseline, buffers.candidate)
+        if getattr(self, "_compare_virtual_active", False):
+            for i, k in enumerate(kinds):
+                for di, ci in enumerate(self._compare_virtual_comp_by_display):
+                    if ci == i and di < len(self._compare_virtual_pill_kind):
+                        self._compare_virtual_pill_kind[di] = k
+            self._refresh_compare_virtual_pills()
+            return
+        if getattr(self, "_future_virtual_active", False):
+            self._future_virtual_update_pill_kinds(list(kinds))
+            return
         # History + Review: no stacked "Moved" chip on comparison rows (ghost rows + arrow only);
         # a second pill column was taller than single-pill rows and broke column alignment on Review.
         for i, host in enumerate(self._active_pill_hosts()):
@@ -112,16 +126,29 @@ class _HistoryDebounceMixin:
         for i, host in enumerate(self._active_pill_hosts()):
             k = refined[i] if i < len(refined) else "stable"
             d = disps_ref[i] if i < len(disps_ref) else None
+            if getattr(self, "_compare_virtual_active", False):
+                for di, ci in enumerate(self._compare_virtual_comp_by_display):
+                    if ci == i and di < len(self._compare_virtual_pill_kind):
+                        self._compare_virtual_pill_kind[di] = k
+                continue
             host.content = self._make_compare_pill_row(k, d, show_moved_badge=False)
             if _ctrl_on_page(host):
                 host.update()
+        if getattr(self, "_compare_virtual_active", False):
+            self._refresh_compare_virtual_pills()
         # Update diff spans in both History columns after AI refinement.
         if self._main_tab_index == TAB_HISTORY and (
-            len(aligned_lefts) == len(self._compare_left_diff_texts)
-            and len(aligned_lefts) == len(self._compare_right_fields)
+            len(aligned_lefts) == self._compare_comp_slot_count()
         ):
             for i, left_txt in enumerate(aligned_lefts):
-                right_txt = self._compare_right_fields[i].value or ""
+                right_txt = self._compare_candidate_para_text(i)
+                if getattr(self, "_compare_virtual_active", False):
+                    if i < len(getattr(self, "_compare_virtual_comp_left", [])):
+                        self._compare_virtual_comp_left[i] = left_txt
+                    self._compare_set_candidate_para_text(i, right_txt)
+                    continue
+                if i >= len(self._compare_left_diff_texts):
+                    break
                 left_t = self._compare_left_diff_texts[i]
                 left_t.spans = self._compare_old_side_spans(left_txt, right_txt)
                 if _ctrl_on_page(left_t):
@@ -131,6 +158,8 @@ class _HistoryDebounceMixin:
                     right_t.spans = self._compare_new_side_spans(left_txt, right_txt)
                     if _ctrl_on_page(right_t):
                         right_t.update()
+            if getattr(self, "_compare_virtual_active", False):
+                self._refresh_compare_virtual_spans()
         await self._persist_compare_semantic_changes(
             gen,
             aligned_lefts=aligned_lefts,
@@ -209,7 +238,7 @@ class _HistoryDebounceMixin:
         need_rebuild = (
             self._future_review_candidate_para_count_mismatch(n_rows)
             if on_future
-            else n_rows != len(self._compare_right_fields)
+            else n_rows != self._compare_comp_slot_count()
         )
         if need_rebuild:
             if on_future:
