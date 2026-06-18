@@ -13,7 +13,9 @@ from iterthink.persistence import crypto_vault, store_db, token_usage, vault_sto
 from iterthink.token_cost_settings import period_start_timestamp
 
 from . import ui_theme
+from iterthink import licensing
 from iterthink.ai.llm_router import LlmChatBackend
+from iterthink.studio.util import CLOUD_VENDOR_HOSTED, normalize_cloud_vendor
 from .token_cost_ui import sync_token_cost_display
 from .util import (
     KI_TIER_CLOUD,
@@ -230,6 +232,19 @@ class MarkdownStudioLlmBackend:
     def _sync_token_cost_display(self) -> None:
         label = getattr(self, "_token_cost_label", None)
         if label is None:
+            return
+        if (
+            normalize_ki_tier(self.ki_tier) == KI_TIER_CLOUD
+            and normalize_cloud_vendor(self.cloud_vendor) == CLOUD_VENDOR_HOSTED
+        ):
+            usage = licensing.fetch_swiss_ai_usage()
+            if usage and _ctrl_on_page(label):
+                remaining = int(usage.get("remaining") or 0)
+                quota = int(usage.get("quota") or 0)
+                label.visible = True
+                label.value = f"{remaining:,} / {quota:,} tokens"
+                label.tooltip = "Swiss AI Hosting quota this period"
+                label.update()
             return
         since = period_start_timestamp()
         with session_scope() as session:

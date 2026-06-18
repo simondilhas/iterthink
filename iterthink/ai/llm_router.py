@@ -13,6 +13,7 @@ import httpx
 from iterthink.ai.privacy_shield import privacy_shield_enabled_for_tier, redact_messages, reinject_response
 from iterthink.db.session import session_scope
 from iterthink.persistence import token_usage
+from iterthink import licensing
 from iterthink.token_cost_settings import remote_tier_applies
 
 # Encrypted JSON keys (must match studio.settings_ui / studio defaults)
@@ -21,6 +22,7 @@ SECRET_CLOUD_ANTHROPIC = "cloud_anthropic"
 SECRET_CLOUD_OPENAI = "cloud_openai"
 SECRET_CLOUD_GOOGLE = "cloud_google"
 SECRET_YOURCOMPANYOS_API = "yourcompanyos_api"
+SECRET_ITER_THINK_LICENSE = "iterthink_license"
 
 DEFAULT_COMPANY_OPENAI_BASE = "https://api.openai.com/v1"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -585,6 +587,8 @@ class LlmChatBackend:
         if self._tier == "company":
             return self._company_openai_model or "gpt-4o-mini"
         if self._tier == "cloud":
+            if self._cloud_vendor == "hosted":
+                return "google/gemma-4-31B-it"
             if self._cloud_vendor == "anthropic":
                 return (self._cloud_anthropic_model or "").strip()
             if self._cloud_vendor == "google":
@@ -653,6 +657,39 @@ class LlmChatBackend:
             return self._maybe_reinject(resp, rmap)
 
         if self._tier == "cloud":
+            if self._cloud_vendor == "hosted":
+                key = (self._secrets.get(SECRET_ITER_THINK_LICENSE) or licensing.get_license_key() or "").strip()
+                if not key:
+                    raise ValueError(
+                        "Swiss AI Hosting requires an active license. "
+                        "Settings → License: enter your key, or subscribe at iterthink.com."
+                    )
+                url = f"{licensing.api_base_url()}/v1/ai/chat/completions"
+                model_name = (m or "").strip() or "google/gemma-4-31B-it"
+                if stream:
+                    usage_sink = []
+                    stream_iter = _openai_stream_full(
+                        url=url,
+                        api_key=key,
+                        model=model_name,
+                        messages=messages,
+                        json_mode=json_mode,
+                        strict_response_format=False,
+                        usage_sink=usage_sink,
+                    )
+                    return self._wrap_stream(stream_iter, usage_sink=usage_sink, model=model_name)
+                async with httpx.AsyncClient() as client:
+                    resp, usage = await _openai_nonstream(
+                        client,
+                        url=url,
+                        api_key=key,
+                        model=model_name,
+                        messages=messages,
+                        json_mode=json_mode,
+                        strict_response_format=False,
+                    )
+                self._record_token_usage(model_name, usage)
+                return self._maybe_reinject(resp, rmap)
             if self._cloud_vendor == "anthropic":
                 if not (m or "").strip():
                     raise ValueError(

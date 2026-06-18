@@ -88,6 +88,39 @@ from .util import (
 _EXPORT_SAVE_DIALOG_DELAY_SEC = 0.12
 
 
+def _persist_document_save_sync(
+    path: Path,
+    buf: str,
+    *,
+    persist_snapshot: bool,
+    reason: content_repo.SnapshotReason,
+    version_display_label: str | None,
+) -> None:
+    """Blocking disk + SQLite persistence (run via ``asyncio.to_thread``)."""
+    path.write_text(buf, encoding="utf-8")
+    resolved = path.resolve()
+    try:
+        with session_scope() as s:
+            content_repo.update_document_last_disk_state(s, resolved, body=buf)
+    except BaseException:
+        pass
+    if persist_snapshot:
+        try:
+            with session_scope() as s:
+                if version_display_label:
+                    content_repo.persist_version_snapshot(
+                        s,
+                        resolved,
+                        buf,
+                        "ai_apply",
+                        display_label=version_display_label,
+                    )
+                else:
+                    content_repo.persist_version_snapshot(s, resolved, buf, reason)
+        except BaseException:
+            pass
+
+
 class MarkdownStudio(
     MarkdownStudioShell,
     MarkdownStudioCompose,
@@ -1276,6 +1309,7 @@ class MarkdownStudio(
         )
         self._disk_autosave_gen: int = 0
         self._snapshot_autosave_gen: int = 0
+        self._autosave_scheduler_running: bool = False
         self._content_tree_gen: int = 0
 
         self.tree_column = ft.Column(spacing=0, tight=True, scroll=ft.ScrollMode.AUTO, expand=True)
@@ -2719,31 +2753,19 @@ class MarkdownStudio(
         buf = self._working_document_text()
         reason: content_repo.SnapshotReason = snapshot_reason or ("autosave" if silent else "manual")
         try:
-            self.current_path.write_text(buf, encoding="utf-8")
+            await asyncio.to_thread(
+                _persist_document_save_sync,
+                self.current_path,
+                buf,
+                persist_snapshot=persist_snapshot,
+                reason=reason,
+                version_display_label=version_display_label,
+            )
         except OSError as ex:
             self._snack(f"Save failed: {ex}")
             return
         self.last_saved_text = buf
-        try:
-            with session_scope() as s:
-                content_repo.update_document_last_disk_state(s, self.current_path.resolve(), body=buf)
-        except BaseException:
-            pass
         if persist_snapshot:
-            try:
-                with session_scope() as s:
-                    if version_display_label:
-                        content_repo.persist_version_snapshot(
-                            s,
-                            self.current_path.resolve(),
-                            buf,
-                            "ai_apply",
-                            display_label=version_display_label,
-                        )
-                    else:
-                        content_repo.persist_version_snapshot(s, self.current_path.resolve(), buf, reason)
-            except BaseException:
-                pass
             self.schedule_rag_reindex(self.current_path.resolve())
         if not for_shutdown:
             self._refresh_compare_tab_candidate_ui()

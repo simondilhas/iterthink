@@ -196,7 +196,7 @@ def compose_wysiwyg_block_markdown_style_sheet() -> ft.MarkdownStyleSheet:
         strong_text_style=sheet.strong_text_style,
         em_text_style=sheet.em_text_style,
         list_indent=sheet.list_indent,
-        list_bullet_padding=ft.padding.symmetric(vertical=2),
+        list_bullet_padding=ft.Padding.symmetric(vertical=0),
         blockquote_padding=sheet.blockquote_padding,
         table_head_text_style=sheet.table_head_text_style,
         table_body_text_style=sheet.table_body_text_style,

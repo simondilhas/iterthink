@@ -983,15 +983,40 @@ class MarkdownStudioCompose:
         self._snapshot_autosave_gen += 1
 
     def _kick_debounced_autosave(self) -> None:
-        """After edits: debounced disk flush + long-idle snapshot."""
+        """After edits: one scheduler coroutine handles disk + snapshot idle saves."""
         if not self.current_path:
             return
         self._disk_autosave_gen += 1
         self._snapshot_autosave_gen += 1
-        dgen = self._disk_autosave_gen
-        sgen = self._snapshot_autosave_gen
-        self.page.run_task(self._disk_autosave_after_idle, dgen)
-        self.page.run_task(self._snapshot_autosave_after_idle, sgen)
+        if getattr(self, "_autosave_scheduler_running", False):
+            return
+        self._autosave_scheduler_running = True
+        self.page.run_task(self._autosave_scheduler_async)
+
+    async def _autosave_scheduler_async(self) -> None:
+        """Single idle-save loop; gen bumps cancel in-flight waits without new coroutines."""
+        try:
+            while True:
+                dgen = self._disk_autosave_gen
+                await asyncio.sleep(AUTOSAVE_DISK_IDLE_SEC)
+                if dgen != self._disk_autosave_gen:
+                    continue
+                if not self.current_path or not self._is_dirty():
+                    return
+                await self.save_file(silent=True, persist_snapshot=False)
+
+                sgen = self._snapshot_autosave_gen
+                snap_wait = max(0.0, AUTOSAVE_SNAPSHOT_IDLE_SEC - AUTOSAVE_DISK_IDLE_SEC)
+                if snap_wait > 0:
+                    await asyncio.sleep(snap_wait)
+                if sgen != self._snapshot_autosave_gen:
+                    continue
+                if not self.current_path or not self._is_dirty():
+                    return
+                await self.save_file(silent=True, snapshot_reason="autosave")
+                return
+        finally:
+            self._autosave_scheduler_running = False
 
     def _compose_snapshot_margin_selection_for_menu(self) -> None:
         """Capture selection before PopupMenuButton focus clears it (tap-down / menu open)."""
@@ -1450,22 +1475,6 @@ class MarkdownStudioCompose:
             return
         if self._main_tab_index != TAB_PRESENT:
             return
-
-    async def _disk_autosave_after_idle(self, gen: int) -> None:
-        await asyncio.sleep(AUTOSAVE_DISK_IDLE_SEC)
-        if gen != self._disk_autosave_gen:
-            return
-        if not self._is_dirty():
-            return
-        await self.save_file(silent=True, persist_snapshot=False)
-
-    async def _snapshot_autosave_after_idle(self, gen: int) -> None:
-        await asyncio.sleep(AUTOSAVE_SNAPSHOT_IDLE_SEC)
-        if gen != self._snapshot_autosave_gen:
-            return
-        if not self._is_dirty():
-            return
-        await self.save_file(silent=True, snapshot_reason="autosave")
 
     def _on_selection_change(self, e: ft.TextSelectionChangeEvent) -> None:
         sel = e.selection

@@ -37,6 +37,7 @@ from .prompts_merge_ui import show_prompt_merge_dialog
 from .util import (
     CLOUD_VENDOR_ANTHROPIC,
     CLOUD_VENDOR_GOOGLE,
+    CLOUD_VENDOR_HOSTED,
     CLOUD_VENDOR_OPENAI,
     KI_TIER_CLOUD,
     KI_TIER_COMPANY,
@@ -154,6 +155,7 @@ async def _open_settings_dialog(studio: Any) -> None:
             ft.Segment(value="anthropic", label=ft.Text("Claude")),
             ft.Segment(value="openai", label=ft.Text("ChatGPT")),
             ft.Segment(value="google", label=ft.Text("Gemini")),
+            ft.Segment(value="hosted", label=ft.Text("Swiss AI")),
         ],
         selected=[normalize_cloud_vendor(studio.cloud_vendor)],
         expand=True,
@@ -1117,6 +1119,15 @@ async def _open_settings_dialog(studio: Any) -> None:
             spacing=12,
         ),
     )
+    cloud_hosted_wrap = ft.Container(
+        visible=_cv0 == CLOUD_VENDOR_HOSTED,
+        content=ft.Text(
+            "Swiss AI Hosting routes requests through iterthink (Infomaniak, Switzerland). "
+            "Activate your license key and subscribe at iterthink.com.",
+            size=13,
+            color=config.ON_SURFACE_VARIANT,
+        ),
+    )
 
     wrap_cloud = ft.Container(
         visible=_models_tier_k == KI_TIER_CLOUD,
@@ -1127,6 +1138,7 @@ async def _open_settings_dialog(studio: Any) -> None:
                 cloud_anthropic_wrap,
                 cloud_openai_wrap,
                 cloud_google_wrap,
+                cloud_hosted_wrap,
                 ft.Row(
                     [ft.FilledButton("Save cloud", on_click=lambda e: page.run_task(save_cloud_settings, e))],
                     alignment=ft.MainAxisAlignment.START,
@@ -1142,7 +1154,8 @@ async def _open_settings_dialog(studio: Any) -> None:
         cloud_anthropic_wrap.visible = v == CLOUD_VENDOR_ANTHROPIC
         cloud_openai_wrap.visible = v == CLOUD_VENDOR_OPENAI
         cloud_google_wrap.visible = v == CLOUD_VENDOR_GOOGLE
-        for c in (cloud_anthropic_wrap, cloud_openai_wrap, cloud_google_wrap):
+        cloud_hosted_wrap.visible = v == CLOUD_VENDOR_HOSTED
+        for c in (cloud_anthropic_wrap, cloud_openai_wrap, cloud_google_wrap, cloud_hosted_wrap):
             if _ctrl_on_page(c):
                 c.update()
 
@@ -1393,7 +1406,7 @@ async def _open_settings_dialog(studio: Any) -> None:
         _license_phrase_mirror[0] = e.control.value or ""
 
     license_passphrase_tf = ft.TextField(
-        label="License passphrase",
+        label="License key",
         password=True,
         can_reveal_password=True,
         expand=True,
@@ -1425,11 +1438,11 @@ async def _open_settings_dialog(studio: Any) -> None:
     def activate_license(_e: ft.ControlEvent | None = None) -> None:
         phrase = (license_passphrase_tf.value or _license_phrase_mirror[0] or "").strip()
         if not phrase:
-            license_feedback_txt.value = "Enter a passphrase."
+            license_feedback_txt.value = "Enter a license key."
             license_feedback_txt.color = ft.Colors.ORANGE_400
             if _ctrl_on_page(license_feedback_txt):
                 license_feedback_txt.update()
-            studio._snack("Enter a passphrase.")
+            studio._snack("Enter a license key.")
             return
         if licensing.activate(phrase):
             license_passphrase_tf.value = ""
@@ -1445,11 +1458,11 @@ async def _open_settings_dialog(studio: Any) -> None:
                 license_feedback_txt.update()
             studio._snack("License activated.")
         else:
-            license_feedback_txt.value = "Invalid passphrase."
+            license_feedback_txt.value = "Invalid license key."
             license_feedback_txt.color = ft.Colors.RED_400
             if _ctrl_on_page(license_feedback_txt):
                 license_feedback_txt.update()
-            studio._snack("Invalid passphrase.")
+            studio._snack("Invalid license key.")
 
     def remove_license(_e: ft.ControlEvent | None = None) -> None:
         licensing.deactivate()

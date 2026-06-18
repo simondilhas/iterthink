@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 import flet as ft
 
@@ -30,11 +31,27 @@ from .constants import (
     TAB_FUTURE,
     TAB_HISTORY,
     TAB_PRESENT,
+    TAB_SWITCH_TIMEOUT_SEC,
 )
 from .history.candidate_state import CompareCandidateSource
 from .util import ctrl_on_page as _ctrl_on_page
 
 _log = logging.getLogger(__name__)
+
+
+def _second_newest_history_autosave_vid_sync(path: Path) -> int | None:
+    with session_scope() as s:
+        snaps = content_repo.list_snapshots(s, path.resolve())
+    return content_repo.second_newest_history_autosave_version_id(snaps)
+
+
+def _latest_ai_proposal_vid_sync(path: Path) -> int | None:
+    with session_scope() as s:
+        snaps = content_repo.list_snapshots(s, path.resolve())
+    for sn in snaps:
+        if sn.reason in ("ai_proposal", "ai_staged", "review_edit"):
+            return sn.version_id
+    return None
 
 
 class MainWorkspaceTabsMixin:
@@ -68,13 +85,31 @@ class MainWorkspaceTabsMixin:
         switch_seq = self._queue_tab_switch(tab_index)
         async with self._tab_switch_lock:
             if self._is_tab_switch_stale(switch_seq):
+                self._apply_active_tab_ui_state()
                 return
             if self._tab_switch_requested is None and self._main_tab_index == tab_index:
                 self._apply_active_tab_ui_state()
                 return
             if self._tab_switch_requested == tab_index:
                 self._tab_switch_requested = None
-            await self._sync_tab_switch_async(tab_index, switch_seq)
+            await self._sync_tab_switch_with_timeout(tab_index, switch_seq)
+
+    async def _sync_tab_switch_with_timeout(self, new_ix: int, switch_seq: int) -> None:
+        prev = self._main_tab_index
+        try:
+            await asyncio.wait_for(
+                self._sync_tab_switch_async(new_ix, switch_seq),
+                timeout=TAB_SWITCH_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            _log.warning(
+                "Tab switch to index %s timed out after %.0fs (seq=%s)",
+                new_ix,
+                TAB_SWITCH_TIMEOUT_SEC,
+                switch_seq,
+            )
+            self._main_tab_index = prev
+            self._apply_active_tab_ui_state()
 
     async def _tab_switch_worker_async(self) -> None:
         try:
@@ -83,7 +118,7 @@ class MainWorkspaceTabsMixin:
                     new_ix = self._tab_switch_requested
                     switch_seq = self._tab_switch_seq
                     self._tab_switch_requested = None
-                    await self._sync_tab_switch_async(new_ix, switch_seq)
+                    await self._sync_tab_switch_with_timeout(new_ix, switch_seq)
         finally:
             self._tab_switch_worker_running = False
             if self._tab_switch_requested is not None:
@@ -342,6 +377,7 @@ class MainWorkspaceTabsMixin:
         if self.current_path and self._is_dirty():
             await self.save_file(silent=True, snapshot_reason="pre_switch")
             if self._is_tab_switch_stale(switch_seq):
+                self._apply_active_tab_ui_state()
                 return
         # Persist any in-flight Review proposal edits before switching away from Future.
         if prev == TAB_FUTURE:
@@ -376,9 +412,10 @@ class MainWorkspaceTabsMixin:
                 if pending_post_import is not None:
                     self._pending_post_import_history_vid = None
                 elif self.current_path and prev != TAB_HISTORY:
-                    with session_scope() as s:
-                        snaps = content_repo.list_snapshots(s, self.current_path.resolve())
-                    pick_vid = content_repo.second_newest_history_autosave_version_id(snaps)
+                    pick_vid = await asyncio.to_thread(
+                        _second_newest_history_autosave_vid_sync,
+                        self.current_path.resolve(),
+                    )
 
                 if pick_vid is not None:
                     self._select_snapshot_as_candidate(pick_vid)
@@ -448,12 +485,10 @@ class MainWorkspaceTabsMixin:
                 if not already_staged and not pdf_import_review:
                     target_vid = self._latest_ai_proposal_vid
                     if target_vid is None and self.current_path:
-                        with session_scope() as s:
-                            snaps = content_repo.list_snapshots(s, self.current_path.resolve())
-                        for sn in snaps:  # newest first
-                            if sn.reason in ("ai_proposal", "ai_staged", "review_edit"):
-                                target_vid = sn.version_id
-                                break
+                        target_vid = await asyncio.to_thread(
+                            _latest_ai_proposal_vid_sync,
+                            self.current_path.resolve(),
+                        )
                     if target_vid is not None:
                         self._select_proposal_as_review_candidate(target_vid)
                         self._latest_ai_proposal_vid = target_vid

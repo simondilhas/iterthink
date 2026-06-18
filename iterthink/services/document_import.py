@@ -330,6 +330,81 @@ def _strip_inline_bullet(text: str) -> str | None:
     return None
 
 
+_PDF_H1_RATIO = 1.48
+_PDF_H2_RATIO = 1.26
+_PDF_H3_RATIO = 1.20
+_PDF_STRONG_HEADING_RATIO = 1.55
+_PDF_WRAP_RUN_HEADING_MIN = 1.20
+
+
+def _pdf_compute_body_med(all_sizes: list[float]) -> float:
+    """Median span size as body baseline (clamped); stable vs footnotes/captions."""
+    if not all_sizes:
+        return 11.0
+    body_med = float(statistics.median(all_sizes))
+    return max(6.0, min(body_med, 22.0))
+
+
+def _pdf_gap_join(body_med: float) -> float:
+    return max(2.5, body_med * 0.38)
+
+
+def _pdf_gap_para(body_med: float) -> float:
+    return max(4.0, body_med * 0.55)
+
+
+def _pdf_line_max_size(line: dict, body_med: float) -> float:
+    spans = line.get("spans") or []
+    sizes = [float(sp.get("size") or 0) for sp in spans if (sp.get("size") or 0) > 0]
+    return max(sizes) if sizes else body_med
+
+
+def _pdf_line_ratio(line: dict, body_med: float) -> float:
+    max_sz = _pdf_line_max_size(line, body_med)
+    return max_sz / body_med if body_med > 0 else 1.0
+
+
+def _pdf_heading_kind_for_ratio(ratio: float, text: str) -> str | None:
+    long_line = len(text) > 180
+    strong_heading = ratio >= _PDF_STRONG_HEADING_RATIO
+    if not long_line or strong_heading:
+        if ratio >= _PDF_H1_RATIO:
+            return "h1"
+        if ratio >= _PDF_H2_RATIO:
+            return "h2"
+        if ratio >= _PDF_H3_RATIO:
+            return "h3"
+    return None
+
+
+def _pdf_classify_line_run(
+    run: list[tuple[str, float, float, dict]],
+    body_med: float,
+) -> list[tuple[str, tuple]]:
+    """Classify a run of consecutive text lines (already grouped by vertical gap)."""
+    if not run:
+        return []
+    ratios = [_pdf_line_ratio(line, body_med) for _text, _y0, _y1, line in run]
+
+    if len(run) >= 2:
+        if all(r < _PDF_WRAP_RUN_HEADING_MIN for r in ratios):
+            return [
+                ("body", (text, ly0, ly1))
+                for text, ly0, ly1, _line in run
+            ]
+        if all(r >= _PDF_WRAP_RUN_HEADING_MIN for r in ratios):
+            joined = " ".join(text.strip() for text, _y0, _y1, _line in run)
+            max_ratio = max(ratios)
+            kind = _pdf_heading_kind_for_ratio(max_ratio, joined) or "h3"
+            return [(kind, (joined, run[0][1], run[-1][2]))]
+
+    events: list[tuple[str, tuple]] = []
+    for (text, ly0, ly1, _line), ratio in zip(run, ratios):
+        kind = _pdf_heading_kind_for_ratio(ratio, text) or "body"
+        events.append((kind, (text, ly0, ly1)))
+    return events
+
+
 def _pdf_dict_to_markdown(src: Path) -> str:
     """
     Structured PDF → Markdown via pdfplumber (char geometry → line/span dicts): reading order,
@@ -359,12 +434,8 @@ def _pdf_dict_to_markdown(src: Path) -> str:
                     z = sp.get("size") or 0
                     if z and float(z) > 0:
                         all_sizes.append(float(z))
-        if len(all_sizes) >= 6:
-            sorted_sz = sorted(all_sizes)
-            body_med = sorted_sz[len(sorted_sz) // 4]
-        else:
-            body_med = statistics.median(all_sizes) if all_sizes else 11.0
-        body_med = max(6.0, min(body_med, 22.0))
+        body_med = _pdf_compute_body_med(all_sizes)
+        gap_join = _pdf_gap_join(body_med)
 
         page_chunks: list[str] = []
         for pi, (ph, page_lines) in enumerate(pages_data):
@@ -381,6 +452,12 @@ def _pdf_dict_to_markdown(src: Path) -> str:
 
             events: list[tuple[str, tuple]] = []
             pending_bullet = False
+            text_run: list[tuple[str, float, float, dict]] = []
+
+            def flush_text_run() -> None:
+                if text_run:
+                    events.extend(_pdf_classify_line_run(text_run, body_med))
+                    text_run.clear()
 
             for _y0s, _x0s, _y1s, line in flat:
                 spans = line.get("spans") or []
@@ -392,6 +469,7 @@ def _pdf_dict_to_markdown(src: Path) -> str:
                     continue
 
                 if _BULLET_ONLY_LINE.match(text):
+                    flush_text_run()
                     pending_bullet = True
                     continue
 
@@ -399,39 +477,28 @@ def _pdf_dict_to_markdown(src: Path) -> str:
                 ly0, ly1 = float(bbox[1]), float(bbox[3])
 
                 if pending_bullet:
+                    flush_text_run()
                     events.append(("bullet", (text, ly0, ly1)))
                     pending_bullet = False
                     continue
 
                 nm = _NUMBERED_LINE.match(text)
                 if nm:
+                    flush_text_run()
                     events.append(("ol", (nm.group(1), nm.group(2).strip(), ly0, ly1)))
                     continue
 
                 stripped = _strip_inline_bullet(text)
                 if stripped is not None:
+                    flush_text_run()
                     events.append(("bullet", (stripped, ly0, ly1)))
                     continue
 
-                sizes = [float(sp.get("size") or 0) for sp in spans if (sp.get("size") or 0) > 0]
-                max_sz = max(sizes) if sizes else body_med
-                ratio = max_sz / body_med if body_med > 0 else 1.0
+                if text_run and (ly0 - text_run[-1][2]) > gap_join:
+                    flush_text_run()
+                text_run.append((text, ly0, ly1, line))
 
-                long_line = len(text) > 180
-                strong_heading = ratio >= 1.55
-
-                if not long_line or strong_heading:
-                    if ratio >= 1.48:
-                        events.append(("h1", (text, ly0, ly1)))
-                        continue
-                    if ratio >= 1.26:
-                        events.append(("h2", (text, ly0, ly1)))
-                        continue
-                    if ratio >= 1.11:
-                        events.append(("h3", (text, ly0, ly1)))
-                        continue
-
-                events.append(("body", (text, ly0, ly1)))
+            flush_text_run()
 
             md_body = _pdf_events_to_markdown(events, body_med)
             marker = f"<!-- page:{page_num} -->"
@@ -443,10 +510,18 @@ def _pdf_dict_to_markdown(src: Path) -> str:
     return "\n\n".join(page_chunks)
 
 
+def _pdf_join_body_fragments(prev: str, nxt: str) -> str:
+    prev = prev.rstrip()
+    nxt = nxt.lstrip()
+    if prev.endswith("-"):
+        return (prev[:-1] + nxt).strip()
+    return (prev + " " + nxt).strip()
+
+
 def _pdf_events_to_markdown(events: list[tuple[str, tuple]], body_med: float) -> str:
     """Turn classified line events into Markdown (paragraphs, lists, headings)."""
-    gap_para = max(4.0, body_med * 0.55)
-    gap_join = max(2.5, body_med * 0.38)
+    gap_para = _pdf_gap_para(body_med)
+    gap_join = _pdf_gap_join(body_med)
 
     parts: list[str] = []
     cur_para: list[str] = []
@@ -473,7 +548,7 @@ def _pdf_events_to_markdown(events: list[tuple[str, tuple]], body_med: float) ->
             text = str(payload[0])
             y0, y1 = float(payload[1]), float(payload[2])
             if prev_y1 is not None and cur_para and (y0 - prev_y1) <= gap_join:
-                cur_para[-1] = (cur_para[-1].rstrip() + " " + text.lstrip()).strip()
+                cur_para[-1] = _pdf_join_body_fragments(cur_para[-1], text)
             elif prev_y1 is not None and cur_para and (y0 - prev_y1) > gap_para:
                 flush_para()
                 cur_para.append(text)

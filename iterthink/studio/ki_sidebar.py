@@ -54,8 +54,6 @@ class MarkdownStudioKiSidebar:
         tab = int(getattr(self, "_main_tab_index", TAB_PRESENT))
         if tab == TAB_HISTORY:
             return frozenset({KI_TOPIC_COMMENTS, KI_TOPIC_DISCUSS})
-        if tab == TAB_PRESENT:
-            return frozenset({KI_TOPIC_COMMENTS, KI_TOPIC_DISCUSS, KI_TOPIC_CHANGE})
         return frozenset(
             {KI_TOPIC_COMMENTS, KI_TOPIC_DISCUSS, KI_TOPIC_CHANGE, KI_TOPIC_ANALYSE, KI_TOPIC_ACT}
         )
@@ -66,8 +64,8 @@ class MarkdownStudioKiSidebar:
         if index == KI_TOPIC_CHANGE:
             return "Switch to Focus Area to use Change."
         if index == KI_TOPIC_ANALYSE:
-            return "Switch to Review to use Analyse."
-        return "Switch to Review to use Act."
+            return "Switch to Focus Area or Review to use Analyse."
+        return "Switch to Focus Area or Review to use Act."
 
     def _sync_ki_topic_mode_buttons(self) -> None:
         ix = int(getattr(self, "_ki_topic_index", 0))
@@ -115,8 +113,9 @@ class MarkdownStudioKiSidebar:
         if not self.current_path:
             self._snack("Open a note first.")
             return
-        if int(getattr(self, "_main_tab_index", TAB_PRESENT)) != TAB_FUTURE:
-            self._snack("Switch to Review to use Act.")
+        tab = int(getattr(self, "_main_tab_index", TAB_PRESENT))
+        if tab not in (TAB_PRESENT, TAB_FUTURE):
+            self._snack("Switch to Focus Area or Review to use Act.")
             return
         if not self.right_open:
             self.toggle_right()

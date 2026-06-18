@@ -829,6 +829,56 @@ def test_pair_controller_gesture_mirror_via_page_task(tmp_path: Path) -> None:
     pair.right._viewer.zoom.assert_awaited()
 
 
+def test_side_by_side_iv_pan_only_gesture_flags(tmp_path: Path) -> None:
+    p = tmp_path / "p0.png"
+    _write_test_png(p)
+    page = MagicMock()
+    page.run_task = MagicMock()
+    pair = plan_picture_viewer.build_plan_side_by_side_pair([p], [p], page=page)
+    single = plan_picture_viewer.build_plan_focus_viewer([p])
+    for pane in (pair.left, pair.right):
+        iv = pane._viewer
+        assert iv.pan_enabled is True
+        assert iv.scale_enabled is False
+        assert iv.trackpad_scroll_causes_scale is False
+    single_iv = single._viewer
+    assert single_iv.pan_enabled is True
+    assert single_iv.scale_enabled is True
+    assert single_iv.trackpad_scroll_causes_scale is True
+
+
+def test_pair_controller_gesture_pan_mirror_via_page_task(tmp_path: Path) -> None:
+    p = tmp_path / "p0.png"
+    _write_test_png(p, 1000, 1000)
+    page = MagicMock()
+    tasks: list = []
+
+    def run_task(coro, *args):
+        tasks.append((coro, args))
+
+    page.run_task = run_task
+    pair = plan_picture_viewer.build_plan_side_by_side_pair([p], [p], page=page)
+    pair.left.sync_viewport(400.0, 520.0)
+    pair.right.sync_viewport(400.0, 520.0)
+    pair.left._viewer.pan = AsyncMock()
+    pair.right._viewer.pan = AsyncMock()
+    pair.right._viewer.zoom = AsyncMock()
+    pair.left._viewer.on_interaction_start(None)
+    tasks.clear()
+    ev = MagicMock()
+    ev.focal_point_delta = ft.Offset(3, -2)
+    ev.local_focal_point = ft.Offset(200, 260)
+    ev.scale = 1.0
+    pair.left._viewer.on_interaction_update(ev)
+    assert len(tasks) == 1
+    coro, args = tasks[0]
+    assert args[0] is pair.left
+    asyncio.run(coro(*args))
+    pair.left._viewer.pan.assert_not_awaited()
+    pair.right._viewer.pan.assert_awaited_once_with(3.0, -2.0)
+    pair.right._viewer.zoom.assert_not_called()
+
+
 def test_plan_norm_tracked_roundtrip(tmp_path: Path) -> None:
     p = tmp_path / "p.png"
     _write_test_png(p, 800, 600)

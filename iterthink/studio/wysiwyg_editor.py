@@ -54,9 +54,15 @@ _BLUR_COMMIT_DELAY_SEC = 0.08
 _LIST_KINDS = frozenset({"bullet", "ordered", "task"})
 
 
+def _is_empty_paragraph(block: WysiwygBlock) -> bool:
+    return block.kind == "paragraph" and not (block.text or "").strip()
+
+
 def block_gap_after(current: WysiwygBlock, nxt: WysiwygBlock | None) -> float:
     """Inter-block margin after ``current`` (row-level; avoids stacked Markdown padding)."""
     if nxt is None:
+        return 0.0
+    if _is_empty_paragraph(current) or _is_empty_paragraph(nxt):
         return 0.0
     if current.kind in _LIST_KINDS and nxt.kind in _LIST_KINDS:
         return 0.0
@@ -101,9 +107,10 @@ class WysiwygEditorController:
     _hovered_block_index: int | None = field(default=None, repr=False)
     _menu_open_block_index: int | None = field(default=None, repr=False)
     _row_chrome_refs: dict[int, list[ft.Control]] = field(default_factory=dict, repr=False)
-    _block_action_refs: dict[int, tuple[ft.Icon, ft.Icon]] = field(
-        default_factory=dict, repr=False
+    _block_action_refs: dict[int, tuple[ft.Icon, ft.Icon, ft.Container, ft.Container]] = (
+        field(default_factory=dict, repr=False)
     )
+    _empty_para_label_refs: dict[int, ft.Text] = field(default_factory=dict, repr=False)
 
     def build_host(self) -> ft.Container:
         if self._host is None:
@@ -428,6 +435,7 @@ class WysiwygEditorController:
         self._edit_field = None
         self._row_chrome_refs = {}
         self._block_action_refs = {}
+        self._empty_para_label_refs = {}
         self._menu_open_block_index = None
         sheet = ui_theme.compose_wysiwyg_block_markdown_style_sheet()
         rows: list[ft.Control] = []
@@ -471,19 +479,30 @@ class WysiwygEditorController:
         self._apply_block_action_state(block_index)
 
     def _apply_block_action_state(self, block_index: int) -> None:
-        refs = self._block_action_refs.get(block_index)
-        if refs is None:
-            return
-        plus_top, plus_bottom = refs
         show = self._chrome_visible(block_index)
-        opacity = 1.0 if show else 0.0
-        plus_top.opacity = opacity
-        plus_bottom.opacity = opacity
-        try:
-            plus_top.update()
-            plus_bottom.update()
-        except RuntimeError:
-            pass
+        refs = self._block_action_refs.get(block_index)
+        if refs is not None:
+            plus_top, plus_bottom, top_strip, bottom_strip = refs
+            opacity = 1.0 if show else 0.0
+            strip_h = _ACTION_STRIP_HEIGHT if show else 0
+            plus_top.opacity = opacity
+            plus_bottom.opacity = opacity
+            top_strip.height = strip_h
+            bottom_strip.height = strip_h
+            try:
+                plus_top.update()
+                plus_bottom.update()
+                top_strip.update()
+                bottom_strip.update()
+            except RuntimeError:
+                pass
+        empty_lbl = self._empty_para_label_refs.get(block_index)
+        if empty_lbl is not None and bool(getattr(empty_lbl, "visible", False)) != show:
+            empty_lbl.visible = show
+            try:
+                empty_lbl.update()
+            except RuntimeError:
+                pass
 
     def _set_hovered_block(self, block_index: int | None) -> None:
         prev = self._hovered_block_index
@@ -586,20 +605,28 @@ class WysiwygEditorController:
             visible=show,
             on_tap=lambda ix=block_index: self._on_plus_tap(ix, before=False),
         )
-        self._block_action_refs[block_index] = (plus_top, plus_bottom)
+        strip_h = _ACTION_STRIP_HEIGHT if show else 0
+        top_strip = ft.Container(
+            height=strip_h,
+            alignment=ft.Alignment.CENTER,
+            content=plus_top_gd,
+        )
+        bottom_strip = ft.Container(
+            height=strip_h,
+            alignment=ft.Alignment.CENTER,
+            content=plus_bottom_gd,
+        )
+        self._block_action_refs[block_index] = (
+            plus_top,
+            plus_bottom,
+            top_strip,
+            bottom_strip,
+        )
         return ft.Column(
             [
-                ft.Container(
-                    height=_ACTION_STRIP_HEIGHT,
-                    alignment=ft.Alignment.CENTER,
-                    content=plus_top_gd,
-                ),
-                ft.Container(content=surface, expand=True),
-                ft.Container(
-                    height=_ACTION_STRIP_HEIGHT,
-                    alignment=ft.Alignment.CENTER,
-                    content=plus_bottom_gd,
-                ),
+                top_strip,
+                ft.Container(content=surface),
+                bottom_strip,
             ],
             spacing=0,
             tight=True,
@@ -756,9 +783,50 @@ class WysiwygEditorController:
             on_cancel=lambda _e, ix=block_index: self._on_type_menu_cancel(ix),
         )
 
+    def _wysiwyg_read_text_style(
+        self, sheet: ft.MarkdownStyleSheet
+    ) -> ft.TextStyle:
+        base = sheet.p_text_style
+        if base is not None:
+            return base
+        ec = ui_theme.editor_text_color()
+        return ft.TextStyle(
+            size=COMPARE_COL_FONT_SIZE,
+            height=COMPARE_COL_LINE_HEIGHT,
+            color=ec,
+            font_family="serif",
+        )
+
+    def _build_list_read_surface(
+        self,
+        block_index: int,
+        block: WysiwygBlock,
+        sheet: ft.MarkdownStyleSheet,
+    ) -> ft.Control:
+        """Plain text list line — avoids per-item ``ft.Markdown`` ``<ul>`` block margins."""
+        style = self._wysiwyg_read_text_style(sheet)
+        if block.kind == "task":
+            mark = "\u2611" if block.checked else "\u2610"
+            prefix = f"{mark} "
+        elif block.kind == "ordered":
+            prefix = f"{block.order_num}. "
+        else:
+            prefix = "\u2022 "
+        line = ft.Text(f"{prefix}{(block.text or '')}", style=style)
+        return ft.GestureDetector(
+            mouse_cursor=ft.MouseCursor.CLICK,
+            on_tap=lambda _e, ix=block_index: self.start_edit(ix, 0),
+            content=ft.Container(
+                padding=_read_body_padding(),
+                content=line,
+            ),
+        )
+
     def _build_read_surface(
         self, block_index: int, block: WysiwygBlock, sheet: ft.MarkdownStyleSheet
     ) -> ft.Control:
+        if block.kind in _LIST_KINDS:
+            return self._build_list_read_surface(block_index, block, sheet)
         if block.kind == "horizontal_rule":
             return ft.Container(
                 height=1,
@@ -767,20 +835,24 @@ class WysiwygEditorController:
             )
         if block.kind == "table":
             return self._build_table_read(block_index, block, sheet)
-        if block.kind == "paragraph" and not (block.text or ""):
+        if _is_empty_paragraph(block):
+            show = self._chrome_visible(block_index)
+            empty_lbl = ft.Text(
+                "Empty paragraph",
+                size=COMPARE_COL_FONT_SIZE,
+                color=config.ON_SURFACE_VARIANT,
+                italic=True,
+                visible=show,
+            )
+            self._empty_para_label_refs[block_index] = empty_lbl
             return ft.GestureDetector(
                 mouse_cursor=ft.MouseCursor.CLICK,
                 on_tap=lambda _e, ix=block_index: self.start_edit(ix, 0),
                 content=ft.Container(
-                    height=28,
+                    height=float(COMPOSE_EDITOR_LINE_HEIGHT_PX),
                     padding=_read_body_padding(),
                     alignment=ft.Alignment.CENTER_LEFT,
-                    content=ft.Text(
-                        "Empty paragraph",
-                        size=COMPARE_COL_FONT_SIZE,
-                        color=config.ON_SURFACE_VARIANT,
-                        italic=True,
-                    ),
+                    content=empty_lbl,
                 ),
             )
         md = markdown_preview_with_task_checkboxes(serialize_single_block(block))

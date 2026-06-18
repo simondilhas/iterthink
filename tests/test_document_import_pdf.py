@@ -8,6 +8,73 @@ from pypdf import PdfWriter
 from iterthink.services import document_import
 
 
+def _synthetic_pdf_line(text: str, y0: float, *, size: float = 10.0) -> dict:
+    y1 = y0 + 12.0
+    return {
+        "bbox": [0.0, y0, 500.0, y1],
+        "spans": [{"text": text, "size": size}],
+    }
+
+
+def test_pdf_compute_body_med_prefers_median() -> None:
+    sizes = [8.0, 8.0, 8.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+    assert document_import._pdf_compute_body_med(sizes) == 10.0
+
+
+def test_pdf_wrapped_body_run_not_headings() -> None:
+    body_med = 10.0
+    line1 = _synthetic_pdf_line("Ausgangspunkt eines systematischen", 100.0, size=11.2)
+    line2 = _synthetic_pdf_line("Erhaltungsplanungsprozesses ist die Erhebung", 113.0, size=11.2)
+    line3 = _synthetic_pdf_line("der erforderlichen Datengrundlagen.", 126.0, size=11.2)
+    run = [
+        ("Ausgangspunkt eines systematischen", 100.0, 112.0, line1),
+        ("Erhaltungsplanungsprozesses ist die Erhebung", 113.0, 125.0, line2),
+        ("der erforderlichen Datengrundlagen.", 126.0, 138.0, line3),
+    ]
+    events = document_import._pdf_classify_line_run(run, body_med)
+    assert all(ev[0] == "body" for ev in events)
+    md = document_import._pdf_events_to_markdown(events, body_med)
+    assert "###" not in md
+    assert "Ausgangspunkt" in md
+    assert "Datengrundlagen." in md
+
+
+def test_pdf_single_title_line_stays_heading() -> None:
+    body_med = 10.0
+    line = _synthetic_pdf_line("Beobachtung, Inspektion und Beurteilung", 80.0, size=12.8)
+    run = [("Beobachtung, Inspektion und Beurteilung", 80.0, 92.0, line)]
+    events = document_import._pdf_classify_line_run(run, body_med)
+    assert events[0][0] == "h2"
+    md = document_import._pdf_events_to_markdown(events, body_med)
+    assert md.startswith("## Beobachtung")
+
+
+def test_pdf_wrapped_title_run_becomes_one_heading() -> None:
+    body_med = 10.0
+    line1 = _synthetic_pdf_line("Beobachtung, Inspektion", 80.0, size=13.0)
+    line2 = _synthetic_pdf_line("und Beurteilung", 93.0, size=13.0)
+    run = [
+        ("Beobachtung, Inspektion", 80.0, 92.0, line1),
+        ("und Beurteilung", 93.0, 105.0, line2),
+    ]
+    events = document_import._pdf_classify_line_run(run, body_med)
+    assert len(events) == 1
+    assert events[0][0] == "h2"
+    assert events[0][1][0] == "Beobachtung, Inspektion und Beurteilung"
+    md = document_import._pdf_events_to_markdown(events, body_med)
+    assert md == "## Beobachtung, Inspektion und Beurteilung"
+
+
+def test_pdf_hyphen_soft_break_join() -> None:
+    body_med = 10.0
+    events = [
+        ("body", ("Ach-", 100.0, 112.0)),
+        ("body", ("sen und", 113.0, 125.0)),
+    ]
+    md = document_import._pdf_events_to_markdown(events, body_med)
+    assert md == "Achsen und"
+
+
 def test_pdf_to_markdown_blank_page(tmp_path: Path) -> None:
     p = tmp_path / "blank.pdf"
     w = PdfWriter()

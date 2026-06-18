@@ -42,3 +42,11 @@ def test_block_gap_after_list_to_paragraph_is_tight_block_gap() -> None:
 def test_block_gap_after_last_block_is_zero() -> None:
     para = WysiwygBlock(kind="paragraph", text="Last.")
     assert block_gap_after(para, None) == 0.0
+
+
+def test_block_gap_after_empty_paragraph_is_zero() -> None:
+    body = WysiwygBlock(kind="paragraph", text="Body.")
+    empty = WysiwygBlock(kind="paragraph", text="")
+    assert block_gap_after(body, empty) == 0.0
+    assert block_gap_after(empty, body) == 0.0
+    assert block_gap_after(empty, empty) == 0.0

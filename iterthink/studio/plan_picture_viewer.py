@@ -1371,6 +1371,8 @@ def _build_plan_focus_pane(
     on_page_change: Callable[[int], None] | None = None,
     min_scale: float = _FOCUS_MIN_SCALE,
     max_scale: float = _FOCUS_MAX_SCALE,
+    gesture_scale_enabled: bool = True,
+    wheel_scroll_causes_scale: bool | None = None,
 ) -> PlanFocusViewer:
     """Viewport-only plan pane (no bottom navigation row)."""
     paths = list(page_png_paths)
@@ -1403,8 +1405,12 @@ def _build_plan_focus_pane(
     viewer = ft.InteractiveViewer(
         content=iv_content,
         pan_enabled=n > 0,
-        scale_enabled=n > 0,
-        trackpad_scroll_causes_scale=n > 0,
+        scale_enabled=n > 0 and gesture_scale_enabled,
+        trackpad_scroll_causes_scale=(
+            wheel_scroll_causes_scale
+            if wheel_scroll_causes_scale is not None
+            else (n > 0 and gesture_scale_enabled)
+        ),
         min_scale=min_scale,
         max_scale=max_scale,
         constrained=False,
@@ -2048,6 +2054,8 @@ def build_plan_compare_focus_pane(
         initial_page_index=initial_page_index,
         expected_page_count=expected_page_count,
         on_page_change=on_page_change,
+        gesture_scale_enabled=False,
+        wheel_scroll_causes_scale=False,
     )
     if on_place_comment is not None:
         pane._on_place_comment = on_place_comment

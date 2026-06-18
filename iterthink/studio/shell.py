@@ -585,9 +585,6 @@ class MarkdownStudioShell:
                     ignore_interactions=True,
                     clip_behavior=ft.ClipBehavior.HARD_EDGE,
                     animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
-                    left=0,
-                    right=0,
-                    top=0,
                     bgcolor=config.SURFACE_VARIANT,
                     border=ft.border.only(bottom=ft.BorderSide(1, ui_theme.outline_muted(alpha=0.55))),
                     padding=0,
@@ -604,9 +601,6 @@ class MarkdownStudioShell:
                     ignore_interactions=True,
                     clip_behavior=ft.ClipBehavior.HARD_EDGE,
                     animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
-                    left=0,
-                    right=0,
-                    top=0,
                     bgcolor=config.SURFACE_VARIANT,
                     border=ft.border.only(bottom=ft.BorderSide(1, ui_theme.outline_muted(alpha=0.55))),
                     padding=0,
@@ -616,6 +610,18 @@ class MarkdownStudioShell:
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                 )
+            self._header_hover_strip = ft.Container(
+                height=12,
+                bgcolor=ft.Colors.with_opacity(0.001, ft.Colors.WHITE),
+                on_hover=self._on_header_strip_hover,
+            )
+            main_column_children.append(
+                ft.Column(
+                    [self._header_hover_strip, self._header_shell],
+                    spacing=0,
+                    tight=True,
+                )
+            )
 
         main_column_children.append(self._main_row)
         body_column = ft.Column(main_column_children, expand=True, spacing=0)
@@ -630,22 +636,6 @@ class MarkdownStudioShell:
             else body_column
         )
 
-        stack_children: list[ft.Control] = [main_area]
-        if not self.page.web and self._header_shell is not None:
-            # Thin top edge only: a tall invisible strip overlapped the tab bar and
-            # opened the menu bar when moving the pointer toward Compare.
-            stack_children.append(
-                ft.Container(
-                    height=12,
-                    left=0,
-                    right=0,
-                    top=0,
-                    bgcolor=ft.Colors.with_opacity(0.001, ft.Colors.WHITE),
-                    on_hover=self._on_header_strip_hover,
-                )
-            )
-            stack_children.append(self._header_shell)
-
         self._rebuild_topic_pills()
         self._sync_version_toolbar_state()
         self.reflow_columns()
@@ -653,4 +643,4 @@ class MarkdownStudioShell:
         self.page.run_task(self._debounced_compose_rebuild, self._margin_gen)
         self._refresh_compare_diff_immediate()
         self._refresh_tab_toolbar()
-        return ft.Stack(stack_children, expand=True, clip_behavior=ft.ClipBehavior.NONE)
+        return main_area
