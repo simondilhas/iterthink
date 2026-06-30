@@ -522,6 +522,7 @@ async def run_impact_analysis(
     top_k: int | None = None,
     target_path: Any | None = None,
     context_ready: ImpactContextReady | None = None,
+    run_context: dict | None = None,
 ) -> list[dict | None]:
     """Run Impact check over each non-empty paragraph with bounded parallelism."""
     n = len(paragraphs)
@@ -543,6 +544,9 @@ async def run_impact_analysis(
         )
     labels = context_ready.labels
     effective_top_k = context_ready.top_k
+
+    def _details_for_persist(details: dict | None) -> dict | None:
+        return impact_ann.merge_run_context(details, run_context)
 
     overridden_set: set[int] = set()
     overridden_snapshots: dict[int, dict[str, Any]] = {}
@@ -597,9 +601,11 @@ async def run_impact_analysis(
                                 prompt_id=check.id,
                                 status=str(skipped["status"]),
                                 comment=str(skipped["comment"]),
-                                details=skipped.get("details")
-                                if isinstance(skipped.get("details"), dict)
-                                else None,
+                                details=_details_for_persist(
+                                    skipped.get("details")
+                                    if isinstance(skipped.get("details"), dict)
+                                    else None
+                                ),
                             )
                     results[idx] = skipped
                     await _emit(on_progress, idx, skipped, None)
@@ -649,7 +655,7 @@ async def run_impact_analysis(
                             prompt_id=check.id,
                             status=str(payload["status"]),
                             comment=str(payload["comment"]),
-                            details=details_dict,
+                            details=_details_for_persist(details_dict),
                         )
             results[idx] = payload
             await _emit(on_progress, idx, payload, err)

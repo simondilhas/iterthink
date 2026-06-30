@@ -44,8 +44,10 @@
 - **Semantic Check:** Use `ollama.chat` with a "Judge" prompt (Phi-3 or Llama-3). 
 - **Ollama Guideline:** Keep system prompts extremely brief to reduce latency.
 - **Performance:** Update the UI using `page.update()` only when necessary. Use `asyncio` for Ollama calls to prevent UI freezing.
+- **Scroll & vertical positioning:** Never use fragile uniform row-height math (`index * N`, fixed `ROW_HEIGHT_PX`, hardcoded line-height guesses) for ListView scrolling, scroll restoration, or overlay/card `top` placement. Prefer, in order: (1) Flet `scroll_to(scroll_key=...)` via `safe_list_scroll_to_key` / stable row keys; (2) prefix sums from per-row heights (`compare_build_row_heights` + `compare_scroll_offset_for_row`); (3) measured control heights (`listview_y_before_control`, `result_card_top_beside_row`). Uniform constants are acceptable only as a last-resort default inside height-estimation helpers—not for scroll offset or overlay Y.
 
 ## Prohibited Patterns
 - NO Electron, NO JavaScript, NO HTML/CSS.
 - NO external API keys or cloud dependencies.
 - NO complex state management libraries (use Flet's built-in state).
+- NO `display_index * fixed_row_height` (or similar) for scroll offsets or floating UI placement.

@@ -11,7 +11,7 @@ from iterthink.db.session import session_scope
 from iterthink.persistence import content_changes, content_repo
 
 from ..constants import TAB_FUTURE, TAB_HISTORY
-from ..util import ctrl_on_page as _ctrl_on_page
+from ..util import safe_ctrl_mutate as _safe_ctrl_mutate
 from .candidate_state import CompareCandidateSource
 
 
@@ -95,9 +95,8 @@ class _HistoryDebounceMixin:
         for i, host in enumerate(self._active_pill_hosts()):
             k = kinds[i] if i < len(kinds) else "stable"
             d = disps[i] if i < len(disps) else None
-            host.content = self._make_compare_pill_row(k, d, show_moved_badge=False)
-            if _ctrl_on_page(host):
-                host.update()
+            pill = self._make_compare_pill_row(k, d, show_moved_badge=False)
+            _safe_ctrl_mutate(host, lambda c, content=pill: setattr(c, "content", content))
 
     async def _debounced_refine_compare_slots(self, gen: int) -> None:
         await asyncio.sleep(0.05)
@@ -131,9 +130,8 @@ class _HistoryDebounceMixin:
                     if ci == i and di < len(self._compare_virtual_pill_kind):
                         self._compare_virtual_pill_kind[di] = k
                 continue
-            host.content = self._make_compare_pill_row(k, d, show_moved_badge=False)
-            if _ctrl_on_page(host):
-                host.update()
+            pill = self._make_compare_pill_row(k, d, show_moved_badge=False)
+            _safe_ctrl_mutate(host, lambda c, content=pill: setattr(c, "content", content))
         if getattr(self, "_compare_virtual_active", False):
             self._refresh_compare_virtual_pills()
         # Update diff spans in both History columns after AI refinement.
@@ -150,14 +148,18 @@ class _HistoryDebounceMixin:
                 if i >= len(self._compare_left_diff_texts):
                     break
                 left_t = self._compare_left_diff_texts[i]
-                left_t.spans = self._compare_old_side_spans(left_txt, right_txt)
-                if _ctrl_on_page(left_t):
-                    left_t.update()
+                left_spans = self._compare_old_side_spans(left_txt, right_txt)
+                _safe_ctrl_mutate(
+                    left_t,
+                    lambda c, spans=left_spans: setattr(c, "spans", spans),
+                )
                 if i < len(self._compare_right_diff_texts):
                     right_t = self._compare_right_diff_texts[i]
-                    right_t.spans = self._compare_new_side_spans(left_txt, right_txt)
-                    if _ctrl_on_page(right_t):
-                        right_t.update()
+                    right_spans = self._compare_new_side_spans(left_txt, right_txt)
+                    _safe_ctrl_mutate(
+                        right_t,
+                        lambda c, spans=right_spans: setattr(c, "spans", spans),
+                    )
             if getattr(self, "_compare_virtual_active", False):
                 self._refresh_compare_virtual_spans()
         await self._persist_compare_semantic_changes(

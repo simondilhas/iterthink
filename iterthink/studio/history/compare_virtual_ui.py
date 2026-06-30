@@ -28,12 +28,17 @@ from ..constants import (
     TAB_FUTURE,
     TAB_HISTORY,
 )
-from ..util import ctrl_on_page as _ctrl_on_page
+from ..util import ctrl_on_page as _ctrl_on_page, safe_list_scroll
 from .candidate_state import CompareCandidateSource
 from .compare_virtual import (
-    COMPARE_VIRTUAL_ROW_HEIGHT_PX,
+    COMPARE_VIRTUAL_HEIGHT_REFINE_THRESHOLD_PX,
+    build_future_comp_display_index,
+    compare_build_row_heights,
+    compare_row_scroll_ft_key,
     compare_should_virtualize,
-    compare_visible_window,
+    compare_spacer_heights,
+    compare_text_column_width,
+    compare_visible_window_for_heights,
 )
 
 _log = logging.getLogger(__name__)
@@ -108,6 +113,9 @@ class _CompareVirtualMixin:
         self._compare_virtual_eval_hosts: dict[int, ft.Container] = {}
         self._compare_virtual_scroll_offset = 0.0
         self._compare_virtual_mount_gen = 0
+        self._compare_virtual_row_heights: list[float] = []
+        self._compare_virtual_window: tuple[int, int] | None = None
+        self._compare_virtual_height_remount_pending = False
         self._future_virtual_active = False
         self._future_virtual_display_rows: list[HistoryRow] = []
         self._future_virtual_field_meta: list[_FutureVirtualFieldMeta] = []
@@ -121,6 +129,39 @@ class _CompareVirtualMixin:
         self._future_virtual_scroll_offset = 0.0
         self._future_virtual_mount_gen = 0
         self._future_virtual_user_comments: dict[int, str] = {}
+        self._future_comp_display_index: dict[int, int] = {}
+        self._future_comp_row_hosts: dict[int, ft.Control] = {}
+        self._future_row_measured_heights: dict[int, float] = {}
+        self._future_virtual_row_heights: list[float] = []
+        self._future_virtual_window: tuple[int, int] | None = None
+        self._future_virtual_height_remount_pending = False
+
+    def _register_future_result_card_row(self, comp_idx: int, row_control: ft.Control) -> None:
+        from iterthink.studio import ui_theme
+
+        highlight_cand = getattr(self, "_ki_compare_row_highlight_cand_idx", None)
+        comp_cand = None
+        ev = getattr(self, "_future_eval_cand_indices", None)
+        if ev and 0 <= int(comp_idx) < len(ev):
+            comp_cand = ev[int(comp_idx)]
+        active = highlight_cand is not None and comp_cand == highlight_cand
+        wrap = ft.Container(
+            content=row_control,
+            padding=0,
+            border=(
+                ft.border.all(2, config.HIGHLIGHT)
+                if active
+                else ft.border.all(1, ui_theme.outline_muted(alpha=0.0))
+            ),
+            bgcolor=(
+                ft.Colors.with_opacity(0.08, config.HIGHLIGHT) if active else None
+            ),
+            border_radius=4,
+        )
+        self._future_comp_row_hosts[comp_idx] = wrap
+
+    def _on_future_body_stack_resize(self, e: ft.LayoutSizeChangeEvent) -> None:
+        self._future_body_stack_height = max(60.0, float(e.height))
 
     def _compare_listview_viewport_height(self, lv: ft.ListView) -> float:
         h = float(getattr(lv, "height", 0) or 0)
@@ -134,8 +175,101 @@ class _CompareVirtualMixin:
             parent = getattr(parent, "parent", None)
         return 640.0
 
+    def _compare_listview_viewport_width(self, lv: ft.ListView) -> float:
+        w = float(getattr(lv, "width", 0) or 0)
+        if w > 0:
+            return w
+        parent = getattr(lv, "parent", None)
+        while parent is not None:
+            pw = float(getattr(parent, "width", 0) or 0)
+            if pw > 0:
+                return pw
+            parent = getattr(parent, "parent", None)
+        return 900.0
+
+    def _compare_virtual_text_column_width(
+        self,
+        lv: ft.ListView,
+        *,
+        show_actions: bool = True,
+    ) -> float:
+        return compare_text_column_width(
+            self._compare_listview_viewport_width(lv),
+            show_actions=show_actions,
+        )
+
+    def _virtual_row_shell(
+        self,
+        content: ft.Control,
+        display_index: int,
+        which: str,
+        *,
+        scroll_key: ft.ScrollKey | None = None,
+    ) -> ft.Container:
+        return ft.Container(
+            content=content,
+            key=scroll_key,
+            on_size_change=lambda e, di=display_index, w=which: self._on_virtual_row_size_change(
+                di, w, e
+            ),
+        )
+
+    def _on_virtual_row_size_change(
+        self,
+        display_index: int,
+        which: str,
+        e: ft.LayoutSizeChangeEvent,
+    ) -> None:
+        measured = max(1.0, float(e.height))
+        if which == "future":
+            heights = getattr(self, "_future_virtual_row_heights", None) or []
+            if display_index >= len(heights):
+                return
+            if abs(heights[display_index] - measured) <= COMPARE_VIRTUAL_HEIGHT_REFINE_THRESHOLD_PX:
+                return
+            heights[display_index] = measured
+            if self._future_virtual_height_remount_pending:
+                return
+            self._future_virtual_height_remount_pending = True
+            self._future_virtual_window = None
+            self.page.run_task(self._compare_virtual_height_remount_async, "future")
+            return
+        heights = getattr(self, "_compare_virtual_row_heights", None) or []
+        if display_index >= len(heights):
+            return
+        if abs(heights[display_index] - measured) <= COMPARE_VIRTUAL_HEIGHT_REFINE_THRESHOLD_PX:
+            return
+        heights[display_index] = measured
+        if self._compare_virtual_height_remount_pending:
+            return
+        self._compare_virtual_height_remount_pending = True
+        self._compare_virtual_window = None
+        self.page.run_task(self._compare_virtual_height_remount_async, "history")
+
+    async def _compare_virtual_height_remount_async(self, which: str) -> None:
+        await asyncio.sleep(0.05)
+        if which == "future":
+            self._future_virtual_height_remount_pending = False
+            if not getattr(self, "_future_virtual_active", False):
+                return
+            self._compare_commit_virtual_future_fields()
+            await self._compare_mount_virtual_future_listview(force=True)
+        else:
+            self._compare_virtual_height_remount_pending = False
+            if not getattr(self, "_compare_virtual_active", False):
+                return
+            await self._compare_mount_virtual_history_listview(force=True)
+
+    def _scroll_event_is_update(self, e: ft.ControlEvent) -> bool:
+        event_type = getattr(e, "event_type", None)
+        if event_type is None:
+            return True
+        return event_type == ft.ScrollType.UPDATE
+
     def _on_compare_rows_virtual_scroll(self, e: ft.ControlEvent) -> None:
         if not getattr(self, "_compare_virtual_active", False):
+            return
+        if not self._scroll_event_is_update(e):
             return
         self._compare_virtual_scroll_offset = float(getattr(e, "pixels", 0) or 0)
         self._compare_virtual_mount_gen += 1
@@ -143,9 +277,12 @@ class _CompareVirtualMixin:
         self.page.run_task(self._debounced_compare_virtual_remount, "history", gen)
 
     def _on_future_rows_virtual_scroll(self, e: ft.ControlEvent) -> None:
+        self._future_compare_scroll_offset = float(getattr(e, "pixels", 0) or 0)
+        self._future_virtual_scroll_offset = self._future_compare_scroll_offset
         if not getattr(self, "_future_virtual_active", False):
             return
-        self._future_virtual_scroll_offset = float(getattr(e, "pixels", 0) or 0)
+        if not self._scroll_event_is_update(e):
+            return
         self._future_virtual_mount_gen += 1
         gen = self._future_virtual_mount_gen
         self.page.run_task(self._debounced_compare_virtual_remount, "future", gen)
@@ -155,12 +292,12 @@ class _CompareVirtualMixin:
         if which == "history":
             if gen != self._compare_virtual_mount_gen:
                 return
-            self._compare_mount_virtual_history_listview()
+            await self._compare_mount_virtual_history_listview()
         else:
             if gen != self._future_virtual_mount_gen:
                 return
             self._compare_commit_virtual_future_fields()
-            self._compare_mount_virtual_future_listview()
+            await self._compare_mount_virtual_future_listview()
 
     def _compare_commit_virtual_future_fields(self) -> None:
         for idx, tf in self._future_virtual_field_widgets.items():
@@ -212,18 +349,38 @@ class _CompareVirtualMixin:
             return None, False
         return row.displacement, False
 
-    def _compare_mount_virtual_history_listview(self, *, scroll_offset: float | None = None) -> None:
+    async def _compare_mount_virtual_history_listview(
+        self,
+        *,
+        scroll_offset: float | None = None,
+        force: bool = False,
+    ) -> None:
         rows = self._compare_virtual_display_rows
         if not rows:
             return
         lv = self._compare_rows_listview
         if scroll_offset is not None:
             self._compare_virtual_scroll_offset = scroll_offset
+        saved_offset = self._compare_virtual_scroll_offset
         viewport = self._compare_listview_viewport_height(lv)
-        first, last = compare_visible_window(
-            scroll_offset=self._compare_virtual_scroll_offset,
+        heights = getattr(self, "_compare_virtual_row_heights", None) or []
+        if len(heights) != len(rows):
+            heights = compare_build_row_heights(
+                rows,
+                content_width=self._compare_virtual_text_column_width(lv, show_actions=False),
+                text_single=False,
+            )
+            self._compare_virtual_row_heights = heights
+        first, last = compare_visible_window_for_heights(
+            scroll_offset=saved_offset,
+            heights=heights,
             viewport_height=viewport,
         )
+        window = (first, last)
+        if not force and getattr(self, "_compare_virtual_window", None) == window:
+            return
+        self._compare_virtual_window = window
+        top_px, tail_px = compare_spacer_heights(first, last, heights)
         para_style = self._compare_para_text_style()
         _MOVED_OPACITY = 0.55
         _ghost_fg = ui_theme.editor_text_color()
@@ -244,8 +401,8 @@ class _CompareVirtualMixin:
         self._compare_right_diff_texts = []
         self._compare_eval_hosts = []
         controls: list[ft.Control] = []
-        if first > 0:
-            controls.append(ft.Container(height=first * COMPARE_VIRTUAL_ROW_HEIGHT_PX))
+        if top_px > 0:
+            controls.append(ft.Container(height=top_px))
         comp_idx = 0
         for di, row in enumerate(rows):
             if di < first:
@@ -283,10 +440,14 @@ class _CompareVirtualMixin:
                 right_cell = ft.Container(expand=1, padding=_COMPARE_HISTORY_CELL_PAD)
                 eval_spacer = ft.Container(width=36)
                 controls.append(
-                    ft.Row(
-                        [eval_spacer, left_cell, pill_host, right_cell],
-                        spacing=4,
-                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    self._virtual_row_shell(
+                        ft.Row(
+                            [eval_spacer, left_cell, pill_host, right_cell],
+                            spacing=4,
+                            vertical_alignment=ft.CrossAxisAlignment.START,
+                        ),
+                        di,
+                        "history",
                     )
                 )
             else:
@@ -326,20 +487,31 @@ class _CompareVirtualMixin:
                 self._compare_virtual_eval_hosts[ci] = eval_host
                 self._compare_eval_hosts.append(eval_host)
                 self._compare_row_pill_hosts.append(pill_host)
+                cand_pi = getattr(row, "new_paragraph_index", None)
+                row_key = (
+                    compare_row_scroll_ft_key(int(cand_pi))
+                    if cand_pi is not None and int(cand_pi) >= 0
+                    else None
+                )
                 controls.append(
-                    ft.Row(
-                        [eval_host, left_cell, pill_host, right_cell],
-                        spacing=4,
-                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    self._virtual_row_shell(
+                        ft.Row(
+                            [eval_host, left_cell, pill_host, right_cell],
+                            spacing=4,
+                            vertical_alignment=ft.CrossAxisAlignment.START,
+                        ),
+                        di,
+                        "history",
+                        scroll_key=row_key,
                     )
                 )
                 comp_idx += 1
-        tail = len(rows) - last
-        if tail > 0:
-            controls.append(ft.Container(height=tail * COMPARE_VIRTUAL_ROW_HEIGHT_PX))
+        if tail_px > 0:
+            controls.append(ft.Container(height=tail_px))
         lv.controls = controls
         if _ctrl_on_page(lv):
             lv.update()
+            await safe_list_scroll(lv, saved_offset)
 
     def _refresh_compare_virtual_pills(self) -> None:
         if not getattr(self, "_compare_virtual_active", False):
@@ -387,7 +559,16 @@ class _CompareVirtualMixin:
                 self._check_results[cid] = (results + [None] * n_comp)[:n_comp]
         self._compare_prepare_virtual_history(display_rows, comparison_rows)
         self._compare_virtual_scroll_offset = 0.0
-        self._compare_mount_virtual_history_listview(scroll_offset=0.0)
+        self._compare_virtual_window = None
+        self._compare_virtual_row_heights = compare_build_row_heights(
+            display_rows,
+            content_width=self._compare_virtual_text_column_width(
+                self._compare_rows_listview,
+                show_actions=False,
+            ),
+            text_single=False,
+        )
+        self.page.run_task(self._compare_mount_virtual_history_listview, scroll_offset=0.0)
         if self._active_check_id is not None:
             self._refresh_all_eval_cells()
         self._refresh_compare_bulk_buttons()
@@ -452,6 +633,13 @@ class _CompareVirtualMixin:
 
         self._future_virtual_active = True
         self._future_virtual_display_rows = list(display_rows)
+        text_single = hasattr(self, "_review_text_single_mode") and self._review_text_single_mode()
+        self._future_comp_display_index = build_future_comp_display_index(
+            display_rows,
+            text_single=text_single,
+        )
+        self._future_compare_scroll_offset = 0.0
+        self._future_virtual_scroll_offset = 0.0
         self._future_virtual_field_meta = []
         self._future_row_kinds = []
         self._future_row_cand_idx = []
@@ -578,7 +766,18 @@ class _CompareVirtualMixin:
             field_idx += 1
 
         self._future_virtual_scroll_offset = 0.0
-        self._compare_mount_virtual_future_listview(scroll_offset=0.0)
+        self._future_virtual_window = None
+        show_actions = bool(self.current_path)
+        self._future_virtual_row_heights = compare_build_row_heights(
+            display_rows,
+            content_width=self._compare_virtual_text_column_width(
+                self._future_rows_listview,
+                show_actions=show_actions,
+            ),
+            text_single=text_single,
+            field_meta=self._future_virtual_field_meta,
+        )
+        self.page.run_task(self._compare_mount_virtual_future_listview, scroll_offset=0.0)
 
         if (
             self._main_tab_index == TAB_FUTURE
@@ -599,18 +798,44 @@ class _CompareVirtualMixin:
             self._compare_refine_gen += 1
             self.page.run_task(self._debounced_refine_compare_slots, self._compare_refine_gen)
 
-    def _compare_mount_virtual_future_listview(self, *, scroll_offset: float | None = None) -> None:
+    async def _compare_mount_virtual_future_listview(
+        self,
+        *,
+        scroll_offset: float | None = None,
+        force: bool = False,
+    ) -> None:
         rows = self._future_virtual_display_rows
         if not rows:
             return
         lv = self._future_rows_listview
         if scroll_offset is not None:
             self._future_virtual_scroll_offset = scroll_offset
+        saved_offset = self._future_virtual_scroll_offset
         viewport = self._compare_listview_viewport_height(lv)
-        first, last = compare_visible_window(
-            scroll_offset=self._future_virtual_scroll_offset,
+        show_actions = bool(self.current_path)
+        text_single = hasattr(self, "_review_text_single_mode") and self._review_text_single_mode()
+        heights = getattr(self, "_future_virtual_row_heights", None) or []
+        if len(heights) != len(rows):
+            heights = compare_build_row_heights(
+                rows,
+                content_width=self._compare_virtual_text_column_width(
+                    lv,
+                    show_actions=show_actions,
+                ),
+                text_single=text_single,
+                field_meta=self._future_virtual_field_meta,
+            )
+            self._future_virtual_row_heights = heights
+        first, last = compare_visible_window_for_heights(
+            scroll_offset=saved_offset,
+            heights=heights,
             viewport_height=viewport,
         )
+        window = (first, last)
+        if not force and getattr(self, "_future_virtual_window", None) == window:
+            return
+        self._future_virtual_window = window
+        top_px, tail_px = compare_spacer_heights(first, last, heights)
         para_style = self._compare_para_text_style()
         _MOVED_OPACITY = 0.55
         _ghost_fg = ui_theme.editor_text_color()
@@ -635,11 +860,11 @@ class _CompareVirtualMixin:
             "selection_color": config.SELECTION_OVERLAY,
             "content_padding": ft.padding.all(0),
         }
-        show_actions = bool(self.current_path)
-        text_single = hasattr(self, "_review_text_single_mode") and self._review_text_single_mode()
         eval_spacer_w = COMPARE_EVAL_COL_W
         future_user_comments = getattr(self, "_future_virtual_user_comments", {}) or {}
 
+        self._future_comp_row_hosts.clear()
+        self._future_row_measured_heights.clear()
         self._future_virtual_left_widgets.clear()
         self._future_virtual_pill_hosts.clear()
         self._future_virtual_eval_hosts.clear()
@@ -650,8 +875,8 @@ class _CompareVirtualMixin:
         self._future_comment_pick_cells = []
 
         controls: list[ft.Control] = []
-        if first > 0:
-            controls.append(ft.Container(height=first * COMPARE_VIRTUAL_ROW_HEIGHT_PX))
+        if top_px > 0:
+            controls.append(ft.Container(height=top_px))
 
         pill_i = 0
         field_idx = 0
@@ -706,16 +931,20 @@ class _CompareVirtualMixin:
                 eval_ctrl = ft.Container(width=eval_spacer_w)
                 right_cell = ft.Container(expand=1, padding=_COMPARE_HISTORY_CELL_PAD)
                 controls.append(
-                    ft.Row(
-                        self._future_review_visible_row_cells(
-                            text_single=text_single,
-                            eval_ctrl=eval_ctrl,
-                            left_cell=left_cell,
-                            pill_host=pill_host,
-                            right_cell=right_cell,
+                    self._virtual_row_shell(
+                        ft.Row(
+                            self._future_review_visible_row_cells(
+                                text_single=text_single,
+                                eval_ctrl=eval_ctrl,
+                                left_cell=left_cell,
+                                pill_host=pill_host,
+                                right_cell=right_cell,
+                            ),
+                            spacing=4,
+                            vertical_alignment=ft.CrossAxisAlignment.START,
                         ),
-                        spacing=4,
-                        vertical_alignment=ft.CrossAxisAlignment.START,
+                        di,
+                        "future",
                     )
                 )
                 continue
@@ -746,10 +975,14 @@ class _CompareVirtualMixin:
                     right_cell=right_cell,
                 )
                 controls.append(
-                    ft.Row(
-                        row_cells,
-                        spacing=4,
-                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    self._virtual_row_shell(
+                        ft.Row(
+                            row_cells,
+                            spacing=4,
+                            vertical_alignment=ft.CrossAxisAlignment.START,
+                        ),
+                        di,
+                        "future",
                     )
                 )
                 field_idx += 1
@@ -822,31 +1055,41 @@ class _CompareVirtualMixin:
                     spacing=4,
                     vertical_alignment=ft.CrossAxisAlignment.START,
                 )
-                controls.append(
-                    ft.Container(
-                        content=row_inner,
-                        on_hover=lambda e, w=hover_wrap_future, ph=presence_host: self._on_compare_row_hover(
-                            e, w, ph
-                        ),
-                    )
+                row_control = ft.Container(
+                    content=row_inner,
+                    on_hover=lambda e, w=hover_wrap_future, ph=presence_host: self._on_compare_row_hover(
+                        e, w, ph
+                    ),
                 )
             else:
-                controls.append(
-                    ft.Row(
-                        row_cells,
-                        spacing=4,
-                        vertical_alignment=ft.CrossAxisAlignment.START,
-                    )
+                row_control = ft.Row(
+                    row_cells,
+                    spacing=4,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
                 )
+            self._register_future_result_card_row(comp_idx, row_control)
+            row_key = (
+                compare_row_scroll_ft_key(int(cand_pi))
+                if cand_pi is not None and int(cand_pi) >= 0
+                else None
+            )
+            mounted = self._virtual_row_shell(
+                self._future_comp_row_hosts[comp_idx],
+                di,
+                "future",
+                scroll_key=row_key,
+            )
+            self._future_comp_row_hosts[comp_idx] = mounted
+            controls.append(mounted)
             field_idx += 1
             comp_idx += 1
 
-        tail = len(rows) - last
-        if tail > 0:
-            controls.append(ft.Container(height=tail * COMPARE_VIRTUAL_ROW_HEIGHT_PX))
+        if tail_px > 0:
+            controls.append(ft.Container(height=tail_px))
         lv.controls = controls
         if _ctrl_on_page(lv):
             lv.update()
+            await safe_list_scroll(lv, saved_offset)
 
     def _future_virtual_field_text(self, field_idx: int) -> str:
         if getattr(self, "_future_virtual_active", False):

@@ -415,14 +415,14 @@ def _plan_norm_from_viewport_tracked(
     track: _IvTransformTrack,
 ) -> tuple[float, float]:
     """Viewport focal → normalized page (u, v), accounting for current pan/zoom."""
-    img_w, img_h = _image_layout_size(pane)
-    if img_w <= 1e-6 or img_h <= 1e-6 or track.scale <= 1e-9:
+    rect = _focus_image_layout_rect(pane)
+    if rect.w <= 1e-6 or rect.h <= 1e-6 or track.scale <= 1e-9:
         return 0.5, 0.5
-    cx = (float(fx) - track.tx) / track.scale
-    cy = (float(fy) - track.ty) / track.scale
+    cx = (float(fx) - track.tx) / track.scale - rect.x0
+    cy = (float(fy) - track.ty) / track.scale - rect.y0
     return (
-        max(0.0, min(1.0, cx / img_w)),
-        max(0.0, min(1.0, cy / img_h)),
+        max(0.0, min(1.0, cx / rect.w)),
+        max(0.0, min(1.0, cy / rect.h)),
     )
 
 
@@ -433,10 +433,28 @@ def _viewport_from_plan_norm_tracked(
     track: _IvTransformTrack,
 ) -> tuple[float, float]:
     """Normalized page (u, v) → viewport focal for programmatic zoom/pan."""
-    img_w, img_h = _image_layout_size(pane)
-    cx = float(u) * img_w
-    cy = float(v) * img_h
+    rect = _focus_image_layout_rect(pane)
+    cx = rect.x0 + float(u) * rect.w
+    cy = rect.y0 + float(v) * rect.h
     return cx * track.scale + track.tx, cy * track.scale + track.ty
+
+
+def _mirror_pan_delta(
+    src: PlanFocusViewer,
+    dst: PlanFocusViewer,
+    dx: float,
+    dy: float,
+    track_src: _IvTransformTrack,
+    track_dst: _IvTransformTrack,
+) -> tuple[float, float]:
+    """Scale a source viewport pan delta for the destination pane's layout."""
+    img_w_s, img_h_s = _image_layout_size(src)
+    img_w_d, img_h_d = _image_layout_size(dst)
+    scale_s = max(track_src.scale, 1e-9)
+    scale_d = track_dst.scale
+    dx_dst = float(dx) * (scale_d * img_w_d) / (scale_s * img_w_s)
+    dy_dst = float(dy) * (scale_d * img_h_d) / (scale_s * img_h_s)
+    return dx_dst, dy_dst
 
 
 def _track_after_zoom_at_focal(
@@ -549,6 +567,7 @@ class PlanFocusViewer:
     _active_region_hover_id: int | None = field(default=None, repr=False)
     _viewer_interacting: bool = field(default=False, repr=False)
     _page_content_stack: ft.Stack | None = field(default=None, repr=False)
+    _page_layout_host: ft.Container | None = field(default=None, repr=False)
     _iv_track: _IvTransformTrack = field(default_factory=_IvTransformTrack, repr=False)
 
     def _point_in_tools_pill(self, local_x: float, local_y: float) -> bool:
@@ -941,6 +960,9 @@ class PlanFocusViewer:
         if self.page_count <= 0 or self._viewport_w <= 0:
             return
         path = self._paths[self.current_index]
+        host = self._page_layout_host
+        if host is None:
+            return
         if self._layout_mode == "contain" and self._viewport_h >= _FOCUS_MIN_VIEWPORT_H:
             _layout_focus_page_image_contain(
                 self._image,
@@ -948,12 +970,19 @@ class PlanFocusViewer:
                 viewport_w=self._viewport_w,
                 viewport_h=self._viewport_h,
             )
+            rect = _focus_image_layout_rect(self)
+            host.left = rect.x0
+            host.top = rect.y0
         else:
             _layout_focus_page_image_width(
                 self._image,
                 path,
                 viewport_w=self._viewport_w,
             )
+            host.left = 0.0
+            host.top = 0.0
+        if ctrl_on_page(host):
+            host.update()
 
     def sync_viewport(self, viewport_w: float, viewport_h: float | None = None) -> None:
         """Size page frame and image from the compose column (not intrinsic image width)."""
@@ -1392,15 +1421,18 @@ def _build_plan_focus_pane(
     change_regions_overlay = ft.Stack([], fit=ft.StackFit.PASS_THROUGH)
     region_action_host = ft.Container(visible=False, left=0, top=0, right=None)
     text_labels_overlay = ft.Stack([], fit=ft.StackFit.PASS_THROUGH)
+    page_layout_host = ft.Container(content=ft.Text(""), left=0, top=0)
     if n > 0:
         page_content_stack = ft.Stack(
             [img, text_labels_overlay, change_regions_overlay, region_action_host],
             fit=ft.StackFit.PASS_THROUGH,
         )
-        iv_content: ft.Control = page_content_stack
+        page_layout_host.content = page_content_stack
+        iv_content: ft.Control = page_layout_host
     else:
         page_content_stack = None
-        iv_content = ft.Text("No pages", color=ft.Colors.GREY_500)
+        page_layout_host.content = ft.Text("No pages", color=ft.Colors.GREY_500)
+        iv_content = page_layout_host
 
     viewer = ft.InteractiveViewer(
         content=iv_content,
@@ -1575,6 +1607,7 @@ def _build_plan_focus_pane(
         _annotations_overlay=annotations_overlay,
         _change_regions_overlay=change_regions_overlay,
         _page_content_stack=page_content_stack,
+        _page_layout_host=page_layout_host,
         _region_action_host=region_action_host,
         _draw_rubber_band=draw_rubber_band,
         _draw_cloud_capture=draw_cloud_capture,
@@ -1865,14 +1898,22 @@ class PlanFocusPairController:
         for pane in (self.left, self.right):
             if bool(getattr(pane, "_viewer_interacting", False)):
                 continue
+            vw = float(col_w)
+            vh = float(viewport_h)
+            sw = float(getattr(pane, "_stack_w", 0) or 0)
+            sh = float(getattr(pane, "_stack_h", 0) or 0)
+            if sw > 1.0 and abs(sw - col_w) > 1.0:
+                vw = sw
+            if sh >= _FOCUS_MIN_VIEWPORT_H and abs(sh - viewport_h) > 1.0:
+                vh = sh
             if (
                 pane._viewport_w > 0
-                and abs(col_w - pane._viewport_w) <= 0.5
-                and abs(viewport_h - pane._viewport_h) <= 0.5
+                and abs(vw - pane._viewport_w) <= 0.5
+                and abs(vh - pane._viewport_h) <= 0.5
                 and float(pane._image.width or 0) > 0
             ):
                 continue
-            pane.sync_viewport(col_w, viewport_h)
+            pane.sync_viewport(vw, vh)
 
     def _reset_gesture_scale(self) -> None:
         self._gesture_state["scale"] = 1.0
@@ -1910,9 +1951,12 @@ class PlanFocusPairController:
                     _track_after_zoom_at_focal(track_dst, dst_fx, dst_fy, factor)
                 else:
                     dx, dy = float(d.x), float(d.y)
-                    await dst._viewer.pan(dx, dy)
                     _track_after_pan(track_src, dx, dy)
-                    _track_after_pan(track_dst, dx, dy)
+                    dx_dst, dy_dst = _mirror_pan_delta(
+                        src, dst, dx, dy, track_src, track_dst
+                    )
+                    await dst._viewer.pan(dx_dst, dy_dst)
+                    _track_after_pan(track_dst, dx_dst, dy_dst)
                 self._gesture_state["scale"] = cur
                 src._iv_track.scale = track_src.scale
                 src._iv_track.tx = track_src.tx

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Callable
 from urllib.parse import unquote, urlparse
 
 import flet as ft
@@ -93,6 +95,38 @@ def ctrl_on_page(ctrl: ft.Control) -> bool:
         return False
 
 
+@contextmanager
+def ctrl_unfrozen(ctrl: ft.Control):
+    """Temporarily allow property changes on a mounted Flet control."""
+    frozen = getattr(ctrl, "_frozen", None)
+    if frozen is not None:
+        del ctrl._frozen
+    try:
+        yield ctrl
+    finally:
+        if frozen is not None:
+            object.__setattr__(ctrl, "_frozen", frozen)
+
+
+def safe_ctrl_update(ctrl: ft.Control) -> None:
+    """Update a mounted control; temporarily unfreezes when Flet locked it after mount."""
+    if not ctrl_on_page(ctrl):
+        return
+    with ctrl_unfrozen(ctrl):
+        try:
+            ctrl.update()
+        except RuntimeError as exc:
+            if "Frozen control" not in str(exc):
+                raise
+
+
+def safe_ctrl_mutate(ctrl: ft.Control, mutate: Callable[[ft.Control], None]) -> None:
+    """Apply in-place property changes on a control, then refresh it when mounted."""
+    with ctrl_unfrozen(ctrl):
+        mutate(ctrl)
+    safe_ctrl_update(ctrl)
+
+
 async def safe_list_scroll(
     lv: ft.ListView | None,
     offset: float,
@@ -106,6 +140,22 @@ async def safe_list_scroll(
         await lv.scroll_to(offset=offset, duration=duration)
     except (RuntimeError, TimeoutError, TypeError, AttributeError, ValueError):
         pass
+
+
+async def safe_list_scroll_to_key(
+    lv: ft.ListView | None,
+    scroll_key: str | ft.ScrollKey,
+    *,
+    duration: int = 0,
+) -> bool:
+    """Scroll a mounted ListView to ``scroll_key``; return False if scroll did not run."""
+    if lv is None or not ctrl_on_page(lv) or not bool(getattr(lv, "visible", True)):
+        return False
+    try:
+        await lv.scroll_to(scroll_key=scroll_key, duration=duration)
+        return True
+    except (RuntimeError, TimeoutError, TypeError, AttributeError, ValueError):
+        return False
 
 
 def normalize_ki_tier(raw: str | None) -> str:

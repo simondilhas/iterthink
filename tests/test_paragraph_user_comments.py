@@ -101,3 +101,17 @@ def test_legacy_rows_without_hash_use_alignment(ephemeral_store: None, tmp_path:
             display_body=new_body,
         )
     assert resolved.get(2) == "on two"
+
+
+def test_merge_with_impact_for_export() -> None:
+    impact = {0: "impact: check spelling"}
+    user = {0: "user note", 1: "only user"}
+    merged = paragraph_user_comments.merge_with_impact_for_export(impact, user)
+    assert merged[0] == "Note: user note\n\nimpact: check spelling"
+    assert merged[1] == "Note: only user"
+
+    user_only = paragraph_user_comments.merge_with_impact_for_export({}, {1: "solo"})
+    assert user_only == {1: "Note: solo"}
+
+    impact_only = paragraph_user_comments.merge_with_impact_for_export({2: "ai text"}, {})
+    assert impact_only == {2: "ai text"}

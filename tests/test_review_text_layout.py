@@ -7,13 +7,14 @@ from dataclasses import dataclass, field
 import flet as ft
 import pytest
 
-from iterthink.studio.constants import TAB_FUTURE, TAB_PRESENT
+from iterthink.studio.constants import KI_TOPIC_ANALYSE, TAB_FUTURE, TAB_PRESENT
 from iterthink.studio.formats.pdf_docx import (
     MarkdownStudioAssetCompare,
     _TEXT_LAYOUT_ORDER,
 )
 from iterthink.studio.history.candidate_state import CompareCandidateSource
 from iterthink.studio.history.paragraph_ui import _HistoryParagraphUIMixin
+from iterthink.studio.impact_ui import MarkdownStudioImpactMixin
 
 
 @dataclass
@@ -177,7 +178,7 @@ def test_future_review_visible_row_cells_single_vs_compare() -> None:
         pill_host=pill,
         right_cell=right,
     )
-    assert single_cells == [right]
+    assert single_cells == [eval_ctrl, right]
 
 
 def test_sync_plan_compare_baseline_chrome_hides_in_plan_single_mode() -> None:
@@ -197,3 +198,110 @@ def test_sync_plan_compare_baseline_chrome_hides_in_plan_single_mode() -> None:
     stub._sync_plan_compare_baseline_chrome()
     assert stub._plan_compare_future.baseline_label.visible is False
     assert stub._plan_compare_future.baseline_wrap.visible is False
+
+
+@pytest.mark.parametrize(
+    ("tab", "subtab", "source", "mode", "expected"),
+    [
+        (TAB_FUTURE, 0, CompareCandidateSource.AI_PREVIEW, "single", True),
+        (TAB_FUTURE, 1, CompareCandidateSource.AI_PREVIEW, "single", True),
+        (TAB_FUTURE, 1, CompareCandidateSource.AI_PREVIEW, "side_by_side", False),
+        (TAB_PRESENT, 1, CompareCandidateSource.AI_PREVIEW, "single", False),
+        (TAB_FUTURE, 1, CompareCandidateSource.PDF_ORIGINAL, "single", False),
+    ],
+)
+def test_review_text_single_layout_active(
+    tab: int, subtab: int, source: CompareCandidateSource, mode: str, expected: bool
+) -> None:
+    stub = _TextLayoutStub()
+    stub._main_tab_index = tab
+    stub._review_subtab_index = subtab
+    stub._compare_candidate_source = source
+    stub._plan_layout_mode = mode
+    assert stub._review_text_single_layout_active() is expected
+
+
+class _ImpactSingleModeStub(MarkdownStudioImpactMixin, _TextLayoutStub):
+    def __init__(self) -> None:
+        super().__init__()
+        self._ki_topic_index = KI_TOPIC_ANALYSE
+        self._pill_row_impact = ft.Row(visible=True)
+        self._impact_single_mode_placeholder = ft.Text(visible=False)
+        self._impact_run_dock = ft.Container(visible=True)
+        self._impact_ki_context_panel = ft.Container(visible=True)
+        self._impact_ki_context_title = ft.Text(visible=True)
+        self._impact_ki_context_scroll = ft.Column(visible=True)
+        self._impact_summary_right = ft.Container(visible=True)
+        self._impact_summary_right_text = ft.Text("")
+        self._chat_input_row = ft.Row(visible=False)
+        self._impact_run_btn = ft.FilledButton("Run")
+        self._pill_row_analyse = ft.Row(visible=False)
+        self._analyse_single_mode_placeholder = ft.Text(visible=False)
+        self._impact_analyse_section = ft.Container(visible=True)
+        self._impact_status_row = ft.Container(visible=True)
+        self._impact_para_listview = ft.ListView(visible=True)
+        self._impact_summary_container = ft.Container(visible=True)
+        self._active_impact_prompt_id = None
+        self._impact_tab_initialized = False
+
+
+def test_sync_impact_ki_context_hides_pills_in_single_layout() -> None:
+    stub = _ImpactSingleModeStub()
+    stub._main_tab_index = TAB_FUTURE
+    stub._review_subtab_index = 1
+    stub._plan_layout_mode = "single"
+    stub._sync_impact_ki_context_visibility()
+    assert stub._pill_row_impact.visible is False
+    assert stub._impact_single_mode_placeholder.visible is True
+    assert stub._impact_run_dock.visible is False
+    assert stub._impact_ki_context_panel.visible is False
+    assert stub._impact_status_row.visible is False
+    assert stub._impact_para_listview.visible is False
+
+
+def test_sync_impact_ki_context_shows_pills_in_compare_layout() -> None:
+    stub = _ImpactSingleModeStub()
+    stub._main_tab_index = TAB_FUTURE
+    stub._review_subtab_index = 1
+    stub._plan_layout_mode = "side_by_side"
+    stub._sync_impact_ki_context_visibility()
+    assert stub._pill_row_impact.visible is True
+    assert stub._impact_single_mode_placeholder.visible is False
+    assert stub._impact_run_dock.visible is True
+    assert stub._impact_status_row.visible is True
+    assert stub._impact_para_listview.visible is True
+
+
+def test_sync_impact_ki_context_hides_analyse_pills_in_single_layout() -> None:
+    stub = _ImpactSingleModeStub()
+    stub._main_tab_index = TAB_FUTURE
+    stub._review_subtab_index = 0
+    stub._plan_layout_mode = "single"
+    stub._ki_topic_index = KI_TOPIC_ANALYSE
+    stub._sync_impact_ki_context_visibility()
+    assert stub._pill_row_analyse.visible is False
+    assert stub._analyse_single_mode_placeholder.visible is True
+
+
+def test_sync_impact_ki_context_shows_analyse_pills_in_compare_layout() -> None:
+    stub = _ImpactSingleModeStub()
+    stub._main_tab_index = TAB_FUTURE
+    stub._review_subtab_index = 0
+    stub._plan_layout_mode = "side_by_side"
+    stub._ki_topic_index = KI_TOPIC_ANALYSE
+    stub._sync_impact_ki_context_visibility()
+    assert stub._pill_row_analyse.visible is True
+    assert stub._analyse_single_mode_placeholder.visible is False
+
+
+@pytest.mark.asyncio
+async def test_run_impact_analysis_blocked_in_single_layout() -> None:
+    stub = _ImpactSingleModeStub()
+    stub._main_tab_index = TAB_FUTURE
+    stub._review_subtab_index = 1
+    stub._plan_layout_mode = "single"
+    stub._active_impact_prompt_id = "norm"
+    snacks: list[str] = []
+    stub._snack = snacks.append  # type: ignore[method-assign]
+    await stub._run_impact_analysis_async()
+    assert snacks == ["Check against Project context will come soon."]

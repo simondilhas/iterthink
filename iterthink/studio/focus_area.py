@@ -69,7 +69,7 @@ from .constants import (
     KI_TOPIC_CHANGE,
     KI_TOPIC_DISCUSS,
 )
-from .util import ctrl_on_page as _ctrl_on_page
+from .util import ctrl_on_page as _ctrl_on_page, safe_ctrl_mutate as _safe_ctrl_mutate
 
 # Selection toolbar overlay: estimated size for clamping (actual row is similar).
 _COMPOSE_SEL_TOOLBAR_EST_W = 300.0
@@ -1608,15 +1608,17 @@ class MarkdownStudioCompose:
         presence_host: ft.Container | None = None,
     ) -> None:
         hovered = bool(e.data)
-        actions_wrap.opacity = 1.0 if hovered else 0.0
+        _safe_ctrl_mutate(
+            actions_wrap,
+            lambda c: setattr(c, "opacity", 1.0 if hovered else 0.0),
+        )
         # Keep presence in layout stack but invisible on hover; ignore hits so action buttons work.
         if presence_host is not None:
-            presence_host.opacity = 0.0 if hovered else 1.0
-            presence_host.ignore_interactions = hovered
-        if _ctrl_on_page(actions_wrap):
-            actions_wrap.update()
-        if presence_host is not None and _ctrl_on_page(presence_host):
-            presence_host.update()
+            def _apply_presence(c: ft.Control) -> None:
+                c.opacity = 0.0 if hovered else 1.0
+                c.ignore_interactions = hovered
+
+            _safe_ctrl_mutate(presence_host, _apply_presence)
 
     def _margin_action_footer_controls(
         self,

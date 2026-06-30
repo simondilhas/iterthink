@@ -355,3 +355,57 @@ def test_markdown_to_docx_paragraph_comment(tmp_path: Path) -> None:
         assert "word/comments.xml" in z.namelist()
         cxml = z.read("word/comments.xml").decode("utf-8")
     assert "Annotation on first body paragraph" in cxml
+
+
+def test_markdown_to_docx_list_item_paragraph_comment(tmp_path: Path) -> None:
+    tpl = _minimal_template(tmp_path)
+    md = tmp_path / "note.md"
+    md.write_text("- Item one\n- Item two\n\nBody after list.\n", encoding="utf-8")
+    out = tmp_path / "out_list_comment.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=md.read_text(encoding="utf-8"),
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="Author", date_iso="2099-01-01", comment_author="Author"),
+        paragraph_comments={0: "Comment on first list item."},
+    )
+    with zipfile.ZipFile(out) as z:
+        cxml = z.read("word/comments.xml").decode("utf-8")
+    assert "Comment on first list item" in cxml
+
+
+def test_markdown_to_docx_exports_user_comment_from_db(
+    ephemeral_store: None, tmp_path: Path
+) -> None:
+    from iterthink.db.session import session_scope
+    from iterthink.persistence import content_repo, paragraph_user_comments
+
+    body = "Hello\n\nWorld"
+    md = tmp_path / "note.md"
+    md.write_text(body, encoding="utf-8")
+    with session_scope() as s:
+        vid = content_repo.persist_version_snapshot(s, md.resolve(), body, "manual")
+        assert vid is not None
+        paragraph_user_comments.upsert(
+            s,
+            content_version_id=int(vid),
+            paragraph_index=1,
+            body="My note on World",
+            paragraph_body=body,
+        )
+        comments = paragraph_user_comments.map_for_version(s, content_version_id=int(vid))
+
+    tpl = _minimal_template(tmp_path)
+    out = tmp_path / "out_user_comment.docx"
+    markdown_docx_export.markdown_to_docx(
+        markdown_src=body,
+        md_path=md,
+        template_path=tpl,
+        output_path=out,
+        meta=ExportMeta(title_stem="note", author="Author", date_iso="2099-01-01", comment_author="Author"),
+        paragraph_comments=comments,
+    )
+    with zipfile.ZipFile(out) as z:
+        cxml = z.read("word/comments.xml").decode("utf-8")
+    assert "My note on World" in cxml

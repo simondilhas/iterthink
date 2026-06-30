@@ -2141,6 +2141,8 @@ class MarkdownStudioExplorer:
 
         # Reset all compare-side state for the incoming document.
         self._reset_compare_state()
+        if hasattr(self, "_reset_check_analysis_session"):
+            self._reset_check_analysis_session()
         self._compose_plan_surface_key = None
         self._compose_plan_load_inflight_key = None
         self._compose_plan_load_gen = int(getattr(self, "_compose_plan_load_gen", 0)) + 1
@@ -2202,15 +2204,12 @@ class MarkdownStudioExplorer:
             await self._request_tab_switch_async(TAB_FUTURE)
             self._refresh_compare_diff_immediate()
         else:
-            was_present = self._main_tab_index == TAB_PRESENT
-            await self._request_tab_switch_async(TAB_PRESENT)
-            if was_present:
-                self._margin_gen += 1
-                await self._debounced_compose_rebuild(self._margin_gen)
-            self._refresh_compare_diff_immediate()
+            await self._refresh_active_tab_after_document_open_async()
 
         self._refresh_compare_bulk_buttons()
         self._refresh_title_bar()
+        if hasattr(self, "_rebuild_ki_comments_list"):
+            self._rebuild_ki_comments_list()
         if hasattr(self, "_refresh_compose_tab_label"):
             self._refresh_compose_tab_label()
 

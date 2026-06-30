@@ -58,3 +58,21 @@ def test_sync_ki_comment_pick_affordance_restores_prior_state() -> None:
 
     assert left_text.selectable is True
     assert right_field.read_only is False
+
+
+def test_sync_ki_comment_pick_affordance_mutates_frozen_controls() -> None:
+    from unittest.mock import patch
+
+    stub = _PickAffordanceStub()
+    left_text = ft.Text("para", selectable=True)
+    left_text._frozen = True  # type: ignore[attr-defined]
+    stub._future_left_diff_texts = [left_text]
+    stub._ki_comment_pick_mode = True
+
+    with patch("iterthink.studio.util.ctrl_on_page", return_value=True), patch.object(
+        left_text, "update"
+    ) as mock_update:
+        MarkdownStudio._sync_ki_comment_pick_affordance(stub)  # type: ignore[arg-type]
+        mock_update.assert_called_once()
+
+    assert left_text.selectable is False

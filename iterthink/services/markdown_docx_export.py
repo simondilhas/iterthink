@@ -423,7 +423,7 @@ def _add_page_break(ctx: _Ctx) -> None:
 
 
 def _attach_export_paragraph_comment(ctx: _Ctx, paragraph: Any) -> None:
-    """One index per top-level block (heading, body paragraph, fence)."""
+    """One index per split_paragraphs block (heading, body, list item, fence, table)."""
     if not ctx.paragraph_comments:
         return
     idx = ctx.para_comment_idx
@@ -666,6 +666,8 @@ def _render_table(ctx: _Ctx, tokens: list[Any], start: int) -> int:
                         run.bold = True
     _set_table_column_widths(table, rows, ctx.doc)
     ctx.space_next_block = True
+    first_p = table.rows[0].cells[0].paragraphs[0]
+    _attach_export_paragraph_comment(ctx, first_p)
     return i
 
 
@@ -735,8 +737,7 @@ def _render_blocks(ctx: _Ctx, tokens: list[Any], list_meta: _ListRenderMeta | No
             if i < n and tokens[i].type == "paragraph_close":
                 i += 1
             _end_top_level_block(ctx, p, list_meta=list_meta)
-            if list_meta is None:
-                _attach_export_paragraph_comment(ctx, p)
+            _attach_export_paragraph_comment(ctx, p)
             continue
         if t.type == "fence":
             body = (t.content or "").rstrip("\n")

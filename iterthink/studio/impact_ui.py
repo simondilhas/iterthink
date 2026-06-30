@@ -31,9 +31,10 @@ from iterthink.services.rag.project_scope import project_slug_for_path
 from iterthink.studio.constants import (
     KI_PILL_TEXT_SIZE,
     KI_TOPIC_ANALYSE,
-    RESULT_CARD_HIDE_DELAY_SEC,
+    KI_TOPIC_COMMENTS,
     TAB_FUTURE,
 )
+from iterthink.studio.ki_comments import truncate_preview, version_line_from_run_context
 from iterthink.studio.tree import build_md_tree
 from iterthink.studio.util import ctrl_on_page as _ctrl_on_page
 
@@ -54,8 +55,7 @@ class MarkdownStudioImpactMixin:
         self._impact_context_manual_overrides: dict[Path, bool] = {}
         self._impact_folder_rows: list[tuple[ft.Checkbox, list[Path]]] = []
         self._impact_run_gen = 0
-        self._impact_result_card_hide_gen = 0
-        self._impact_result_card_visible_for: int | None = None
+        self._impact_active_run_context: dict[str, Any] | None = None
         self._impact_run_spinner = ft.ProgressRing(
             width=12,
             height=12,
@@ -98,6 +98,8 @@ class MarkdownStudioImpactMixin:
 
     def _populate_impact_para_placeholders(self) -> None:
         """Fill the paragraph listview with text-only rows (no chips) before any analysis runs."""
+        if hasattr(self, "_review_text_single_layout_active") and self._review_text_single_layout_active():
+            return
         para_lv = getattr(self, "_impact_para_listview", None)
         if para_lv is None:
             return
@@ -382,6 +384,8 @@ class MarkdownStudioImpactMixin:
         self._impact_refresh_folder_states()
 
     def _on_impact_prompt_click(self, action_id: str) -> None:
+        if hasattr(self, "_review_text_single_layout_active") and self._review_text_single_layout_active():
+            return
         self._active_impact_prompt_id = action_id
         if getattr(self, "_impact_tab_initialized", False):
             self._rebuild_impact_context_tree()
@@ -395,18 +399,49 @@ class MarkdownStudioImpactMixin:
             if _ctrl_on_page(self._impact_status_text):
                 self._impact_status_text.update()
 
+    def _sync_review_impact_panel_single_mode(self) -> None:
+        """Hide center Impact comparison results when Review text layout is Single."""
+        hide = (
+            getattr(self, "_main_tab_index", -1) == TAB_FUTURE
+            and getattr(self, "_review_subtab_index", 0) == 1
+            and hasattr(self, "_review_text_single_layout_active")
+            and self._review_text_single_layout_active()
+        )
+        for attr in (
+            "_impact_status_row",
+            "_impact_para_listview",
+            "_impact_summary_container",
+        ):
+            ctrl = getattr(self, attr, None)
+            if ctrl is None:
+                continue
+            want = not hide
+            if ctrl.visible != want:
+                ctrl.visible = want
+                if _ctrl_on_page(ctrl):
+                    ctrl.update()
+
     def _sync_impact_ki_context_visibility(self) -> None:
         impact_subtab = (
             getattr(self, "_main_tab_index", -1) == TAB_FUTURE
             and getattr(self, "_review_subtab_index", 0) == 1
         )
+        text_single_impact = (
+            impact_subtab
+            and hasattr(self, "_review_text_single_layout_active")
+            and self._review_text_single_layout_active()
+        )
         ki_analyse = int(getattr(self, "_ki_topic_index", 0)) == KI_TOPIC_ANALYSE
+        text_single_review = (
+            getattr(self, "_main_tab_index", -1) == TAB_FUTURE
+            and hasattr(self, "_review_text_single_layout_active")
+            and self._review_text_single_layout_active()
+        )
         # Context file tree: Review → Impact and KI Analyse only (same as run dock intent).
-        context_on = impact_subtab and ki_analyse
-        prompt_ready = impact_subtab and self._active_impact_prompt_id is not None
+        context_on = impact_subtab and ki_analyse and not text_single_impact
         # Run dock: any time Review → Impact and KI "Analyse" topic (index 2). Prompt is optional for
         # visibility; the button stays disabled until a check pill is selected.
-        show_impact_run_dock = impact_subtab and ki_analyse
+        show_impact_run_dock = impact_subtab and ki_analyse and not text_single_impact
 
         chat_row = getattr(self, "_chat_input_row", None)
         run_dock = getattr(self, "_impact_run_dock", None)
@@ -429,17 +464,40 @@ class MarkdownStudioImpactMixin:
 
         analyse_pills = getattr(self, "_pill_row_analyse", None)
         if analyse_pills is not None:
-            want_vis = not impact_subtab
+            want_vis = not impact_subtab and not text_single_review
             if analyse_pills.visible != want_vis:
                 analyse_pills.visible = want_vis
                 if _ctrl_on_page(analyse_pills):
                     analyse_pills.update()
+
+        analyse_placeholder = getattr(self, "_analyse_single_mode_placeholder", None)
+        if analyse_placeholder is not None:
+            want_analyse_ph = not impact_subtab and text_single_review and ki_analyse
+            if analyse_placeholder.visible != want_analyse_ph:
+                analyse_placeholder.visible = want_analyse_ph
+                if _ctrl_on_page(analyse_placeholder):
+                    analyse_placeholder.update()
 
         prompt_sec = getattr(self, "_impact_analyse_section", None)
         if prompt_sec is not None and prompt_sec.visible != impact_subtab:
             prompt_sec.visible = impact_subtab
             if _ctrl_on_page(prompt_sec):
                 prompt_sec.update()
+
+        impact_pills = getattr(self, "_pill_row_impact", None)
+        if impact_pills is not None:
+            want_pills = impact_subtab and not text_single_impact
+            if impact_pills.visible != want_pills:
+                impact_pills.visible = want_pills
+                if _ctrl_on_page(impact_pills):
+                    impact_pills.update()
+        placeholder = getattr(self, "_impact_single_mode_placeholder", None)
+        if placeholder is not None:
+            want_ph = impact_subtab and text_single_impact
+            if placeholder.visible != want_ph:
+                placeholder.visible = want_ph
+                if _ctrl_on_page(placeholder):
+                    placeholder.update()
 
         panel = getattr(self, "_impact_ki_context_panel", None)
         title = getattr(self, "_impact_ki_context_title", None)
@@ -468,11 +526,12 @@ class MarkdownStudioImpactMixin:
             has_txt = bool(
                 getattr(self, "_impact_summary_right_text", None) and self._impact_summary_right_text.value
             )
-            want = impact_subtab and has_txt
+            want = impact_subtab and has_txt and not text_single_impact
             if summary_r.visible != want:
                 summary_r.visible = want
                 if _ctrl_on_page(summary_r):
                     summary_r.update()
+        self._sync_review_impact_panel_single_mode()
 
     def _resolve_impact_version_id(self, session: Any) -> int | None:
         if getattr(self, "_compare_snapshot_version_id", None) is not None:
@@ -501,6 +560,57 @@ class MarkdownStudioImpactMixin:
             session, resolved, body, "manual", skip_if_unchanged_sha=False
         )
         return int(vid) if vid is not None else None
+
+    def _impact_baseline_label_for_ui(self, session: Any) -> str:
+        vid = getattr(self, "_review_baseline_version_id", None)
+        if vid is None:
+            return "Current draft"
+        row = content_repo.get_version_row(session, int(vid))
+        if row is None:
+            return f"Version {int(vid)}"
+        return content_repo.snapshot_dropdown_text(content_repo._row_to_snapshot(session, row))
+
+    def _impact_candidate_label_for_ui(self) -> str:
+        cand_vid = getattr(self, "_compare_snapshot_version_id", None)
+        if cand_vid is None:
+            return "AI proposal (unsaved)"
+        with session_scope() as s:
+            row = content_repo.get_version_row(s, int(cand_vid))
+            if row is None:
+                return f"Version {int(cand_vid)}"
+            return content_repo.snapshot_dropdown_text(content_repo._row_to_snapshot(s, row))
+
+    def _impact_run_context_for_current_ui(self) -> dict[str, Any]:
+        with session_scope() as s:
+            baseline_label = self._impact_baseline_label_for_ui(s)
+        return {
+            "baseline_version_id": getattr(self, "_review_baseline_version_id", None),
+            "candidate_version_id": getattr(self, "_compare_snapshot_version_id", None),
+            "baseline_label": baseline_label,
+            "candidate_label": self._impact_candidate_label_for_ui(),
+        }
+
+    def _impact_version_line_for_current_ui(self) -> str:
+        return version_line_from_run_context(self._impact_run_context_for_current_ui())
+
+    def _sync_ki_sidebar_after_impact_change(self) -> None:
+        if int(getattr(self, "_ki_topic_index", -1)) != KI_TOPIC_COMMENTS:
+            return
+        if hasattr(self, "_rebuild_ki_comments_list"):
+            self._rebuild_ki_comments_list()
+        if hasattr(self, "_sync_ki_detail_for_focus"):
+            self._sync_ki_detail_for_focus()
+
+    def _clear_ki_impact_focus(self) -> None:
+        focus = getattr(self, "_ki_comment_focus", None)
+        if focus and focus[0] == "impact":
+            self._ki_comment_focus = None
+            if hasattr(self, "_sync_ki_detail_for_focus"):
+                self._sync_ki_detail_for_focus()
+            if hasattr(self, "_sync_ki_comments_detail_visibility"):
+                self._sync_ki_comments_detail_visibility()
+            if hasattr(self, "_rebuild_ki_comments_list"):
+                self._rebuild_ki_comments_list()
 
     def _selected_impact_context_document_ids(self) -> list[int]:
         paths = [p for p, cb in self._impact_context_file_cbs.items() if cb.value is True]
@@ -683,7 +793,7 @@ class MarkdownStudioImpactMixin:
             st = str(ann_row.get("status", "") or "")
             color = self._impact_status_color(st)
             tip = str(ann_row.get("effective_comment", "") or "").strip()
-            chip_tooltip = tip or None
+            chip_tooltip = truncate_preview(tip) if tip else None
             det_lc = ann_row.get("details")
             low_conf = (
                 isinstance(det_lc, dict)
@@ -723,6 +833,7 @@ class MarkdownStudioImpactMixin:
             chip_border = None
             chip_tooltip = None
 
+        prompt_id = getattr(self, "_active_impact_prompt_id", None)
         chip = ft.Container(
             content=chip_content,
             width=54,
@@ -733,8 +844,12 @@ class MarkdownStudioImpactMixin:
             border=chip_border,
             tooltip=chip_tooltip,
             on_click=(
-                (lambda _e, i=idx: self._show_impact_result_card(i))
-                if ann_row is not None
+                (
+                    lambda _e, i=idx, pid=str(prompt_id): self.page.run_task(
+                        self._open_ki_impact_card_async, i, pid
+                    )
+                )
+                if ann_row is not None and prompt_id
                 else None
             ),
         )
@@ -768,12 +883,6 @@ class MarkdownStudioImpactMixin:
         else:
             right_col = para_ctrl
 
-        def _on_hover(e: ft.HoverEvent, i: int = idx) -> None:
-            if str(e.data).lower() == "true":
-                self._show_impact_result_card(i)
-            else:
-                self._schedule_hide_impact_result_card()
-
         return ft.Container(
             content=ft.Row(
                 [chip, right_col],
@@ -781,7 +890,6 @@ class MarkdownStudioImpactMixin:
                 vertical_alignment=ft.CrossAxisAlignment.START,
             ),
             padding=ft.padding.symmetric(horizontal=6, vertical=4),
-            on_hover=_on_hover if ann_row is not None else None,
         )
 
     def _impact_status_options(self, prompt_id: str) -> tuple[str, ...]:
@@ -824,24 +932,6 @@ class MarkdownStudioImpactMixin:
         para_lv.controls[idx] = self._build_impact_para_row(idx, pt, snap)
         if _ctrl_on_page(para_lv):
             para_lv.update()
-
-    def _schedule_hide_impact_result_card(self) -> None:
-        self._impact_result_card_hide_gen += 1
-        gen = self._impact_result_card_hide_gen
-        self.page.run_task(self._hide_impact_result_card_after_delay, gen)
-
-    async def _hide_impact_result_card_after_delay(self, gen: int) -> None:
-        await asyncio.sleep(RESULT_CARD_HIDE_DELAY_SEC)
-        if gen != self._impact_result_card_hide_gen:
-            return
-        self._impact_result_card_visible_for = None
-        self._hide_impact_result_card()
-
-    def _on_impact_result_card_hover(self, e: ft.ControlEvent) -> None:
-        if str(e.data).lower() == "true":
-            self._impact_result_card_hide_gen += 1
-        else:
-            self._schedule_hide_impact_result_card()
 
     def _impact_status_badge_content(self, st: str, color: str) -> ft.Control:
         if st in FINDINGS_PARAGRAPH_STATUSES:
@@ -953,7 +1043,7 @@ class MarkdownStudioImpactMixin:
                     ft.Icons.CLOSE,
                     icon_size=14,
                     padding=ft.padding.all(0),
-                    on_click=lambda _e: self._hide_impact_result_card(),
+                    on_click=lambda _e: self._clear_ki_impact_focus(),
                     icon_color=config.ON_SURFACE_VARIANT,
                 ),
             ],
@@ -1169,24 +1259,6 @@ class MarkdownStudioImpactMixin:
                     )
         return ft.Column(rows, spacing=2, tight=True, scroll=ft.ScrollMode.AUTO)
 
-    def _show_impact_result_card(self, idx: int) -> None:
-        overlay = getattr(self, "_impact_result_card_overlay", None)
-        if overlay is None:
-            return
-        if not self._active_impact_prompt_id:
-            return
-        snap = self._load_impact_snap(idx)
-        if snap is None:
-            return
-        self._impact_result_card_hide_gen += 1
-        row_pitch = 88.0
-        overlay.top = max(4.0, idx * row_pitch + 4.0)
-        overlay.content = self._build_impact_result_card(idx, snap)
-        overlay.visible = True
-        self._impact_result_card_visible_for = idx
-        if _ctrl_on_page(overlay):
-            overlay.update()
-
     async def _persist_impact_override_async(
         self,
         snap: dict[str, Any],
@@ -1238,10 +1310,7 @@ class MarkdownStudioImpactMixin:
             except BaseException:  # noqa: BLE001
                 pass
         self._refresh_impact_para_row(idx)
-        if self._impact_result_card_visible_for == idx:
-            fresh = self._load_impact_snap(idx)
-            if fresh is not None:
-                self._show_impact_result_card(idx)
+        self._sync_ki_sidebar_after_impact_change()
 
     async def _clear_impact_override_async(self, snap: dict[str, Any], idx: int) -> None:
         with session_scope() as s:
@@ -1264,19 +1333,12 @@ class MarkdownStudioImpactMixin:
             except BaseException:  # noqa: BLE001
                 pass
         self._refresh_impact_para_row(idx)
-        if self._impact_result_card_visible_for == idx:
-            fresh = self._load_impact_snap(idx)
-            if fresh is not None:
-                self._show_impact_result_card(idx)
-
-    def _hide_impact_result_card(self) -> None:
-        overlay = getattr(self, "_impact_result_card_overlay", None)
-        if overlay and overlay.visible:
-            overlay.visible = False
-            if _ctrl_on_page(overlay):
-                overlay.update()
+        self._sync_ki_sidebar_after_impact_change()
 
     def _refresh_impact_annotations_ui(self, prompt_id: str) -> None:
+        if hasattr(self, "_review_text_single_layout_active") and self._review_text_single_layout_active():
+            self._sync_impact_ki_context_visibility()
+            return
         para_lv = getattr(self, "_impact_para_listview", None)
         summary_right = getattr(self, "_impact_summary_right_text", None)
         status_text = getattr(self, "_impact_status_text", None)
@@ -1299,7 +1361,6 @@ class MarkdownStudioImpactMixin:
                     ann_map = {i: impact_ann.snapshot_row_ui(r) for i, r in raw.items()}
 
         para_lv.controls.clear()
-        self._hide_impact_result_card()
         candidate_paras, ann_stale = self._impact_paragraphs_for_display()
         if ann_stale:
             ann_map = {}
@@ -1320,8 +1381,12 @@ class MarkdownStudioImpactMixin:
             if _ctrl_on_page(status_text):
                 status_text.update()
         self._sync_impact_ki_context_visibility()
+        self._sync_ki_sidebar_after_impact_change()
 
     async def _run_impact_analysis_async(self) -> None:
+        if hasattr(self, "_review_text_single_layout_active") and self._review_text_single_layout_active():
+            self._snack("Check against Project context will come soon.")
+            return
         act = impact_checks.get_impact_check(self._active_impact_prompt_id or "")
         if act is None:
             print("[impact] Run blocked: no Impact prompt selected (click a pill under Analyse).", file=sys.stderr, flush=True)
@@ -1371,6 +1436,9 @@ class MarkdownStudioImpactMixin:
             if _ctrl_on_page(self._impact_summary_right):
                 self._impact_summary_right.update()
         self._sync_impact_ki_context_visibility()
+
+        run_context = self._impact_run_context_for_current_ui()
+        self._impact_active_run_context = run_context
 
         para_lv = getattr(self, "_impact_para_listview", None)
         if para_lv is not None:
@@ -1455,6 +1523,7 @@ class MarkdownStudioImpactMixin:
                     return
                 if payload is not None:
                     det = payload.get("details") if isinstance(payload.get("details"), dict) else None
+                    det = impact_ann.merge_run_context(det, self._impact_active_run_context)
                     ann = self._impact_progress_row_dict(
                         paragraph_index=idx,
                         prompt_id=act.id,
@@ -1492,6 +1561,7 @@ class MarkdownStudioImpactMixin:
                 on_progress=on_progress,
                 target_path=cur.resolve(),
                 context_ready=context_ready,
+                run_context=run_context,
             )
 
             ann_lines: list[tuple[int, str, str, int]] = []

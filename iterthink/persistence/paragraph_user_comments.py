@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -20,6 +21,27 @@ class StoredComment:
     paragraph_index: int
     body: str
     content_hash: str | None = None
+
+
+@dataclass(frozen=True)
+class StoredAnalyseComment:
+    paragraph_index: int
+    check_id: str
+    body: str
+    symbol: str | None = None
+    details_json: str | None = None
+    content_hash: str | None = None
+    overridden: bool = False
+
+
+@dataclass(frozen=True)
+class ResolvedAnalyseComment:
+    display_paragraph_index: int
+    check_id: str
+    body: str
+    symbol: str | None
+    payload: dict[str, Any] | None
+    overridden: bool = False
 
 
 def alignment_old_to_new_paragraph_index(old_text: str, new_text: str) -> dict[int, int]:
@@ -101,6 +123,347 @@ def resolve_comments_for_body(
         if merged:
             out[int(idx)] = merged
     return out
+
+
+def _resolve_single_paragraph_index(
+    *,
+    stored_index: int,
+    content_hash: str | None,
+    hash_map: dict[str, list[int]],
+    idx_map: dict[int, int],
+) -> int | None:
+    target: int | None = None
+    h = (content_hash or "").strip()
+    if h and h in hash_map:
+        candidates = hash_map[h]
+        if len(candidates) == 1:
+            target = candidates[0]
+        else:
+            target = min(candidates, key=lambda i: abs(i - stored_index))
+    if target is None:
+        mapped = idx_map.get(int(stored_index))
+        if mapped is not None:
+            target = int(mapped)
+    return target
+
+
+def resolve_analyse_for_body(
+    anchor_body: str,
+    display_body: str,
+    stored: Iterable[StoredAnalyseComment],
+) -> list[ResolvedAnalyseComment]:
+    rows = [
+        StoredAnalyseComment(
+            paragraph_index=int(c.paragraph_index),
+            check_id=str(c.check_id),
+            body=(c.body or "").strip(),
+            symbol=c.symbol,
+            details_json=c.details_json,
+            content_hash=(c.content_hash or None),
+            overridden=bool(c.overridden),
+        )
+        for c in stored
+        if (c.body or "").strip() or (c.details_json or "").strip()
+    ]
+    if not rows:
+        return []
+
+    hash_map = _display_hash_to_indices(display_body)
+    idx_map = alignment_old_to_new_paragraph_index(anchor_body, display_body)
+    out: list[ResolvedAnalyseComment] = []
+    orphans: list[StoredAnalyseComment] = []
+
+    for c in rows:
+        target = _resolve_single_paragraph_index(
+            stored_index=int(c.paragraph_index),
+            content_hash=c.content_hash,
+            hash_map=hash_map,
+            idx_map=idx_map,
+        )
+        if target is None:
+            orphans.append(c)
+            continue
+        payload: dict[str, Any] | None = None
+        raw = (c.details_json or "").strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except json.JSONDecodeError:
+                payload = None
+        out.append(
+            ResolvedAnalyseComment(
+                display_paragraph_index=int(target),
+                check_id=c.check_id,
+                body=c.body,
+                symbol=c.symbol,
+                payload=payload,
+                overridden=bool(c.overridden),
+            )
+        )
+
+    for c in orphans:
+        payload: dict[str, Any] | None = None
+        raw = (c.details_json or "").strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except json.JSONDecodeError:
+                payload = None
+        out.append(
+            ResolvedAnalyseComment(
+                display_paragraph_index=0,
+                check_id=c.check_id,
+                body=c.body,
+                symbol=c.symbol,
+                payload=payload,
+                overridden=bool(c.overridden),
+            )
+        )
+    return out
+
+
+def list_analyse_for_version(
+    session: Session,
+    *,
+    content_version_id: int,
+    check_id: str | None = None,
+) -> list[StoredAnalyseComment]:
+    q = select(ParagraphUserComment).where(
+        ParagraphUserComment.content_version_id == content_version_id,
+        ParagraphUserComment.annotation_kind == "analyse",
+    )
+    if check_id is not None:
+        q = q.where(ParagraphUserComment.source_id == str(check_id))
+    rows = session.execute(q).scalars()
+    return [
+        StoredAnalyseComment(
+            paragraph_index=int(r.paragraph_index),
+            check_id=str(r.source_id or ""),
+            body=r.body or "",
+            symbol=r.symbol,
+            details_json=r.details_json,
+            content_hash=r.content_hash,
+            overridden=bool(r.overridden),
+        )
+        for r in rows
+        if (r.source_id or "").strip()
+    ]
+
+
+def list_analyse_check_ids_for_version(
+    session: Session, *, content_version_id: int
+) -> list[str]:
+    rows = session.execute(
+        select(ParagraphUserComment.source_id).where(
+            ParagraphUserComment.content_version_id == content_version_id,
+            ParagraphUserComment.annotation_kind == "analyse",
+            ParagraphUserComment.source_id.is_not(None),
+        ).distinct()
+    ).all()
+    return sorted({str(r[0]) for r in rows if r[0]})
+
+
+def _parse_analyse_compare_version_pair(
+    payload: dict[str, Any],
+) -> tuple[int | None, int | None] | None:
+    meta = payload.get("_iterthink_compare_version_pair")
+    if not isinstance(meta, dict):
+        return None
+    base_raw = meta.get("baseline_version_id")
+    cand_raw = meta.get("candidate_version_id")
+    base_id: int | None
+    cand_id: int | None
+    if base_raw is None:
+        base_id = None
+    else:
+        try:
+            base_id = int(base_raw)
+        except (TypeError, ValueError):
+            return None
+    if cand_raw is None:
+        cand_id = None
+    else:
+        try:
+            cand_id = int(cand_raw)
+        except (TypeError, ValueError):
+            return None
+    return base_id, cand_id
+
+
+def analyse_compare_version_pair_from_stored(
+    session: Session,
+    *,
+    content_version_id: int,
+    check_id: str,
+) -> tuple[int | None, int | None] | None:
+    rows = list_analyse_for_version(
+        session, content_version_id=content_version_id, check_id=check_id
+    )
+    for row in rows:
+        raw = (row.details_json or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        pair = _parse_analyse_compare_version_pair(parsed)
+        if pair is not None:
+            return pair
+    return None
+
+
+def map_analyse_resolved_for_display(
+    session: Session,
+    *,
+    content_version_id: int,
+    anchor_body: str,
+    display_body: str,
+    check_id: str | None = None,
+) -> list[ResolvedAnalyseComment]:
+    stored = list_analyse_for_version(
+        session, content_version_id=content_version_id, check_id=check_id
+    )
+    return resolve_analyse_for_body(anchor_body, display_body, stored)
+
+
+def get_analyse_payload(
+    session: Session,
+    *,
+    content_version_id: int,
+    check_id: str,
+    paragraph_index: int,
+) -> dict[str, Any] | None:
+    row = (
+        session.execute(
+            select(ParagraphUserComment).where(
+                ParagraphUserComment.content_version_id == content_version_id,
+                ParagraphUserComment.paragraph_index == int(paragraph_index),
+                ParagraphUserComment.annotation_kind == "analyse",
+                ParagraphUserComment.source_id == str(check_id),
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if row is None:
+        return None
+    raw = (row.details_json or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def get_analyse_payload_resolved(
+    session: Session,
+    *,
+    content_version_id: int,
+    anchor_body: str,
+    display_body: str,
+    check_id: str,
+    paragraph_index: int,
+) -> dict[str, Any] | None:
+    for row in map_analyse_resolved_for_display(
+        session,
+        content_version_id=content_version_id,
+        anchor_body=anchor_body,
+        display_body=display_body,
+        check_id=check_id,
+    ):
+        if int(row.display_paragraph_index) == int(paragraph_index):
+            return row.payload
+    return None
+
+
+def upsert_analyse(
+    session: Session,
+    *,
+    content_version_id: int,
+    paragraph_index: int,
+    check_id: str,
+    body: str,
+    symbol: str | None,
+    payload: dict[str, Any],
+    content_hash: str | None = None,
+    candidate_paragraph: str | None = None,
+    overridden: bool = False,
+    override_comment: str | None = None,
+) -> None:
+    now = time.time()
+    body = (body or "").strip()
+    check_id = str(check_id)
+    if content_hash is None and candidate_paragraph is not None:
+        content_hash = compute_hash(candidate_paragraph)
+    details_json = json.dumps(payload)
+    row = (
+        session.execute(
+            select(ParagraphUserComment).where(
+                ParagraphUserComment.content_version_id == content_version_id,
+                ParagraphUserComment.paragraph_index == int(paragraph_index),
+                ParagraphUserComment.annotation_kind == "analyse",
+                ParagraphUserComment.source_id == check_id,
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if not body and not (payload or {}):
+        if row is not None:
+            session.delete(row)
+        return
+    if row is None:
+        session.add(
+            ParagraphUserComment(
+                content_version_id=content_version_id,
+                paragraph_index=int(paragraph_index),
+                annotation_kind="analyse",
+                source_id=check_id,
+                symbol=symbol,
+                details_json=details_json,
+                content_hash=content_hash,
+                body=body or "(analysis result)",
+                overridden=bool(overridden),
+                override_comment=override_comment,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    else:
+        row.body = body or row.body
+        row.symbol = symbol
+        row.details_json = details_json
+        row.content_hash = content_hash
+        row.overridden = bool(overridden)
+        row.override_comment = override_comment
+        row.updated_at = now
+    session.flush()
+
+
+def delete_analyse_at(
+    session: Session,
+    *,
+    content_version_id: int,
+    paragraph_index: int,
+    check_id: str,
+) -> None:
+    session.execute(
+        delete(ParagraphUserComment).where(
+            ParagraphUserComment.content_version_id == content_version_id,
+            ParagraphUserComment.paragraph_index == int(paragraph_index),
+            ParagraphUserComment.annotation_kind == "analyse",
+            ParagraphUserComment.source_id == str(check_id),
+        )
+    )
 
 
 def list_stored_for_version(session: Session, *, content_version_id: int) -> list[StoredComment]:

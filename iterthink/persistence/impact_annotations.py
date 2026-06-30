@@ -23,6 +23,30 @@ def parse_details_dict(row: ImpactAnnotation) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
+def merge_run_context(
+    details: dict | None,
+    run_context: dict[str, Any] | None,
+) -> dict | None:
+    """Attach ``_run_context`` (baseline/candidate version labels) without dropping findings."""
+    if not isinstance(run_context, dict):
+        return details if isinstance(details, dict) else None
+    out: dict[str, Any] = dict(details) if isinstance(details, dict) else {}
+    out["_run_context"] = {
+        "baseline_version_id": run_context.get("baseline_version_id"),
+        "candidate_version_id": run_context.get("candidate_version_id"),
+        "baseline_label": str(run_context.get("baseline_label") or "").strip(),
+        "candidate_label": str(run_context.get("candidate_label") or "").strip(),
+    }
+    return out
+
+
+def run_context_from_details(details: dict | None) -> dict[str, Any] | None:
+    if not isinstance(details, dict):
+        return None
+    ctx = details.get("_run_context")
+    return ctx if isinstance(ctx, dict) else None
+
+
 def format_details_for_export(details: dict | None) -> str:
     if not details:
         return ""

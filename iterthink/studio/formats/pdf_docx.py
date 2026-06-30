@@ -1337,13 +1337,21 @@ class MarkdownStudioAssetCompare:
             and self._compare_candidate_source != CompareCandidateSource.PDF_ORIGINAL
         )
 
-    def _review_text_single_mode(self) -> bool:
-        if not self._is_review_text_compare():
+    def _review_text_single_layout_active(self) -> bool:
+        """Review markdown workspace in single-column layout (any Review subtab)."""
+        if self._main_tab_index != TAB_FUTURE:
+            return False
+        if self._compare_candidate_source == CompareCandidateSource.PDF_ORIGINAL:
             return False
         mode = getattr(self, "_plan_layout_mode", "side_by_side")
         if mode not in _TEXT_LAYOUT_MODES:
             mode = "side_by_side"
         return mode == "single"
+
+    def _review_text_single_mode(self) -> bool:
+        if not self._is_review_text_compare():
+            return False
+        return self._review_text_single_layout_active()
 
     def _active_compare_layout_order(self) -> tuple[str, ...]:
         if self._is_review_text_compare():
@@ -1615,6 +1623,10 @@ class MarkdownStudioAssetCompare:
             col.visible = not hide_current
             if _ctrl_on_page(col):
                 col.update()
+        if hide_current and hasattr(self, "_dismiss_analyse_review_display"):
+            self._dismiss_analyse_review_display()
+        if hasattr(self, "_sync_impact_ki_context_visibility"):
+            self._sync_impact_ki_context_visibility()
 
     def _sync_plan_filename_chrome(self) -> None:
         show_layout = self._plan_layout_chrome_active()

@@ -205,13 +205,18 @@ class MainWorkspaceTabsMixin:
             self._review_change_panel.update()
         if _ctrl_on_page(self._review_impact_panel):
             self._review_impact_panel.update()
-        # Re-render Impact tab when switching into the Impact subtab.
         if impact_active:
-            pid = getattr(self, "_active_impact_prompt_id", None)
-            if pid and hasattr(self, "_refresh_impact_annotations_ui"):
-                self._refresh_impact_annotations_ui(str(pid))
-            elif not pid and hasattr(self, "_populate_impact_para_placeholders"):
-                self._populate_impact_para_placeholders()
+            if not (
+                hasattr(self, "_review_text_single_layout_active")
+                and self._review_text_single_layout_active()
+            ):
+                pid = getattr(self, "_active_impact_prompt_id", None)
+                if pid and hasattr(self, "_refresh_impact_annotations_ui"):
+                    self._refresh_impact_annotations_ui(str(pid))
+                elif not pid and hasattr(self, "_populate_impact_para_placeholders"):
+                    self._populate_impact_para_placeholders()
+            elif hasattr(self, "_sync_impact_ki_context_visibility"):
+                self._sync_impact_ki_context_visibility()
         sub_col = getattr(self, "_review_subpanels_column", None)
         if sub_col is not None and _ctrl_on_page(sub_col):
             sub_col.update()
@@ -365,6 +370,168 @@ class MainWorkspaceTabsMixin:
         if _ctrl_on_page(self._review_difference_chrome_row):
             self._review_difference_chrome_row.update()
 
+    async def _load_history_tab_content_async(
+        self,
+        *,
+        reset_newer_side: bool = False,
+        pick_autosave: bool = False,
+    ) -> None:
+        """Prime History compare for the open document (2nd-newest autosave when requested)."""
+        if reset_newer_side:
+            self._compare_newer_version_id = None
+            self._compare_newer_cached_body = ""
+        plan_pdf_history = (
+            self.current_path is not None
+            and hasattr(self, "_document_pdf_profile")
+            and self._document_pdf_profile() == "plan"
+            and hasattr(self, "_ensure_plan_pdf_compare_active")
+            and self._ensure_plan_pdf_compare_active()
+        )
+        if plan_pdf_history:
+            self._rebuild_compare_view()
+            return
+
+        pick_vid: int | None = None
+        pending_post_import = self._pending_post_import_history_vid
+        if pending_post_import is not None:
+            self._pending_post_import_history_vid = None
+        elif pick_autosave and self.current_path:
+            pick_vid = await asyncio.to_thread(
+                _second_newest_history_autosave_vid_sync,
+                self.current_path.resolve(),
+            )
+
+        if pick_vid is not None:
+            self._select_snapshot_as_candidate(pick_vid)
+            self._capture_compare_baseline_snapshot()
+        else:
+            if self._compare_candidate_source not in (
+                "snapshot",
+                "pdf_original",
+                "docx_original",
+                "ifc_original",
+            ):
+                # No snapshot selected yet; prime left from draft until user picks a version.
+                self._compare_candidate_source = "snapshot"
+                self._compare_editor.value = self.editor.value or ""
+                self._capture_compare_baseline_snapshot()
+            self._rebuild_compare_view()
+
+    async def _load_present_tab_content_async(self, switch_seq: int | None = None) -> bool:
+        """Rebuild Focus compose/margin. Returns False if a tab switch became stale."""
+        self._margin_gen += 1
+        await self._debounced_compose_rebuild(self._margin_gen)
+        if not getattr(self, "_skip_compose_plan_refresh_on_tab", False):
+            await self._refresh_compose_plan_surface_async()
+        if switch_seq is not None and self._is_tab_switch_stale(switch_seq):
+            return False
+        return True
+
+    async def _load_review_tab_content_async(
+        self,
+        *,
+        show_spinner: bool = True,
+        switch_seq: int | None = None,
+    ) -> bool:
+        """Load Review candidate/proposal for the open document. Returns False if switch stale."""
+        if show_spinner:
+            # Tab bar + Review chrome were still on the previous tab until now, so DB/list work looked frozen.
+            self._apply_active_tab_ui_state()
+            self._future_rows_listview.controls.clear()
+            self._future_rows_listview.controls.append(
+                ft.Container(
+                    content=ft.ProgressRing(
+                        width=24, height=24, stroke_width=2, color=config.PRIMARY_COLOR
+                    ),
+                    alignment=ft.Alignment.CENTER,
+                    expand=True,
+                    padding=ft.padding.only(top=48),
+                )
+            )
+            if _ctrl_on_page(self._future_rows_listview):
+                self._future_rows_listview.update()
+            await asyncio.sleep(0)  # yield so the client paints Review + spinner before snapshot IO
+
+        try:
+            if (
+                self.current_path is not None
+                and hasattr(self, "_document_pdf_profile")
+                and self._document_pdf_profile() == "plan"
+                and hasattr(self, "_ensure_plan_pdf_compare_active")
+            ):
+                self._ensure_plan_pdf_compare_active()
+            already_staged = (
+                self._compare_candidate_source == CompareCandidateSource.AI_PREVIEW
+                and self._pending_ai_accept_action_id
+                and self._compare_snapshot_version_id is not None
+            )
+            pdf_import_review = (
+                self._compare_candidate_source == CompareCandidateSource.PDF_ORIGINAL
+            )
+            if not already_staged and not pdf_import_review:
+                target_vid = self._latest_ai_proposal_vid
+                if target_vid is None and self.current_path:
+                    target_vid = await asyncio.to_thread(
+                        _latest_ai_proposal_vid_sync,
+                        self.current_path.resolve(),
+                    )
+                if target_vid is not None:
+                    self._select_proposal_as_review_candidate(target_vid)
+                    self._latest_ai_proposal_vid = target_vid
+                else:
+                    # No proposals: mirror compose into the candidate so rows are editable (equal/replace),
+                    # and set a synthetic action id so Accept / approve-all still write disk + snapshots.
+                    seeded = self.editor.value or ""
+                    self._compare_candidate_source = CompareCandidateSource.AI_PREVIEW
+                    self._compare_editor.value = seeded
+                    self._pending_ai_accept_action_id = REVIEW_MANUAL_CANDIDATE_ACTION_ID
+                    self._compare_snapshot_version_id = None
+                    self._loaded_proposal_sha = content_repo.content_sha256(seeded)
+            if switch_seq is not None and self._is_tab_switch_stale(switch_seq):
+                if show_spinner:
+                    self._discard_future_tab_loading_spinner()
+                return False
+            if hasattr(self, "_ensure_text_review_compare_layout_default"):
+                self._ensure_text_review_compare_layout_default()
+            if hasattr(self, "_dismiss_analyse_review_display"):
+                self._dismiss_analyse_review_display()
+            self._rebuild_future_paragraph_ui()
+            if hasattr(self, "_sync_future_pdf_layers_visibility"):
+                self._sync_future_pdf_layers_visibility()
+            if (
+                self._compare_candidate_source == CompareCandidateSource.PDF_ORIGINAL
+                and hasattr(self, "_is_plan_pdf_compare")
+                and self._is_plan_pdf_compare()
+                and hasattr(self, "_refresh_plan_compare_bar")
+            ):
+                self._refresh_plan_compare_bar()
+        except BaseException as ex:
+            _log.exception("Review tab: failed while loading snapshot or building rows")
+            if show_spinner:
+                self._discard_future_tab_loading_spinner()
+            if hasattr(self, "_future_review_load_failed_ui"):
+                self._future_review_load_failed_ui(ex)
+        return True
+
+    async def _refresh_active_tab_after_document_open_async(self) -> None:
+        """Reload the active workspace tab after open_file loads a new document."""
+        tab = self._main_tab_index
+        if tab == TAB_PRESENT:
+            await self._load_present_tab_content_async()
+        elif tab == TAB_HISTORY:
+            await self._load_history_tab_content_async(
+                reset_newer_side=True,
+                pick_autosave=True,
+            )
+        elif tab == TAB_FUTURE:
+            await self._load_review_tab_content_async(show_spinner=False)
+        self._refresh_compare_tab_candidate_ui()
+        self._apply_compare_candidate_dropdown_tab_chrome()
+        if tab == TAB_HISTORY and hasattr(self, "_refresh_plan_compare_bar"):
+            self._refresh_plan_compare_bar()
+        self._apply_active_tab_ui_state()
+        self._refresh_compare_diff_immediate()
+
     async def _sync_tab_switch_async(self, new_ix: int, switch_seq: int | None = None) -> None:
         if switch_seq is None:
             switch_seq = self._tab_switch_seq
@@ -394,132 +561,27 @@ class MainWorkspaceTabsMixin:
 
         # Entering History (TAB_HISTORY): prefer 2nd-newest history autosave (newest ≈ draft), else rebuild.
         if new_ix == TAB_HISTORY:
-            if prev != TAB_HISTORY:
-                self._compare_newer_version_id = None
-                self._compare_newer_cached_body = ""
-            plan_pdf_history = (
-                self.current_path is not None
-                and hasattr(self, "_document_pdf_profile")
-                and self._document_pdf_profile() == "plan"
-                and hasattr(self, "_ensure_plan_pdf_compare_active")
-                and self._ensure_plan_pdf_compare_active()
+            await self._load_history_tab_content_async(
+                reset_newer_side=True,
+                pick_autosave=True,
             )
-            if plan_pdf_history:
-                self._rebuild_compare_view()
-            else:
-                pick_vid: int | None = None
-                pending_post_import = self._pending_post_import_history_vid
-                if pending_post_import is not None:
-                    self._pending_post_import_history_vid = None
-                elif self.current_path and prev != TAB_HISTORY:
-                    pick_vid = await asyncio.to_thread(
-                        _second_newest_history_autosave_vid_sync,
-                        self.current_path.resolve(),
-                    )
-
-                if pick_vid is not None:
-                    self._select_snapshot_as_candidate(pick_vid)
-                    self._capture_compare_baseline_snapshot()
-                else:
-                    if self._compare_candidate_source not in (
-                        "snapshot",
-                        "pdf_original",
-                        "docx_original",
-                        "ifc_original",
-                    ):
-                        # No snapshot selected yet; prime left from draft until user picks a version.
-                        self._compare_candidate_source = "snapshot"
-                        self._compare_editor.value = self.editor.value or ""
-                        self._capture_compare_baseline_snapshot()
-                    self._rebuild_compare_view()
 
         # Entering Present (TAB_PRESENT)
         elif new_ix == TAB_PRESENT:
-            self._margin_gen += 1
-            await self._debounced_compose_rebuild(self._margin_gen)
-            if not getattr(self, "_skip_compose_plan_refresh_on_tab", False):
-                await self._refresh_compose_plan_surface_async()
-            if self._is_tab_switch_stale(switch_seq):
+            if not await self._load_present_tab_content_async(switch_seq):
                 self._main_tab_index = prev
                 self._apply_active_tab_ui_state()
                 return
 
         # Entering Future (TAB_FUTURE): auto-load the most recent ai_proposal / legacy ai_staged when nothing is staged.
         elif new_ix == TAB_FUTURE:
-            # Tab bar + Review chrome were still on the previous tab until now, so DB/list work looked frozen.
-            self._apply_active_tab_ui_state()
-            self._future_rows_listview.controls.clear()
-            self._future_rows_listview.controls.append(
-                ft.Container(
-                    content=ft.ProgressRing(
-                        width=24, height=24, stroke_width=2, color=config.PRIMARY_COLOR
-                    ),
-                    alignment=ft.Alignment.CENTER,
-                    expand=True,
-                    padding=ft.padding.only(top=48),
-                )
-            )
-            if _ctrl_on_page(self._future_rows_listview):
-                self._future_rows_listview.update()
-            await asyncio.sleep(0)  # yield so the client paints Review + spinner before snapshot IO
-
-            try:
-                if (
-                    self.current_path is not None
-                    and hasattr(self, "_document_pdf_profile")
-                    and self._document_pdf_profile() == "plan"
-                    and hasattr(self, "_ensure_plan_pdf_compare_active")
-                ):
-                    self._ensure_plan_pdf_compare_active()
-                already_staged = (
-                    self._compare_candidate_source == CompareCandidateSource.AI_PREVIEW
-                    and self._pending_ai_accept_action_id
-                    and self._compare_snapshot_version_id is not None
-                )
-                pdf_import_review = (
-                    self._compare_candidate_source == CompareCandidateSource.PDF_ORIGINAL
-                )
-                if not already_staged and not pdf_import_review:
-                    target_vid = self._latest_ai_proposal_vid
-                    if target_vid is None and self.current_path:
-                        target_vid = await asyncio.to_thread(
-                            _latest_ai_proposal_vid_sync,
-                            self.current_path.resolve(),
-                        )
-                    if target_vid is not None:
-                        self._select_proposal_as_review_candidate(target_vid)
-                        self._latest_ai_proposal_vid = target_vid
-                    else:
-                        # No proposals: mirror compose into the candidate so rows are editable (equal/replace),
-                        # and set a synthetic action id so Accept / approve-all still write disk + snapshots.
-                        seeded = self.editor.value or ""
-                        self._compare_candidate_source = CompareCandidateSource.AI_PREVIEW
-                        self._compare_editor.value = seeded
-                        self._pending_ai_accept_action_id = REVIEW_MANUAL_CANDIDATE_ACTION_ID
-                        self._compare_snapshot_version_id = None
-                        self._loaded_proposal_sha = content_repo.content_sha256(seeded)
-                if self._is_tab_switch_stale(switch_seq):
-                    self._discard_future_tab_loading_spinner()
-                    self._main_tab_index = prev
-                    self._apply_active_tab_ui_state()
-                    return
-                if hasattr(self, "_ensure_text_review_compare_layout_default"):
-                    self._ensure_text_review_compare_layout_default()
-                self._rebuild_future_paragraph_ui()
-                if hasattr(self, "_sync_future_pdf_layers_visibility"):
-                    self._sync_future_pdf_layers_visibility()
-                if (
-                    self._compare_candidate_source == CompareCandidateSource.PDF_ORIGINAL
-                    and hasattr(self, "_is_plan_pdf_compare")
-                    and self._is_plan_pdf_compare()
-                    and hasattr(self, "_refresh_plan_compare_bar")
-                ):
-                    self._refresh_plan_compare_bar()
-            except BaseException as ex:
-                _log.exception("Review tab: failed while loading snapshot or building rows")
-                self._discard_future_tab_loading_spinner()
-                if hasattr(self, "_future_review_load_failed_ui"):
-                    self._future_review_load_failed_ui(ex)
+            if not await self._load_review_tab_content_async(
+                show_spinner=True,
+                switch_seq=switch_seq,
+            ):
+                self._main_tab_index = prev
+                self._apply_active_tab_ui_state()
+                return
 
         if self._is_tab_switch_stale(switch_seq):
             self._main_tab_index = prev

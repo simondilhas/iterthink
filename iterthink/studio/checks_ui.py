@@ -1,8 +1,7 @@
-"""Analyse checks, eval cells, and result card overlay for MarkdownStudio."""
+"""Analyse checks, eval cells, and result detail for KI Comments sidebar."""
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from collections import Counter
 from typing import Any
@@ -15,15 +14,17 @@ from iterthink import config
 from iterthink.compare.layout import aligned_compare_pairs
 from iterthink.ai.ollama_util import ollama_error_message
 from iterthink.compare.paragraph_align import compute_hash
+from iterthink.db.session import session_scope
+from iterthink.persistence import paragraph_user_comments
 from iterthink.persistence.content_repo import path_key_for
 from .constants import (
     COMPARE_EVAL_COL_W,
     KI_PILL_TEXT_SIZE,
-    RESULT_CARD_HIDE_DELAY_SEC,
+    KI_TOPIC_COMMENTS,
     TAB_FUTURE,
     TAB_HISTORY,
 )
-from .util import ctrl_on_page as _ctrl_on_page
+from .util import safe_ctrl_mutate as _safe_ctrl_mutate
 
 
 class MarkdownStudioChecksUi:
@@ -46,7 +47,205 @@ class MarkdownStudioChecksUi:
         self._check_results.clear()
         self._check_para_hashes.clear()
         self._active_check_id = None
-        self._hide_all_result_card_overlays()
+        pairs = getattr(self, "_analyse_compare_version_pairs", None)
+        if pairs is not None:
+            pairs.clear()
+        self._refresh_analyse_button_state()
+        if getattr(self, "_compare_eval_hosts", None):
+            self._refresh_all_eval_cells()
+        if hasattr(self, "_rebuild_ki_comments_list"):
+            self._rebuild_ki_comments_list()
+
+    def _compare_pairs_for_checks(self) -> list[tuple[str, str]]:
+        buffers = self._active_compare_buffers()
+        return aligned_compare_pairs(buffers.baseline, buffers.candidate)
+
+    def _analyse_display_bodies(self) -> tuple[str, str]:
+        buffers = self._active_compare_buffers()
+        display = buffers.candidate or ""
+        return display, display
+
+    def _analyse_compare_version_pair_for_ui(self) -> tuple[int | None, int | None]:
+        return (
+            getattr(self, "_review_baseline_version_id", None),
+            getattr(self, "_compare_snapshot_version_id", None),
+        )
+
+    def _load_analyse_compare_pair_from_db(
+        self, check_id: str
+    ) -> tuple[int | None, int | None] | None:
+        with session_scope() as s:
+            vid = self._resolve_impact_version_id(s)
+            if vid is None:
+                return None
+            return paragraph_user_comments.analyse_compare_version_pair_from_stored(
+                s,
+                content_version_id=int(vid),
+                check_id=str(check_id),
+            )
+
+    def _stored_analyse_compare_version_pair(
+        self, check_id: str
+    ) -> tuple[int | None, int | None] | None:
+        pairs = getattr(self, "_analyse_compare_version_pairs", None)
+        if pairs is None:
+            self._analyse_compare_version_pairs = {}
+            pairs = self._analyse_compare_version_pairs
+        if check_id in pairs:
+            return pairs[check_id]
+        loaded = self._load_analyse_compare_pair_from_db(check_id)
+        if loaded is not None:
+            pairs[check_id] = loaded
+        return loaded
+
+    def _analyse_eval_symbols_allowed(self, check_id: str | None) -> bool:
+        if not check_id or self._main_tab_index != TAB_FUTURE:
+            return False
+        if (
+            hasattr(self, "_review_text_single_layout_active")
+            and self._review_text_single_layout_active()
+        ):
+            return False
+        stored = self._stored_analyse_compare_version_pair(str(check_id))
+        if stored is None:
+            return False
+        return stored == self._analyse_compare_version_pair_for_ui()
+
+    def _hydrate_check_results_from_db(self, check_id: str, n: int) -> None:
+        anchor, display = self._analyse_display_bodies()
+        with session_scope() as s:
+            vid = self._resolve_impact_version_id(s)
+            if vid is None:
+                return
+            resolved = paragraph_user_comments.map_analyse_resolved_for_display(
+                s,
+                content_version_id=int(vid),
+                anchor_body=anchor,
+                display_body=display,
+                check_id=check_id,
+            )
+        results = self._check_results.setdefault(check_id, [None] * n)
+        while len(results) < n:
+            results.append(None)
+        for row in resolved:
+            pi = int(row.display_paragraph_index)
+            if 0 <= pi < n and row.payload is not None and results[pi] is None:
+                results[pi] = row.payload
+
+    def _persist_analyse_row(
+        self,
+        check_id: str,
+        cand_idx: int,
+        payload: dict[str, Any],
+    ) -> None:
+        check = checks_mod.get_check(check_id)
+        if check is None:
+            return
+        pairs = self._compare_pairs_for_checks()
+        if not (0 <= cand_idx < len(pairs)):
+            return
+        _old, new = pairs[cand_idx]
+        summary = checks_mod.extract_summary(check, payload) or ""
+        symbol = checks_mod.effective_symbol(check, payload)
+        baseline_id, candidate_id = self._analyse_compare_version_pair_for_ui()
+        stored_payload = {
+            **payload,
+            "_iterthink_compare_version_pair": {
+                "baseline_version_id": baseline_id,
+                "candidate_version_id": candidate_id,
+            },
+        }
+        with session_scope() as s:
+            vid = self._resolve_impact_version_id(s)
+            if vid is None:
+                return
+            paragraph_user_comments.upsert_analyse(
+                s,
+                content_version_id=int(vid),
+                paragraph_index=int(cand_idx),
+                check_id=str(check_id),
+                body=summary,
+                symbol=symbol,
+                payload=stored_payload,
+                candidate_paragraph=new or None,
+                overridden=checks_mod.is_overridden(payload),
+            )
+
+    def _analyse_payload_for_cand_idx(
+        self, check_id: str, cand_idx: int
+    ) -> dict[str, Any] | None:
+        if bool(self._check_running.get(check_id)):
+            results = self._check_results.get(check_id) or []
+            if 0 <= cand_idx < len(results) and isinstance(results[cand_idx], dict):
+                return results[cand_idx]
+        anchor, display = self._analyse_display_bodies()
+        with session_scope() as s:
+            vid = self._resolve_impact_version_id(s)
+            if vid is None:
+                return None
+            return paragraph_user_comments.get_analyse_payload_resolved(
+                s,
+                content_version_id=int(vid),
+                anchor_body=anchor,
+                display_body=display,
+                check_id=str(check_id),
+                paragraph_index=int(cand_idx),
+            )
+
+    def _restore_active_check_from_db(self) -> None:
+        """Pick an analyse check with persisted rows and hydrate eval cells (explicit callers only)."""
+        if getattr(self, "_active_check_id", None) is not None:
+            return
+        if not getattr(self, "current_path", None):
+            return
+        pairs = self._compare_pairs_for_checks()
+        if not pairs:
+            return
+        n = len(pairs)
+        with session_scope() as s:
+            vid = self._resolve_impact_version_id(s)
+            if vid is None:
+                return
+            check_ids = paragraph_user_comments.list_analyse_check_ids_for_version(
+                s, content_version_id=int(vid)
+            )
+        if not check_ids:
+            return
+        id_set = set(check_ids)
+        chosen: str | None = None
+        for c in checks_mod.CHECKS:
+            if c.id in id_set:
+                chosen = c.id
+                break
+        if chosen is None:
+            chosen = str(check_ids[0])
+        self._activate_analyse_check_for_display(chosen)
+
+    def _dismiss_analyse_review_display(self) -> None:
+        """Hide eval-column analyse symbols until pill or comment selection."""
+        self._active_check_id = None
+        self._clear_ki_analyse_focus()
+        self._refresh_analyse_button_state()
+        if getattr(self, "_compare_eval_hosts", None):
+            self._refresh_all_eval_cells()
+
+    def _activate_analyse_check_for_display(self, check_id: str) -> None:
+        """Load persisted analyse rows for the current version and show eval symbols."""
+        pairs = self._compare_pairs_for_checks()
+        if not pairs:
+            return
+        n = len(pairs)
+        self._check_para_hashes = [
+            compute_hash(f"{old}\x1e{new}") for old, new in pairs
+        ]
+        if (cid_results := self._check_results.get(check_id)) is None or len(cid_results) != n:
+            self._check_results[check_id] = [None] * n
+        self._hydrate_check_results_from_db(check_id, n)
+        if check_id not in getattr(self, "_analyse_compare_version_pairs", {}):
+            loaded = self._load_analyse_compare_pair_from_db(check_id)
+            if loaded is not None:
+                self._analyse_compare_version_pairs[check_id] = loaded
+        self._active_check_id = check_id
         self._refresh_analyse_button_state()
         if getattr(self, "_compare_eval_hosts", None):
             self._refresh_all_eval_cells()
@@ -117,15 +316,22 @@ class MarkdownStudioChecksUi:
             spinner = self._analyse_button_progress.get(cid)
             counter = self._analyse_button_count.get(cid)
             if spinner is not None:
-                spinner.visible = running
+                _safe_ctrl_mutate(
+                    spinner,
+                    lambda c, vis=running: setattr(c, "visible", vis),
+                )
             if counter is not None:
                 results = self._check_results.get(cid) or []
                 done = sum(1 for r in results if r is not None)
                 total = max(len(results), len(self._check_para_hashes))
-                counter.value = f"{done}/{total}" if running else ""
-                counter.visible = running and total > 0
+
+                def _apply_counter(c: ft.Control, *, running=running, done=done, total=total) -> None:
+                    c.value = f"{done}/{total}" if running else ""
+                    c.visible = running and total > 0
+
+                _safe_ctrl_mutate(counter, _apply_counter)
             # Keep full filled style on every refresh (partial ButtonStyle → dark M3 fallbacks).
-            btn.style = ft.ButtonStyle(
+            btn_style = ft.ButtonStyle(
                 text_style=ft.TextStyle(size=KI_PILL_TEXT_SIZE, color=config.ON_PRIMARY),
                 bgcolor=config.PRIMARY_COLOR,
                 color=config.ON_PRIMARY,
@@ -138,8 +344,7 @@ class MarkdownStudioChecksUi:
                     else ft.BorderSide(0, ft.Colors.TRANSPARENT)
                 ),
             )
-            if _ctrl_on_page(btn):
-                btn.update()
+            _safe_ctrl_mutate(btn, lambda c, style=btn_style: setattr(c, "style", style))
 
     async def _run_check_async(self, check_id: str) -> None:
         """Activate a check; load cached results, run remaining paragraphs in background."""
@@ -173,7 +378,15 @@ class MarkdownStudioChecksUi:
         ]
         if (cid_results := self._check_results.get(check_id)) is None or len(cid_results) != n:
             self._check_results[check_id] = [None] * n
+        self._hydrate_check_results_from_db(check_id, n)
+        pair = self._analyse_compare_version_pair_for_ui()
+        self._analyse_compare_version_pairs[check_id] = pair
         self._active_check_id = check_id
+        self._refresh_all_eval_cells()
+        hydrated = self._check_results.get(check_id) or []
+        if n > 0 and all(isinstance(r, dict) for r in hydrated):
+            self._refresh_analyse_button_state()
+            return
         # Bump generation so any prior in-flight run for this check gets cancelled.
         self._check_run_gen[check_id] = self._check_run_gen.get(check_id, 0) + 1
         my_gen = self._check_run_gen[check_id]
@@ -192,6 +405,8 @@ class MarkdownStudioChecksUi:
                 return
             if 0 <= idx < len(self._check_results.get(check_id, [])):
                 self._check_results[check_id][idx] = payload
+            if isinstance(payload, dict):
+                self._persist_analyse_row(check_id, idx, payload)
             if self._main_tab_index != TAB_FUTURE:
                 return
             self._refresh_eval_cell(idx)
@@ -217,6 +432,7 @@ class MarkdownStudioChecksUi:
                 self._refresh_analyse_button_state()
                 if self._main_tab_index == TAB_FUTURE:
                     self._refresh_all_eval_cells()
+                self._sync_ki_sidebar_after_analyse_change()
                 if run_ok:
                     results = self._check_results.get(check_id) or []
                     summary = self._build_document_check_summary_text(check, results)
@@ -258,12 +474,16 @@ class MarkdownStudioChecksUi:
             return ft.Container(width=0, height=0)
         if check_id is None:
             return ft.Container(width=18, height=18)
+        if not self._analyse_eval_symbols_allowed(check_id):
+            return ft.Container(width=18, height=18)
         cand_idx = self._eval_cand_idx(idx)
         if cand_idx is None:
             return ft.Container(width=18, height=18)
         check = checks_mod.get_check(check_id)
         results = self._check_results.get(check_id) or []
-        payload = results[cand_idx] if 0 <= cand_idx < len(results) else None
+        payload = self._analyse_payload_for_cand_idx(check_id, cand_idx)
+        if payload is None and 0 <= cand_idx < len(results):
+            payload = results[cand_idx] if isinstance(results[cand_idx], dict) else None
         running = bool(self._check_running.get(check_id))
         if payload is None:
             if running:
@@ -291,7 +511,7 @@ class MarkdownStudioChecksUi:
             if checks_mod.is_overridden(payload)
             else None
         )
-        return ft.Container(
+        symbol_ctrl = ft.Container(
             content=ft.Text(
                 symbol,
                 size=18,
@@ -303,115 +523,93 @@ class MarkdownStudioChecksUi:
             padding=ft.padding.only(top=2),
             border=border,
             border_radius=4,
-            on_hover=lambda e, i=idx: self._on_eval_symbol_hover(e, i),
             on_click=lambda _e, i=idx: self._on_eval_symbol_click(i),
             tooltip=tip,
         )
+        col_children: list[ft.Control] = [symbol_ctrl]
+        return ft.Column(
+            col_children,
+            spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            tight=True,
+        )
 
-    def _refresh_eval_cell(self, idx: int) -> None:
-        if not (0 <= idx < len(self._compare_eval_hosts)):
+    def _ui_idx_for_eval_cand_idx(self, cand_idx: int) -> int:
+        ev_cands = getattr(self, "_future_eval_cand_indices", None)
+        if ev_cands:
+            for ui_idx, ci in enumerate(ev_cands):
+                if ci == cand_idx:
+                    return ui_idx
+        arr = getattr(self, "_future_row_cand_idx", None)
+        if arr:
+            for ui_idx, ci in enumerate(arr):
+                if ci == cand_idx:
+                    return ui_idx
+        return int(cand_idx)
+
+    def _sync_ki_sidebar_after_analyse_change(self) -> None:
+        if hasattr(self, "_ki_comment_thread_items"):
+            items = self._ki_comment_thread_items()
+            if hasattr(self, "_ki_reindex_thread_keys"):
+                self._ki_reindex_thread_keys(items)
+            if hasattr(self, "_ki_thread_items_cache"):
+                self._ki_thread_items_cache = {it.list_key: it for it in items}
+        if int(getattr(self, "_ki_topic_index", -1)) != KI_TOPIC_COMMENTS:
+            if hasattr(self, "_refresh_all_eval_cells"):
+                self._refresh_all_eval_cells()
             return
-        host = self._compare_eval_hosts[idx]
-        host.content = self._build_eval_cell_inner(idx, self._active_check_id)
-        if _ctrl_on_page(host):
-            host.update()
+        if hasattr(self, "_rebuild_ki_comments_list"):
+            self._rebuild_ki_comments_list()
+        elif hasattr(self, "_refresh_all_eval_cells"):
+            self._refresh_all_eval_cells()
+        if hasattr(self, "_sync_ki_detail_for_focus"):
+            self._sync_ki_detail_for_focus()
 
-    def _refresh_all_eval_cells(self) -> None:
-        for i in range(len(self._compare_eval_hosts)):
-            self._refresh_eval_cell(i)
-
-    # ------------------------------------------------------------------
-    # Floating result card
-    # ------------------------------------------------------------------
-
-    def _active_result_card_overlay(self) -> ft.Container:
-        if self._main_tab_index == TAB_FUTURE:
-            return self._future_result_card_overlay
-        return self._result_card_overlay
+    def _clear_ki_analyse_focus(self) -> None:
+        focus = getattr(self, "_ki_comment_focus", None)
+        if focus and focus[0] == "analyse":
+            self._ki_comment_focus = None
+            if hasattr(self, "_sync_ki_detail_for_focus"):
+                self._sync_ki_detail_for_focus()
+            if hasattr(self, "_sync_ki_comments_detail_visibility"):
+                self._sync_ki_comments_detail_visibility()
+            if hasattr(self, "_rebuild_ki_comments_list"):
+                self._rebuild_ki_comments_list()
 
     def _hide_all_result_card_overlays(self) -> None:
-        self._result_card_visible_for = None
-        self._result_card_pinned_ui_idx = None
-        self._result_card_hide_gen += 1
-        for ov in (self._result_card_overlay, self._future_result_card_overlay):
-            ov.visible = False
-            if _ctrl_on_page(ov):
-                ov.update()
-
-    def _on_eval_symbol_hover(self, e: ft.ControlEvent, idx: int) -> None:
-        if str(e.data).lower() == "true":
-            self._show_result_card(idx)
-        elif getattr(self, "_result_card_pinned_ui_idx", None) != idx:
-            self._schedule_hide_result_card()
+        """Legacy no-op; Analyse detail lives in the KI Comments sidebar."""
 
     def _on_eval_symbol_click(self, ui_idx: int) -> None:
-        self._result_card_pinned_ui_idx = ui_idx
-        self._show_result_card(ui_idx)
-
-    def _on_result_card_hover(self, e: ft.ControlEvent) -> None:
-        if str(e.data).lower() == "true":
-            self._result_card_hide_gen += 1  # cancel pending hide
-        elif getattr(self, "_result_card_pinned_ui_idx", None) is None:
-            self._schedule_hide_result_card()
-
-    def _show_result_card(self, idx: int) -> None:
-        if self._main_tab_index != TAB_FUTURE:
-            return
-        cid = self._active_check_id
-        if cid is None:
-            return
-        check = checks_mod.get_check(cid)
-        if check is None:
-            return
-        cand_idx = self._eval_cand_idx(idx)
+        cand_idx = self._eval_cand_idx(ui_idx)
         if cand_idx is None:
             return
-        results = self._check_results.get(cid) or []
-        if not (0 <= cand_idx < len(results)):
+        cid = self._active_check_id
+        if not cid or not self._analyse_eval_symbols_allowed(cid):
             return
-        payload = results[cand_idx]
-        if payload is None:
-            return
-        self._result_card_hide_gen += 1  # cancel pending hide
-        active = self._active_result_card_overlay()
-        other = (
-            self._future_result_card_overlay
-            if active is self._result_card_overlay
-            else self._result_card_overlay
-        )
-        if other.visible:
-            other.visible = False
-            if _ctrl_on_page(other):
-                other.update()
-        # Position vertically: estimate row position by index * row pitch.
-        row_pitch = 88.0  # pragmatic estimate; ListView spacing=0 + padding=2.
-        top = max(4.0, idx * row_pitch + 4.0)
-        active.top = top
-        active.content = self._build_result_card(check, payload, cand_idx, ui_idx=idx)
-        active.visible = True
-        self._result_card_visible_for = (cid, idx)
-        if _ctrl_on_page(active):
-            active.update()
+        self.page.run_task(self._open_ki_analyse_card_async, int(cand_idx), str(cid))
 
-    def _schedule_hide_result_card(self) -> None:
-        if getattr(self, "_result_card_pinned_ui_idx", None) is not None:
-            return
-        self._result_card_hide_gen += 1
-        gen = self._result_card_hide_gen
-        self.page.run_task(self._hide_result_card_after_delay, gen)
+    def _eval_cell_host(self, comp_idx: int) -> ft.Container | None:
+        if getattr(self, "_future_virtual_active", False):
+            return getattr(self, "_future_virtual_eval_hosts", {}).get(comp_idx)
+        hosts = getattr(self, "_compare_eval_hosts", None) or []
+        if 0 <= comp_idx < len(hosts):
+            return hosts[comp_idx]
+        return None
 
-    async def _hide_result_card_after_delay(self, gen: int) -> None:
-        await asyncio.sleep(RESULT_CARD_HIDE_DELAY_SEC)
-        if gen != self._result_card_hide_gen:
+    def _refresh_eval_cell(self, idx: int) -> None:
+        host = self._eval_cell_host(idx)
+        if host is None:
             return
-        if getattr(self, "_result_card_pinned_ui_idx", None) is not None:
-            return
-        self._result_card_visible_for = None
-        for ov in (self._result_card_overlay, self._future_result_card_overlay):
-            if ov.visible:
-                ov.visible = False
-                if _ctrl_on_page(ov):
-                    ov.update()
+        inner = self._build_eval_cell_inner(idx, self._active_check_id)
+        _safe_ctrl_mutate(host, lambda c, content=inner: setattr(c, "content", content))
+
+    def _refresh_all_eval_cells(self) -> None:
+        if getattr(self, "_future_virtual_active", False):
+            indices = sorted(getattr(self, "_future_virtual_eval_hosts", {}).keys())
+        else:
+            indices = range(len(getattr(self, "_compare_eval_hosts", []) or []))
+        for i in indices:
+            self._refresh_eval_cell(i)
 
     def _check_pair_for_ui_idx(self, ui_idx: int) -> tuple[int, str, str] | None:
         cand_idx = self._eval_cand_idx(ui_idx)
@@ -432,10 +630,7 @@ class MarkdownStudioChecksUi:
         if pair is None:
             return None
         cand_idx, _old, _new = pair
-        results = self._check_results.get(cid) or []
-        if not (0 <= cand_idx < len(results)):
-            return None
-        payload = results[cand_idx]
+        payload = self._analyse_payload_for_cand_idx(cid, cand_idx)
         if not isinstance(payload, dict):
             return None
         return cid, payload, cand_idx
@@ -480,9 +675,9 @@ class MarkdownStudioChecksUi:
         results = self._check_results.setdefault(cid, [])
         if cand_idx < len(results):
             results[cand_idx] = patched
+        self._persist_analyse_row(cid, cand_idx, patched)
         self._refresh_eval_cell(ui_idx)
-        if self._result_card_visible_for == (cid, ui_idx):
-            self._show_result_card(ui_idx)
+        self._sync_ki_sidebar_after_analyse_change()
 
     async def _clear_check_override_async(self, ui_idx: int) -> None:
         got = self._check_payload_for_ui_idx(ui_idx)
@@ -508,9 +703,9 @@ class MarkdownStudioChecksUi:
         results = self._check_results.setdefault(cid, [])
         if cand_idx < len(results):
             results[cand_idx] = cleared
+        self._persist_analyse_row(cid, cand_idx, cleared)
         self._refresh_eval_cell(ui_idx)
-        if self._result_card_visible_for == (cid, ui_idx):
-            self._show_result_card(ui_idx)
+        self._sync_ki_sidebar_after_analyse_change()
 
     def _build_check_symbol_badge(
         self,
@@ -623,8 +818,7 @@ class MarkdownStudioChecksUi:
         primary_rec = checks_mod.effective_primary_recommendation(payload)
 
         def _close_card(_e: ft.ControlEvent) -> None:
-            self._result_card_pinned_ui_idx = None
-            self._hide_all_result_card_overlays()
+            self._clear_ki_analyse_focus()
 
         header = ft.Row(
             [

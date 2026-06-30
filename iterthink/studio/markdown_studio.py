@@ -6,12 +6,14 @@ import asyncio
 import re
 from datetime import date
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import flet as ft
 from ollama import AsyncClient
 
 from iterthink import config
+from iterthink import checks as checks_mod
+from iterthink import impact_checks
 from iterthink.ai import passphrase_keyring
 from iterthink.persistence import (
     impact_annotations,
@@ -46,7 +48,6 @@ from .constants import (
     KI_TAB_PAGE_PAD_V_PX,
     KI_TOPIC_COMMENTS,
     KI_TIER_TAB_ICON_PX,
-    RESULT_CARD_W as _RESULT_CARD_W,
     SIDEBAR_EXPANDED_WIDTH_PX,
     SIDEBAR_INNER_BORDER_RADIUS_PX,
     SIDEBAR_INNER_PAD_PX,
@@ -64,7 +65,14 @@ from .history import (
     build_history_snapshot_dropdown_options,
     history_compare_snapshots,
 )
-from .ki_comments import paragraph_comment_label, plan_comment_list_label, sorted_comment_rows
+from .ki_comments import (
+    analyse_list_key,
+    impact_list_key,
+    paragraph_comment_label,
+    plan_comment_list_label,
+    user_comment_list_key,
+)
+from .ki_comments_sidebar import KiCommentsSidebarMixin
 from .ki_sidebar import KI_TOPIC_STRIP_DISCUSS_ICON, MarkdownStudioKiSidebar
 from .llm_backend import MarkdownStudioLlmBackend, build_llm_tier_tabs, sync_privacy_shield_icon
 from .token_cost_ui import build_token_cost_label
@@ -80,6 +88,7 @@ from .util import (
     normalize_cloud_vendor,
     normalize_ki_tier,
     normalize_save_file_path,
+    safe_ctrl_mutate as _safe_ctrl_mutate,
 )
 # Autosave: disk idle vs snapshot idle (see constants). Compare: left = latest Compose; right = draft / snapshot / AI.
 # Layout literals: iterthink.studio.constants
@@ -132,6 +141,7 @@ class MarkdownStudio(
     MarkdownStudioSearchResults,
     MarkdownStudioExplorer,
     MarkdownStudioImpactMixin,
+    KiCommentsSidebarMixin,
     MarkdownStudioChecksUi,
     MarkdownStudioAssetCompare,   # PDF / DOCX compare rendering
     MarkdownStudioIfcFormat,      # IFC compare rendering (placeholder)
@@ -255,6 +265,11 @@ class MarkdownStudio(
         self._future_row_stable_texts: list[str] = []
         self._compare_rebuild_pending = False
         self._compare_reset_virtual_state()
+        self._future_compare_scroll_offset = 0.0
+        self._future_body_stack_height = 640.0
+        self._future_comp_display_index: dict[int, int] = {}
+        self._future_comp_row_hosts: dict[int, ft.Control] = {}
+        self._future_row_measured_heights: dict[int, float] = {}
         # Compose text frozen when opening Compare (draft); left column diffs vs this, not live editor drift.
         self._compare_baseline_snapshot: str = ""
         self._compose_tab_inline_rename_active: bool = False
@@ -695,30 +710,10 @@ class MarkdownStudio(
             on_size_change=self._on_compare_plan_pdf_layer_size,
         )
         self._compare_editor_holder = ft.Container(content=self._compare_editor, visible=False, height=0)
-        def _make_result_card_overlay() -> ft.Container:
-            return ft.Container(
-                visible=False,
-                width=_RESULT_CARD_W,
-                bgcolor=ui_theme.result_card_bg(),
-                border=ft.border.all(1, ui_theme.result_card_border()),
-                border_radius=10,
-                padding=ft.padding.all(12),
-                shadow=ui_theme.soft_elevation_shadow(),
-                top=0,
-                left=4,
-                on_hover=self._on_result_card_hover,
-                content=ft.Column([], tight=True, spacing=6),
-            )
-
-        # Floating card on hover over Analyse eval symbol (History / compare paragraph stack).
-        self._result_card_overlay = _make_result_card_overlay()
-        # Same chrome for Future tab stack (a control cannot have two parents).
-        self._future_result_card_overlay = _make_result_card_overlay()
         self._compare_body_stack = ft.Stack(
             controls=[
                 self._compare_paragraph_layer,
                 self._compare_pdf_layer,
-                self._result_card_overlay,
             ],
             expand=True,
         )
@@ -844,9 +839,9 @@ class MarkdownStudio(
             controls=[
                 self._future_paragraph_layer,
                 self._future_pdf_layer,
-                self._future_result_card_overlay,
             ],
             expand=True,
+            on_size_change=self._on_future_body_stack_resize,
         )
         self._pill_row_impact = ft.Row(spacing=4, wrap=True, run_spacing=4)
         self._impact_summary_cache: str = ""
@@ -902,39 +897,24 @@ class MarkdownStudio(
             spacing=0,
             padding=ft.padding.symmetric(horizontal=4, vertical=2),
         )
-        self._impact_result_card_overlay = ft.Container(
-            visible=False,
-            right=0,
-            top=4,
-            width=320,
-            padding=ft.padding.all(10),
-            bgcolor=config.SURFACE,
-            border=ft.border.all(1, config.OUTLINE),
-            border_radius=10,
-            shadow=ft.BoxShadow(blur_radius=8, color=ft.Colors.with_opacity(0.18, ft.Colors.BLACK)),
-            content=ft.Column([], spacing=4, tight=True, scroll=ft.ScrollMode.AUTO),
-            on_hover=lambda e: self._on_impact_result_card_hover(e),
+        self._impact_status_row = ft.Container(
+            content=self._impact_status_text,
+            alignment=ft.Alignment.CENTER,
+            padding=ft.padding.symmetric(vertical=6),
         )
         self._review_impact_panel = ft.Container(
             expand=False,
             visible=False,
             content=ft.Column(
                 [
-                    ft.Container(
-                        content=self._impact_status_text,
-                        alignment=ft.Alignment.CENTER,
-                        padding=ft.padding.symmetric(vertical=6),
-                    ),
+                    self._impact_status_row,
                     ft.Container(
                         expand=True,
                         alignment=ft.Alignment.TOP_CENTER,
                         content=ft.Container(
                             width=680,
                             expand=True,
-                            content=ft.Stack(
-                                [self._impact_para_listview, self._impact_result_card_overlay],
-                                expand=True,
-                            ),
+                            content=self._impact_para_listview,
                         ),
                     ),
                 ],
@@ -1422,8 +1402,10 @@ class MarkdownStudio(
         self.right_open: bool = True
         self._ki_topic_index: int = 1
         self._comment_para_index: int | None = None
+        self._ki_comment_focus: tuple[str, int] | tuple[str, int, str] | None = None
         self._comment_edit_mode: bool = False
         self._ki_comment_pick_mode: bool = False
+        self._init_ki_comments_sidebar_fields()
         self._chat_api_messages: list[dict[str, str]] = []
         self._init_sidebar_llm_control()
 
@@ -1438,12 +1420,10 @@ class MarkdownStudio(
         self._check_run_gen: dict[str, int] = {}
         # Aligned-pair fingerprints (baseline+candidate per row) for in-memory invalidation.
         self._check_para_hashes: list[str] = []
+        # Baseline+candidate version ids when each check was last run (eval symbol gating).
+        self._analyse_compare_version_pairs: dict[str, tuple[int | None, int | None]] = {}
         # Eval-cell host containers, parallel to _compare_right_fields, for O(1) refresh.
         self._compare_eval_hosts: list[ft.Container] = []
-        # Floating result-card overlay state.
-        self._result_card_visible_for: tuple[str, int] | None = None
-        self._result_card_pinned_ui_idx: int | None = None
-        self._result_card_hide_gen: int = 0
 
         self._pill_row_discuss = ft.Row(spacing=4, wrap=True, run_spacing=4)
         self._pill_row_change = ft.Row(spacing=4, wrap=True, run_spacing=4)
@@ -1451,11 +1431,25 @@ class MarkdownStudio(
         self._analyse_buttons: dict[str, ft.FilledButton] = {}
         self._analyse_button_progress: dict[str, ft.ProgressRing] = {}
         self._analyse_button_count: dict[str, ft.Text] = {}
+        self._analyse_single_mode_placeholder = ft.Text(
+            "Coming Soon. Impact check against project context.",
+            size=13,
+            color=config.ON_SURFACE_VARIANT,
+            text_align=ft.TextAlign.CENTER,
+            visible=False,
+        )
+        self._impact_single_mode_placeholder = ft.Text(
+            "Check against Project context will come soon.",
+            size=13,
+            color=config.ON_SURFACE_VARIANT,
+            text_align=ft.TextAlign.CENTER,
+            visible=False,
+        )
         self._impact_analyse_section = ft.Container(
             visible=False,
             padding=ft.padding.only(top=4),
             content=ft.Column(
-                [self._pill_row_impact],
+                [self._pill_row_impact, self._impact_single_mode_placeholder],
                 spacing=2,
                 tight=True,
             ),
@@ -1556,6 +1550,22 @@ class MarkdownStudio(
         self._comment_edit_btn.on_click = _on_comment_edit
         self._comment_save_btn.on_click = lambda _e: self.page.run_task(self._save_ki_paragraph_comment_async)
         self._comment_cancel_btn.on_click = _on_comment_cancel
+        self._ki_user_detail_column = ft.Column(
+            [
+                self._comment_header_row,
+                self._comment_body_display,
+                self._comment_body_edit,
+                ft.Row(
+                    [self._comment_save_btn, self._comment_cancel_btn],
+                    spacing=8,
+                    tight=True,
+                ),
+            ],
+            spacing=8,
+            tight=True,
+        )
+        self._ki_impact_detail_host = ft.Container(visible=False)
+        self._ki_analyse_detail_host = ft.Container(visible=False)
         self._ki_comment_add_btn = ft.IconButton(
             ft.Icons.ADD,
             icon_size=18,
@@ -1589,14 +1599,9 @@ class MarkdownStudio(
         )
         self._ki_comments_detail = ft.Column(
             [
-                self._comment_header_row,
-                self._comment_body_display,
-                self._comment_body_edit,
-                ft.Row(
-                    [self._comment_save_btn, self._comment_cancel_btn],
-                    spacing=8,
-                    tight=True,
-                ),
+                self._ki_user_detail_column,
+                self._ki_impact_detail_host,
+                self._ki_analyse_detail_host,
             ],
             spacing=8,
             tight=True,
@@ -1641,7 +1646,11 @@ class MarkdownStudio(
                     vertical=KI_TAB_PAGE_PAD_V_PX,
                 ),
                 content=ft.Column(
-                    [self._pill_row_analyse, self._impact_analyse_section],
+                    [
+                        self._pill_row_analyse,
+                        self._analyse_single_mode_placeholder,
+                        self._impact_analyse_section,
+                    ],
                     spacing=0,
                     tight=True,
                 ),
@@ -2022,17 +2031,6 @@ class MarkdownStudio(
         self._apply_compare_candidate_dropdown_tab_chrome()
         self._ki_topic_top_bar.bgcolor = config.SIDEBAR_SURFACE
         self._ki_sidebar_well.bgcolor = config.SURFACE
-        _sh = ui_theme.soft_elevation_shadow()
-        self._result_card_overlay.shadow = _sh
-        self._future_result_card_overlay.shadow = _sh
-        self._result_card_overlay.bgcolor = ui_theme.result_card_bg()
-        self._result_card_overlay.border = ft.border.all(1, ui_theme.result_card_border())
-        self._future_result_card_overlay.bgcolor = ui_theme.result_card_bg()
-        self._future_result_card_overlay.border = ft.border.all(1, ui_theme.result_card_border())
-        if _ctrl_on_page(self._result_card_overlay):
-            self._result_card_overlay.update()
-        if _ctrl_on_page(self._future_result_card_overlay):
-            self._future_result_card_overlay.update()
         if getattr(self, "_analyse_buttons", None):
             self._refresh_analyse_button_state()
         if self._header_shell:
@@ -2328,8 +2326,102 @@ class MarkdownStudio(
             )
         return (ann.body or "").strip() if ann is not None else ""
 
+    def _ki_comment_focus_key(self) -> str | None:
+        focus = getattr(self, "_ki_comment_focus", None)
+        if not focus:
+            return None
+        if focus[0] == "user":
+            return user_comment_list_key(int(focus[1]))
+        if focus[0] == "impact":
+            return impact_list_key(int(focus[1]), str(focus[2]))
+        if focus[0] == "analyse":
+            return analyse_list_key(int(focus[1]), str(focus[2]))
+        return None
+
+    def _ki_analyse_version_line_for_current_ui(self) -> str:
+        if hasattr(self, "_impact_version_line_for_current_ui"):
+            return self._impact_version_line_for_current_ui()
+        return ""
+
+    def _sync_ki_detail_for_focus(self) -> None:
+        user_col = getattr(self, "_ki_user_detail_column", None)
+        impact_host = getattr(self, "_ki_impact_detail_host", None)
+        analyse_host = getattr(self, "_ki_analyse_detail_host", None)
+        focus = getattr(self, "_ki_comment_focus", None)
+        if user_col is None or impact_host is None or analyse_host is None:
+            return
+        if focus and focus[0] == "impact":
+            user_col.visible = False
+            impact_host.visible = True
+            analyse_host.visible = False
+            pi = int(focus[1])
+            prompt_id = str(focus[2])
+            snap = self._load_impact_snap(pi)
+            if snap is not None and str(snap.get("prompt_id", "")) == prompt_id:
+                impact_host.content = self._build_impact_result_card(pi, snap)
+            else:
+                impact_host.content = ft.Text(
+                    "Impact result is no longer available.",
+                    size=12,
+                    color=config.ON_SURFACE_VARIANT,
+                )
+            if _ctrl_on_page(user_col):
+                user_col.update()
+            if _ctrl_on_page(impact_host):
+                impact_host.update()
+            if _ctrl_on_page(analyse_host):
+                analyse_host.update()
+            return
+        if focus and focus[0] == "analyse":
+            user_col.visible = False
+            impact_host.visible = False
+            analyse_host.visible = True
+            cand_idx = int(focus[1])
+            check_id = str(focus[2])
+            check = checks_mod.get_check(check_id)
+            payload = None
+            if hasattr(self, "_analyse_payload_for_cand_idx"):
+                payload = self._analyse_payload_for_cand_idx(check_id, cand_idx)
+            if payload is None:
+                results = self._check_results.get(check_id) or []
+                payload = (
+                    results[cand_idx]
+                    if 0 <= cand_idx < len(results) and isinstance(results[cand_idx], dict)
+                    else None
+                )
+            ui_idx = self._ui_idx_for_eval_cand_idx(cand_idx)
+            if check is not None and payload is not None:
+                analyse_host.content = self._build_result_card(
+                    check, payload, cand_idx, ui_idx=ui_idx
+                )
+            else:
+                analyse_host.content = ft.Text(
+                    "Analyse result is no longer available.",
+                    size=12,
+                    color=config.ON_SURFACE_VARIANT,
+                )
+            if _ctrl_on_page(user_col):
+                user_col.update()
+            if _ctrl_on_page(impact_host):
+                impact_host.update()
+            if _ctrl_on_page(analyse_host):
+                analyse_host.update()
+            return
+        user_col.visible = True
+        impact_host.visible = False
+        analyse_host.visible = False
+        if _ctrl_on_page(impact_host):
+            impact_host.update()
+        if _ctrl_on_page(analyse_host):
+            analyse_host.update()
+        if focus and focus[0] == "user":
+            self._comment_para_index = int(focus[1])
+            self._sync_ki_comment_tab_from_store()
+        if _ctrl_on_page(user_col):
+            user_col.update()
+
     def _sync_ki_comments_detail_visibility(self) -> None:
-        show = self._comment_para_index is not None
+        show = getattr(self, "_ki_comment_focus", None) is not None
         detail = getattr(self, "_ki_comments_detail", None)
         if detail is not None and detail.visible != show:
             detail.visible = show
@@ -2363,14 +2455,16 @@ class MarkdownStudio(
 
         for text in texts:
             key = id(text)
-            if active:
-                if key not in saved_sel:
-                    saved_sel[key] = bool(getattr(text, "selectable", True))
-                text.selectable = False
-            elif key in saved_sel:
-                text.selectable = saved_sel.pop(key)
-            if _ctrl_on_page(text):
-                text.update()
+
+            def _apply_text_selectable(c: ft.Control, *, key=key) -> None:
+                if active:
+                    if key not in saved_sel:
+                        saved_sel[key] = bool(getattr(c, "selectable", True))
+                    c.selectable = False
+                elif key in saved_sel:
+                    c.selectable = saved_sel.pop(key)
+
+            _safe_ctrl_mutate(text, _apply_text_selectable)
 
         if not active:
             self._ki_comment_pick_saved_selectable = saved_sel
@@ -2381,14 +2475,16 @@ class MarkdownStudio(
         fields: list[ft.TextField] = getattr(self, "_compare_right_fields", None) or []
         for field in fields:
             key = id(field)
-            if active:
-                if key not in saved_ro:
-                    saved_ro[key] = bool(getattr(field, "read_only", False))
-                field.read_only = True
-            elif key in saved_ro:
-                field.read_only = saved_ro.pop(key)
-            if _ctrl_on_page(field):
-                field.update()
+
+            def _apply_field_read_only(c: ft.Control, *, key=key) -> None:
+                if active:
+                    if key not in saved_ro:
+                        saved_ro[key] = bool(getattr(c, "read_only", False))
+                    c.read_only = True
+                elif key in saved_ro:
+                    c.read_only = saved_ro.pop(key)
+
+            _safe_ctrl_mutate(field, _apply_field_read_only)
 
         if not active:
             self._ki_comment_pick_saved_read_only = saved_ro
@@ -2397,10 +2493,9 @@ class MarkdownStudio(
 
         cursor = ft.MouseCursor.CLICK if active else ft.MouseCursor.BASIC
         for cell in getattr(self, "_future_comment_pick_cells", None) or []:
-            if getattr(cell, "mouse_cursor", None) != cursor:
-                cell.mouse_cursor = cursor
-                if _ctrl_on_page(cell):
-                    cell.update()
+            if getattr(cell, "mouse_cursor", None) == cursor:
+                continue
+            _safe_ctrl_mutate(cell, lambda c, cur=cursor: setattr(c, "mouse_cursor", cur))
 
     def _sync_ki_comment_add_btn(self) -> None:
         btn = getattr(self, "_ki_comment_add_btn", None)
@@ -2465,80 +2560,6 @@ class MarkdownStudio(
         self._set_ki_comment_pick_mode(False)
         await self._open_ki_comments_for_paragraph_async(int(paragraph_index), True)
 
-    def _rebuild_ki_comments_list(self) -> None:
-        lv = getattr(self, "_ki_comments_list", None)
-        if lv is None:
-            return
-        selected = self._comment_para_index
-        if self._ki_comments_use_plan_labels():
-            rows = self._ki_plan_comment_rows_for_list()
-        else:
-            rows = sorted_comment_rows(self._ki_comments_for_current_version())
-        controls: list[ft.Control] = []
-        if not rows:
-            controls.append(
-                ft.Text(
-                    "No comments in this note yet.",
-                    size=12,
-                    color=config.ON_SURFACE_VARIANT,
-                    italic=True,
-                )
-            )
-        else:
-            plan_labels = self._ki_comments_use_plan_labels()
-            for pi, body in rows:
-                highlight = selected is not None and int(pi) == int(selected)
-                if plan_labels:
-                    meta = self._ki_plan_comment_meta(int(pi))
-                    title = (
-                        plan_comment_list_label(meta[0], meta[1])
-                        if meta is not None
-                        else paragraph_comment_label(pi)
-                    )
-                else:
-                    title = paragraph_comment_label(pi)
-                card = ft.Container(
-                    key=f"ki_comment_{pi}",
-                    content=ft.Column(
-                        [
-                            ft.Text(
-                                title,
-                                size=13,
-                                weight=ft.FontWeight.W_600,
-                                color=config.ON_SURFACE,
-                            ),
-                            ft.Text(
-                                body or "(no comment text)",
-                                size=12,
-                                selectable=True,
-                                color=config.ON_SURFACE,
-                                italic=not bool(body),
-                            ),
-                        ],
-                        tight=True,
-                        spacing=4,
-                    ),
-                    padding=ft.padding.symmetric(horizontal=8, vertical=6),
-                    border_radius=8,
-                    bgcolor=(
-                        ft.Colors.with_opacity(0.12, config.HIGHLIGHT)
-                        if highlight
-                        else None
-                    ),
-                    border=(
-                        ft.border.all(1, config.HIGHLIGHT)
-                        if highlight
-                        else ft.border.all(1, ui_theme.outline_muted(alpha=0.25))
-                    ),
-                    on_click=lambda _e, p=int(pi): self.page.run_task(
-                        self._open_ki_comments_for_paragraph_async, p, False
-                    ),
-                )
-                controls.append(card)
-        lv.controls = controls
-        if _ctrl_on_page(lv):
-            lv.update()
-
     def _sync_ki_comments_tab_layout(self) -> None:
         comments_active = int(getattr(self, "_ki_topic_index", -1)) == KI_TOPIC_COMMENTS
         chat = getattr(self, "_right_chat_section", None)
@@ -2602,21 +2623,59 @@ class MarkdownStudio(
         if not self._comment_edit_mode:
             self._comment_body_edit.value = body
 
-    async def _scroll_ki_comments_to_paragraph(self, paragraph_index: int) -> None:
+    async def _scroll_ki_comments_to_key(self, list_key: str) -> None:
         lv = getattr(self, "_ki_comments_list", None)
         if lv is None or not _ctrl_on_page(lv):
             return
-        rows = sorted_comment_rows(self._ki_comments_for_current_version())
-        idx = next((i for i, (p, _) in enumerate(rows) if int(p) == int(paragraph_index)), None)
-        if idx is None:
-            return
-        key = f"ki_comment_{paragraph_index}"
         try:
-            await lv.scroll_to(scroll_key=key, duration=150)
-            return
+            await lv.scroll_to(scroll_key=list_key, duration=150)
         except (TypeError, AttributeError):
             pass
-        await lv.scroll_to(offset=float(idx) * 72.0, duration=150)
+
+    async def _scroll_ki_comments_to_paragraph(self, paragraph_index: int) -> None:
+        await self._scroll_ki_comments_to_key(user_comment_list_key(int(paragraph_index)))
+
+    async def _open_ki_impact_card_async(self, paragraph_index: int, prompt_id: str) -> None:
+        if not self.current_path:
+            self._snack("Open a note first.")
+            return
+        if not self.right_open:
+            self.toggle_right()
+        await self._scroll_workspace_to_paragraph_async(int(paragraph_index))
+        self._ki_comment_focus = ("impact", int(paragraph_index), str(prompt_id))
+        self._comment_para_index = int(paragraph_index)
+        self._comment_edit_mode = False
+        self._set_ki_topic(KI_TOPIC_COMMENTS)
+        self._ki_comments_detail.visible = True
+        self._sync_ki_detail_for_focus()
+        self._rebuild_ki_comments_list()
+        await self._scroll_ki_comments_to_key(
+            impact_list_key(int(paragraph_index), str(prompt_id))
+        )
+        self._sync_ki_comments_detail_visibility()
+        if _ctrl_on_page(self._ki_comments_detail):
+            self._ki_comments_detail.update()
+
+    async def _open_ki_analyse_card_async(self, paragraph_index: int, check_id: str) -> None:
+        if not self.current_path:
+            self._snack("Open a note first.")
+            return
+        if not self.right_open:
+            self.toggle_right()
+        await self._scroll_workspace_to_paragraph_async(int(paragraph_index))
+        self._ki_comment_focus = ("analyse", int(paragraph_index), str(check_id))
+        self._comment_para_index = int(paragraph_index)
+        self._comment_edit_mode = False
+        self._set_ki_topic(KI_TOPIC_COMMENTS)
+        self._ki_comments_detail.visible = True
+        self._sync_ki_detail_for_focus()
+        self._rebuild_ki_comments_list()
+        await self._scroll_ki_comments_to_key(
+            analyse_list_key(int(paragraph_index), str(check_id))
+        )
+        self._sync_ki_comments_detail_visibility()
+        if _ctrl_on_page(self._ki_comments_detail):
+            self._ki_comments_detail.update()
 
     async def _open_ki_comments_for_paragraph_async(
         self, paragraph_index: int | None, start_in_edit: bool = True
@@ -2629,11 +2688,12 @@ class MarkdownStudio(
             return
         if not self.right_open:
             self.toggle_right()
+        self._ki_comment_focus = ("user", int(paragraph_index))
         self._comment_para_index = int(paragraph_index)
         self._comment_edit_mode = bool(start_in_edit)
         self._set_ki_topic(KI_TOPIC_COMMENTS)
         self._ki_comments_detail.visible = True
-        self._sync_ki_comment_tab_from_store()
+        self._sync_ki_detail_for_focus()
         if start_in_edit:
             self._comment_body_edit.value = self._comment_body_display.value or ""
             self._comment_body_edit.visible = True
@@ -2649,6 +2709,7 @@ class MarkdownStudio(
             self._comment_cancel_btn.visible = False
         self._rebuild_ki_comments_list()
         await self._scroll_ki_comments_to_paragraph(int(paragraph_index))
+        self._sync_ki_comments_detail_visibility()
         if self._ki_comments_use_plan_labels() and hasattr(
             self, "_focus_review_plan_region"
         ):
@@ -2785,21 +2846,54 @@ class MarkdownStudio(
             self._snack("Saved.")
 
     def _export_paragraph_comments_for_doc(
-        self, md_path: Path, *, content_version_id: int | None = None
+        self,
+        md_path: Path,
+        *,
+        markdown_src: str,
+        content_version_id: int | None = None,
+        comment_scope: str = "user",
     ) -> dict[int, str]:
+        scope = (comment_scope or "user").strip().lower()
+        if scope == "none":
+            return {}
         try:
             with session_scope() as s:
                 doc = content_repo.get_document_by_resolved_path(s, md_path)
                 if doc is None:
                     return {}
-                vid = content_version_id
-                if vid is None:
-                    snaps = content_repo.list_snapshots(s, md_path)
-                    if not snaps:
-                        return {}
-                    vid = snaps[0].version_id
-                return impact_annotations.paragraph_comments_map_for_export(
-                    s, content_version_id=int(vid)
+                snaps = content_repo.list_snapshots(s, md_path)
+                if not snaps:
+                    return {}
+                anchor_vid = int(snaps[0].version_id)
+                vid = int(content_version_id) if content_version_id is not None else anchor_vid
+
+                user_map: dict[int, str] = {}
+                if scope in ("user", "both"):
+                    if content_version_id is None:
+                        anchor_body = content_repo.load_version_body(s, anchor_vid)
+                        user_map = paragraph_user_comments.map_resolved_for_display(
+                            s,
+                            content_version_id=anchor_vid,
+                            anchor_body=anchor_body,
+                            display_body=markdown_src,
+                        )
+                    else:
+                        user_map = paragraph_user_comments.map_for_version(
+                            s, content_version_id=vid
+                        )
+
+                impact_map: dict[int, str] = {}
+                if scope in ("impact", "both"):
+                    impact_map = impact_annotations.paragraph_comments_map_for_export(
+                        s, content_version_id=vid
+                    )
+
+                if scope == "user":
+                    return user_map
+                if scope == "impact":
+                    return impact_map
+                return paragraph_user_comments.merge_with_impact_for_export(
+                    impact_map, user_map
                 )
         except BaseException:
             return {}
@@ -2837,6 +2931,7 @@ class MarkdownStudio(
         template_path: Path,
         author: str,
         content_version_id: int | None = None,
+        comment_scope: str = "user",
     ) -> None:
         """Pick save path and write DOCX (call after the template dialog is closed)."""
         self.ensure_file_pickers()
@@ -2881,7 +2976,10 @@ class MarkdownStudio(
             comment_author=author,
         )
         para_comments = self._export_paragraph_comments_for_doc(
-            md_path, content_version_id=content_version_id
+            md_path,
+            markdown_src=markdown_src,
+            content_version_id=content_version_id,
+            comment_scope=comment_scope,
         )
 
         def _run() -> None:
@@ -2965,6 +3063,24 @@ class MarkdownStudio(
             dense=True,
         )
 
+        _COMMENT_SCOPE_OPTIONS = (
+            ("none", "None"),
+            ("user", "My comments"),
+            ("impact", "Impact AI"),
+            ("both", "Both"),
+        )
+        saved_scope = (
+            store_db.settings_get(self._db, store_db.SETTINGS_EXPORT_COMMENT_SCOPE) or "user"
+        ).strip().lower()
+        if saved_scope not in {k for k, _ in _COMMENT_SCOPE_OPTIONS}:
+            saved_scope = "user"
+        comments_dd = ft.Dropdown(
+            label="Comments",
+            options=[ft.dropdown.Option(key=k, text=t) for k, t in _COMMENT_SCOPE_OPTIONS],
+            value=saved_scope,
+            dense=True,
+        )
+
         async def on_export(_e: ft.ControlEvent | None = None) -> None:
             try:
                 sel = (tpl_dd.value or "").strip()
@@ -2972,6 +3088,8 @@ class MarkdownStudio(
                 if tpl is None or not tpl.is_file():
                     self._snack("Choose a template.")
                     return
+                scope = (comments_dd.value or "user").strip().lower()
+                store_db.settings_set(self._db, store_db.SETTINGS_EXPORT_COMMENT_SCOPE, scope)
                 version_key = version_dd.value if version_dd is not None else None
                 try:
                     markdown_src, content_version_id = self._resolve_export_markdown(
@@ -2989,6 +3107,7 @@ class MarkdownStudio(
                     template_path=tpl,
                     author=author,
                     content_version_id=content_version_id,
+                    comment_scope=scope,
                 )
             except BaseException as ex:
                 self._snack(f"Export failed: {ex}")
@@ -3015,6 +3134,7 @@ class MarkdownStudio(
                                 ft.Text(md_path.name, size=12, font_family="monospace"),
                                 *([version_dd] if version_dd is not None else []),
                                 tpl_dd,
+                                comments_dd,
                             ],
                             tight=True,
                             spacing=8,

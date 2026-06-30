@@ -41,6 +41,11 @@ class ParagraphUserComment(Base):
     plan_norm_y: Mapped[float | None] = mapped_column(nullable=True)
     geometry_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    details_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    overridden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    override_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
     updated_at: Mapped[float] = mapped_column(nullable=False, default=lambda: time.time())
@@ -57,6 +62,16 @@ class ParagraphUserComment(Base):
             "ix_paragraph_user_comments_plan_ver",
             "content_version_id",
             "annotation_kind",
+        ),
+        Index(
+            "uq_paragraph_user_comment_analyse",
+            "content_version_id",
+            "paragraph_index",
+            "source_id",
+            unique=True,
+            sqlite_where=text(
+                "annotation_kind = 'analyse' AND source_id IS NOT NULL"
+            ),
         ),
     )
 

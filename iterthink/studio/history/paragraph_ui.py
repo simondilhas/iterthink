@@ -37,6 +37,11 @@ from ..constants import (
 )
 from ..util import ctrl_on_page as _ctrl_on_page
 from .candidate_state import CompareCandidateSource
+from .compare_virtual import (
+    build_future_comp_display_index,
+    compare_build_row_heights,
+    compare_row_scroll_ft_key,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -54,7 +59,7 @@ class _HistoryParagraphUIMixin:
         right_cell: ft.Container,
     ) -> list[ft.Control]:
         if text_single:
-            return [right_cell]
+            return [eval_ctrl, right_cell]
         return [eval_ctrl, left_cell, pill_host, right_cell]
 
     def _review_comment_presence_icon(
@@ -316,13 +321,39 @@ class _HistoryParagraphUIMixin:
                 self._compare_eval_hosts.append(eval_host)
                 self._compare_row_pill_hosts.append(pill_host)
                 self._compare_right_fields.append(right_carrier)
+                cand_pi = row.new_paragraph_index
+                row_key = (
+                    compare_row_scroll_ft_key(int(cand_pi))
+                    if cand_pi is not None and int(cand_pi) >= 0
+                    else None
+                )
                 row_ctrl = ft.Row(
                     [eval_host, left_cell, pill_host, right_cell],
                     spacing=4,
                     vertical_alignment=ft.CrossAxisAlignment.START,
+                    key=row_key,
                 )
                 self._compare_rows_listview.controls.append(row_ctrl)
                 comp_idx += 1
+
+        self._compare_virtual_active = False
+        self._compare_virtual_display_rows = display_rows
+        self._compare_virtual_comp_by_display = []
+        hist_comp = 0
+        for row in display_rows:
+            if row.row_type in ("ghost_moved", "removed"):
+                self._compare_virtual_comp_by_display.append(None)
+            else:
+                self._compare_virtual_comp_by_display.append(hist_comp)
+                hist_comp += 1
+        self._compare_virtual_row_heights = compare_build_row_heights(
+            display_rows,
+            content_width=self._compare_virtual_text_column_width(
+                self._compare_rows_listview,
+                show_actions=False,
+            ),
+            text_single=False,
+        )
 
         if _ctrl_on_page(self._compare_rows_listview):
             self._compare_rows_listview.update()
@@ -454,6 +485,9 @@ class _HistoryParagraphUIMixin:
 
         n_comp = len(comparison_rows)
 
+        self._future_virtual_active = False
+        self._future_comp_row_hosts.clear()
+        self._future_row_measured_heights.clear()
         self._future_rows_listview.controls.clear()
         self._future_left_diff_texts.clear()
         self._future_comment_pick_cells: list[ft.Container] = []
@@ -524,6 +558,11 @@ class _HistoryParagraphUIMixin:
         comp_idx = 0
         field_idx = 0
         text_single = hasattr(self, "_review_text_single_mode") and self._review_text_single_mode()
+        self._future_comp_display_index = build_future_comp_display_index(
+            display_rows,
+            text_single=text_single,
+        )
+        self._future_compare_scroll_offset = 0.0
 
         for row in display_rows:
             is_ghost = row.row_type in ("ghost_moved", "removed")
@@ -735,6 +774,11 @@ class _HistoryParagraphUIMixin:
             self._future_eval_cand_indices.append(row.new_paragraph_index)
             comp_idx += 1
 
+            row_key = (
+                compare_row_scroll_ft_key(int(cand_pi))
+                if cand_pi is not None and int(cand_pi) >= 0
+                else None
+            )
             row_cells = self._future_review_visible_row_cells(
                 text_single=text_single,
                 eval_ctrl=eval_host,
@@ -758,20 +802,36 @@ class _HistoryParagraphUIMixin:
                 )
                 row_wrap = ft.Container(
                     content=row_inner,
+                    key=row_key,
                     on_hover=lambda e, w=hover_wrap_future, ph=presence_host: self._on_compare_row_hover(
                         e, w, ph
                     ),
                 )
+                self._register_future_result_card_row(comp_idx, row_wrap)
                 self._future_rows_listview.controls.append(row_wrap)
             else:
-                self._future_rows_listview.controls.append(
-                    ft.Row(
-                        row_cells,
-                        spacing=4,
-                        vertical_alignment=ft.CrossAxisAlignment.START,
-                    )
+                row_control = ft.Row(
+                    row_cells,
+                    spacing=4,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                    key=row_key,
                 )
+                self._register_future_result_card_row(comp_idx, row_control)
+                self._future_rows_listview.controls.append(row_control)
             field_idx += 1
+
+        self._future_virtual_display_rows = display_rows
+        self._future_virtual_row_heights = compare_build_row_heights(
+            display_rows,
+            content_width=self._compare_virtual_text_column_width(
+                self._future_rows_listview,
+                show_actions=show_actions,
+            ),
+            text_single=text_single,
+        )
+
+        if hasattr(self, "_sync_ki_comment_pick_affordance"):
+            self._sync_ki_comment_pick_affordance()
 
         if _ctrl_on_page(self._future_rows_listview):
             self._future_rows_listview.update()
@@ -802,9 +862,6 @@ class _HistoryParagraphUIMixin:
 
         if self._active_check_id is not None:
             self._refresh_all_eval_cells()
-
-        if hasattr(self, "_sync_ki_comment_pick_affordance"):
-            self._sync_ki_comment_pick_affordance()
 
         self._refresh_compare_bulk_buttons()
         if self._compare_candidate_source != CompareCandidateSource.SPELL_PREVIEW:

@@ -234,6 +234,23 @@ def unchanged_paragraph_payload(check: Check) -> dict[str, Any]:
     return out
 
 
+def is_unchanged_paragraph_payload(check: Check, payload: dict | None) -> bool:
+    """True when paragraph-level analyse was skipped (hash match / neutral result)."""
+    if not isinstance(payload, dict):
+        return False
+    summary = extract_summary(check, payload).lower()
+    if "unchanged" in summary or "skipped" in summary:
+        return True
+    sym = extract_symbol(check, payload)
+    if sym == _neutral_symbol_for_check(check) and not extract_recommendations(payload):
+        return True
+    neutral_syms = frozenset({"~", "●", "?"})
+    if sym in neutral_syms and not extract_recommendations(payload):
+        if not summary or "neutral" in summary or "editorial" in summary:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Payload extractors (defensive against missing keys / legacy field names).
 # ---------------------------------------------------------------------------

@@ -912,3 +912,100 @@ def test_pair_zoom_maps_same_plan_norm_to_different_viewports(tmp_path: Path) ->
     )
     assert left_fy != pytest.approx(right_fy, abs=1.0)
     assert left_fx == pytest.approx(right_fx, abs=1.0)
+
+
+def test_mirror_pan_same_delta_when_layouts_match(tmp_path: Path) -> None:
+    p = tmp_path / "p0.png"
+    _write_test_png(p, 1000, 1000)
+    page = MagicMock()
+    page.run_task = MagicMock()
+    pair = plan_picture_viewer.build_plan_side_by_side_pair([p], [p], page=page)
+    pair.left.sync_viewport(400.0, 520.0)
+    pair.right.sync_viewport(400.0, 520.0)
+    track = plan_picture_viewer._IvTransformTrack()
+    dx_dst, dy_dst = plan_picture_viewer._mirror_pan_delta(
+        pair.left, pair.right, 3.0, -2.0, track, track
+    )
+    assert dx_dst == pytest.approx(3.0)
+    assert dy_dst == pytest.approx(-2.0)
+
+
+def test_mirror_pan_scales_vertical_delta_for_different_heights(tmp_path: Path) -> None:
+    left_p = tmp_path / "left.png"
+    right_p = tmp_path / "right.png"
+    _write_test_png(left_p, 800, 600)
+    _write_test_png(right_p, 800, 400)
+    page = MagicMock()
+    page.run_task = MagicMock()
+    pair = plan_picture_viewer.build_plan_side_by_side_pair(
+        [left_p], [right_p], page=page
+    )
+    pair.left.sync_viewport(400.0, 300.0)
+    pair.right.sync_viewport(400.0, 300.0)
+    track = plan_picture_viewer._IvTransformTrack()
+    img_h_s = plan_picture_viewer._image_layout_size(pair.left)[1]
+    img_h_d = plan_picture_viewer._image_layout_size(pair.right)[1]
+    _, dy_dst = plan_picture_viewer._mirror_pan_delta(
+        pair.left, pair.right, 0.0, 10.0, track, track
+    )
+    assert dy_dst == pytest.approx(10.0 * (img_h_d / img_h_s), abs=0.01)
+    assert dy_dst != pytest.approx(10.0)
+
+
+def test_pair_controller_gesture_pan_mirror_scales_for_different_heights(
+    tmp_path: Path,
+) -> None:
+    left_p = tmp_path / "left.png"
+    right_p = tmp_path / "right.png"
+    _write_test_png(left_p, 800, 600)
+    _write_test_png(right_p, 800, 400)
+    page = MagicMock()
+    tasks: list = []
+
+    def run_task(coro, *args):
+        tasks.append((coro, args))
+
+    page.run_task = run_task
+    pair = plan_picture_viewer.build_plan_side_by_side_pair(
+        [left_p], [right_p], page=page
+    )
+    pair.left.sync_viewport(400.0, 300.0)
+    pair.right.sync_viewport(400.0, 300.0)
+    pair.left._viewer.pan = AsyncMock()
+    pair.right._viewer.pan = AsyncMock()
+    pair.right._viewer.zoom = AsyncMock()
+    img_h_s = plan_picture_viewer._image_layout_size(pair.left)[1]
+    img_h_d = plan_picture_viewer._image_layout_size(pair.right)[1]
+    pair.left._viewer.on_interaction_start(None)
+    tasks.clear()
+    ev = MagicMock()
+    ev.focal_point_delta = ft.Offset(0, 10)
+    ev.local_focal_point = ft.Offset(200, 150)
+    ev.scale = 1.0
+    pair.left._viewer.on_interaction_update(ev)
+    assert len(tasks) == 1
+    coro, args = tasks[0]
+    asyncio.run(coro(*args))
+    pair.right._viewer.pan.assert_awaited_once()
+    pan_args = pair.right._viewer.pan.await_args[0]
+    assert pan_args[0] == pytest.approx(0.0, abs=0.01)
+    assert pan_args[1] == pytest.approx(10.0 * (img_h_d / img_h_s), abs=0.01)
+
+
+def test_plan_norm_tracked_respects_contain_letterbox(tmp_path: Path) -> None:
+    p = tmp_path / "p.png"
+    _write_test_png(p, 800, 400)
+    pane = plan_picture_viewer.build_plan_focus_viewer([p])
+    pane.sync_viewport(400.0, 300.0)
+    pane.fit_to_viewport()
+    rect = plan_picture_viewer._focus_image_layout_rect(pane)
+    assert rect.x0 > 0.0 or rect.y0 > 0.0
+    track = plan_picture_viewer._IvTransformTrack(scale=1.5, tx=4.0, ty=-6.0)
+    fx = rect.x0 + rect.w * 0.4
+    fy = rect.y0 + rect.h * 0.6
+    u, v = plan_picture_viewer._plan_norm_from_viewport_tracked(pane, fx, fy, track)
+    rx, ry = plan_picture_viewer._viewport_from_plan_norm_tracked(pane, u, v, track)
+    assert rx == pytest.approx(fx, abs=1.0)
+    assert ry == pytest.approx(fy, abs=1.0)
+    assert pane._page_layout_host.left == pytest.approx(rect.x0, abs=0.5)
+    assert pane._page_layout_host.top == pytest.approx(rect.y0, abs=0.5)

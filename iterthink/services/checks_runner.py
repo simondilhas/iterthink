@@ -57,6 +57,40 @@ def load_cached(
             return None
 
 
+def list_cached_check_ids(document_path_key: str) -> list[str]:
+    """Distinct check ids with at least one cached row for this document path key."""
+    pk = (document_path_key or "").strip()
+    if not pk:
+        return []
+    with session_scope() as sess:
+        rows = (
+            sess.query(ParagraphAnalysis.check_id)
+            .filter(ParagraphAnalysis.document_path_key == pk)
+            .distinct()
+            .all()
+        )
+    return sorted({str(r[0]) for r in rows})
+
+
+def load_cached_for_pairs(
+    check_id: str,
+    pairs: list[tuple[str, str]],
+    model: str,
+    *,
+    document_path_key: str = "",
+) -> list[dict | None]:
+    """Align cached paragraph results with *pairs* (no LLM)."""
+    out: list[dict | None] = []
+    for old, new in pairs:
+        if not (old or "").strip() and not (new or "").strip():
+            out.append(None)
+            continue
+        out.append(
+            load_cached(check_id, old, new, model, document_path_key=document_path_key)
+        )
+    return out
+
+
 def save_result(
     check_id: str,
     old: str,
